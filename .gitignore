@@ -33,18 +33,19 @@ game.env
 # .idea/
 # .vscode/
 
-# Built CLI binaries (go build ./cmd/<name>)
-wotlogin
-wotping
-wotproxy
-wotunpack
-wotreplay
-wotverify
-wotevents
-wotflood
-wotkeydump
-wotwgcs
-wotdpapi
+# Built CLI binaries (go build ./cmd/<name>); root-anchored so they
+# never match the cmd/<name>/ source directories.
+/wotlogin
+/wotping
+/wotproxy
+/wotunpack
+/wotreplay
+/wotverify
+/wotevents
+/wotflood
+/wotkeydump
+/wotwgcs
+/wotdpapi
 
 # Scratch / local artifacts (never commit)
 zz-*

@@ -22,7 +22,6 @@ package login
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -218,105 +217,16 @@ func parseChallenge(rest []byte) (Challenge, error) {
 	return c, nil
 }
 
-// Login runs the full LoginApp handshake on a connected UDP socket:
-// login, PoW challenge, login retry, success. Without valid credentials
-// the server still issues the challenge (proving our framing), then
-// rejects; with valid ones it returns the BaseApp Session.
+// Login runs the full LoginApp handshake on conn (see Client.Login).
+// Kept as a thin wrapper so existing callers compile unchanged; new
+// code should build a Client (which additionally owns the continuing
+// reply-ID sequence for stage-1).
 func Login(ctx context.Context, conn *net.UDPConn, cfg Config, pubkey *RSAPublicKey, solve SolveFunc) (Session, error) {
-	var zero Session
-	peer, err := cfg.Peer()
+	c, err := NewClient(cfg, pubkey, solve, conn)
 	if err != nil {
-		return zero, fmt.Errorf("wotlogin: resolve: %w", err)
+		return Session{}, err
 	}
-	nextReplyID := cfg.FirstReplyID
-	// Attempt 1: bare login (no challenge data yet).
-	params, err := encodeLogOnParams(cfg, pubkey)
-	if err != nil {
-		return zero, err
-	}
-	var ver = [4]byte{verSub, verPatch, verMinor, verMajor}
-	prefix, err := randomPrefix()
-	if err != nil {
-		return zero, err
-	}
-	msg := buildLoginMsg(nextReplyID, ver, params, cfg.Encrypted)
-	cfg.debugf("login#1: %d B (replyID %d)", 6+len(msg)+2+cfg.FooterPad, nextReplyID)
-	pkt := buildLoginPacket(prefix, cfg.FooterPad, msg)
-	data, err := roundTripRetry(ctx, conn, peer, pkt, cfg)
-	if err != nil {
-		return zero, err
-	}
-	replyID, status, rest, err := parseReply(data)
-	if err != nil {
-		return zero, err
-	}
-	if status == statusLoggedOn {
-		return decryptSession(rest, cfg.BlockKey)
-	}
-	if status != statusChallengeIssued || replyID != nextReplyID {
-		return zero, fmt.Errorf("wotlogin: unexpected login reply status=%d", status)
-	}
-	ch, err := parseChallenge(rest)
-	if err != nil {
-		return zero, err
-	}
-	if ch.Type != challengeCuckoo {
-		return zero, fmt.Errorf("wotlogin: unsupported challenge %q", ch.Type)
-	}
-	// Solve and retry with the response prepended.
-	started := time.Now()
-	key, nonces, err := solve(ctx, ch)
-	if err != nil {
-		return zero, fmt.Errorf("wotlogin: pow(type=%s prefix=%q maxNonce=%d): %w", ch.Type, ch.Prefix, ch.MaxNonce, err)
-	}
-	if !cuckoo.NewCuckoo([]byte(key)).Verify(toU64(nonces), ch.MaxNonce) {
-		return zero, fmt.Errorf("wotlogin: own PoW solution fails verify (key=%q)", key)
-	}
-	cfg.debugf("pow solved: key=%q nonces=%d in %v", key, len(nonces), time.Since(started))
-	nextReplyID++
-	params2, err := encodeLogOnParams(cfg, pubkey)
-	if err != nil {
-		return zero, err
-	}
-	respMsg := buildChallengeResponseMsg(time.Since(started), key, nonces)
-	msg2 := buildLoginMsg(nextReplyID, ver, params2, cfg.Encrypted)
-	prefix2, err := randomPrefix()
-	if err != nil {
-		return zero, err
-	}
-	pkt2 := buildLoginPacket(prefix2, cfg.FooterPad, respMsg, msg2)
-	cfg.debugf("login#2: %d B (replyID %d)", len(pkt2), nextReplyID)
-	data2, err := roundTripRetry(ctx, conn, peer, pkt2, cfg)
-	if err != nil {
-		return zero, err
-	}
-	replyID2, status2, rest2, err := parseReply(data2)
-	if err != nil {
-		return zero, err
-	}
-	cfg.debugf("login reply#2: replyID %d (want %d) status=%d", replyID2, nextReplyID, status2)
-	cfg.debugf("fp key=%x blob=%x datagram=%x", sha256.Sum256([]byte(cfg.BlockKey)),
-		sha256.Sum256(rest2), sha256.Sum256(data2))
-	_ = replyID2
-	if status2 != statusLoggedOn {
-		msg := ""
-		if len(rest2) > 0 {
-			if s, _, serr := consumePackedString(rest2); serr == nil {
-				msg = s
-			}
-		}
-		return zero, fmt.Errorf("wotlogin: rejected status=%d msg=%q", status2, msg)
-	}
-	cfg.debugf("login reply body: %d B", len(rest2))
-	if s, err := decryptSession(rest2, cfg.BlockKey); err == nil {
-		return s, nil
-	}
-	// TEMPORARY probe: entity digest (16 B, known to both sides) as key.
-	if s, err := decryptSession(rest2, string(cfg.Digest[:])); err == nil {
-		cfg.debugf("session decrypted with digest key")
-		return s, nil
-	}
-	return decryptSession(rest2, cfg.BlockKey)
+	return c.Login(ctx)
 }
 
 // encodeLogOnParams returns the login parameters body: RSA-OAEP ciphertext
@@ -379,7 +289,7 @@ func NoncesHex(nonces []uint32) string {
 // roundTripRetry resends a login request like RetryingRequest until any
 // reply arrives or attempts run out (LoginAttempts, default 10 per the
 // exe LoginRequestProtocol ctor sub_140E68910).
-func roundTripRetry(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, pkt []byte, cfg Config) ([]byte, error) {
+func roundTripRetry(ctx context.Context, conn Transport, peer *net.UDPAddr, pkt []byte, cfg Config) ([]byte, error) {
 	attempts := cfg.LoginAttempts
 	if attempts < 1 {
 		attempts = 1
@@ -405,7 +315,7 @@ func roundTripRetry(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, p
 // roundTrip sends one datagram and waits for one reply datagram. The
 // socket is unconnected (see main.go: one fd for LoginApp and BaseApp,
 // like the real client), so the peer is addressed explicitly per packet.
-func roundTrip(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, pkt []byte, timeout time.Duration) ([]byte, error) {
+func roundTrip(ctx context.Context, conn Transport, peer *net.UDPAddr, pkt []byte, timeout time.Duration) ([]byte, error) {
 	if _, err := conn.WriteToUDP(pkt, peer); err != nil {
 		return nil, fmt.Errorf("wotlogin: send: %w", err)
 	}

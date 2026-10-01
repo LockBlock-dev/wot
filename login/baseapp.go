@@ -52,7 +52,7 @@ func buildBaseAppLoginMsg(replyID, sessionKey uint32, numAttempts uint8, mtu int
 // reported (counts only).
 // roundTripBoth sends on conn but reads the first reply from EITHER conn
 // or loginConn (see BaseAppLogin doc). Returns which socket answered.
-func roundTripBoth(ctx context.Context, conn, loginConn *net.UDPConn, peer *net.UDPAddr, pkt []byte, timeout time.Duration) ([]byte, bool, error) {
+func roundTripBoth(ctx context.Context, conn, loginConn Transport, peer *net.UDPAddr, pkt []byte, timeout time.Duration) ([]byte, bool, error) {
 	if _, err := conn.WriteToUDP(pkt, peer); err != nil {
 		return nil, false, fmt.Errorf("wotlogin: send: %w", err)
 	}
@@ -67,7 +67,7 @@ func roundTripBoth(ctx context.Context, conn, loginConn *net.UDPConn, peer *net.
 		if time.Now().After(deadline) {
 			return nil, false, fmt.Errorf("wotlogin: no reply: timeout")
 		}
-		for _, c := range []*net.UDPConn{conn, loginConn} {
+		for _, c := range []Transport{conn, loginConn} {
 			if c == nil {
 				continue
 			}
@@ -89,7 +89,7 @@ func roundTripBoth(ctx context.Context, conn, loginConn *net.UDPConn, peer *net.
 // resends its 22B ~2Hz while the manager stays silent (logins.pcapng).
 const resendAfter = 500 * time.Millisecond
 
-func BaseAppLogin(ctx context.Context, conn *net.UDPConn, loginConn *net.UDPConn, peer *net.UDPAddr, s Session, blockKey string, mtu int, replyID uint32) error {
+func BaseAppLogin(ctx context.Context, conn Transport, loginConn Transport, peer *net.UDPAddr, s Session, blockKey string, mtu int, replyID uint32) error {
 	// ID(1)+ReplyID(4)+Off(2)+args(7)=14; +4 prefix +2 flags +2 footer = 22.
 	// Prefix is minted fresh per attempt (random per packet, §3).
 	buildPkt := func(rid uint32, numAttempts uint8) ([]byte, error) {
@@ -629,7 +629,7 @@ func smallRID() uint32 {
 }
 
 // stageRead returns the next datagram from any of conns before end.
-func stageRead(conns []*net.UDPConn, end time.Time, buf []byte) []byte {
+func stageRead(conns []Transport, end time.Time, buf []byte) []byte {
 	for time.Now().Before(end) {
 		for _, c := range conns {
 			if c == nil {
@@ -654,7 +654,7 @@ func stageRead(conns []*net.UDPConn, end time.Time, buf []byte) []byte {
 // resent while the server stays silent (exe timer wheel keeps reliable
 // in flight via sendNextRequest; exact interval unresolved, 1 s here),
 // same reliable seq 0 with the latest cumul. Sizes only in errors.
-func stageOneScript(ctx context.Context, sendConn, readConn *net.UDPConn, peer *net.UDPAddr, newKey uint32, blockKey string, outcomes []string) (*net.UDPAddr, error) {
+func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net.UDPAddr, newKey uint32, blockKey string, outcomes []string) (*net.UDPAddr, error) {
 	got := append([]string{}, outcomes...)
 	send := func(tag string, pkt []byte) error {
 		select {
@@ -716,7 +716,7 @@ func stageOneScript(ctx context.Context, sendConn, readConn *net.UDPConn, peer *
 		if wait.After(end) {
 			wait = end
 		}
-		data := stageRead([]*net.UDPConn{sendConn, readConn}, wait, buf)
+		data := stageRead([]Transport{sendConn, readConn}, wait, buf)
 		if data == nil {
 			if !time.Now().Before(end) {
 				return nil, fmt.Errorf("wotlogin: stage-1 no redirect (%v)", got)
@@ -793,7 +793,7 @@ func stageOneScript(ctx context.Context, sendConn, readConn *net.UDPConn, peer *
 // on the first lobby-flood datagram (≥1000B: the flood runs 1252B;
 // stage-2 info is 76B, heartbeats top out at 68B — the old ≥76B gate
 // accepted the pre-flood info as success).
-func stageTwo(ctx context.Context, conn *net.UDPConn, target *net.UDPAddr, key1 uint32, blockKey string, mtu int) error {
+func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uint32, blockKey string, mtu int) error {
 	// TEMPORARY burst-loss experiment (revert after): the lobby bundle
 	// lands ~150×1252B in ~6 ms; a small rcvbuf drops fragments the
 	// server then considers acked (cumul overshoot) and never resends.
@@ -888,7 +888,7 @@ func stageTwo(ctx context.Context, conn *net.UDPConn, target *net.UDPAddr, key1 
 			}
 			return fmt.Errorf("wotlogin: stage-2 stalled (%v)", got)
 		}
-		data := stageRead([]*net.UDPConn{conn}, time.Now().Add(500*time.Millisecond), buf)
+		data := stageRead([]Transport{conn}, time.Now().Add(500*time.Millisecond), buf)
 		if data == nil {
 			// Resend the handshake (fresh rid AND att++, like the game)
 			// only while the server never spoke.

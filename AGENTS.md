@@ -10,8 +10,12 @@ live.env -baseapp`. Protocol truth lives in `../NETWORK_PROTOCOL.md`
 
 ## Layout
 
-- `login/` — framing builders/parsers + `Login()` flow (pure where
-  possible; `SolveFunc` injected for tests): `login.go`, `logonparams.go`
+- `login/` — framing builders/parsers + `Client.Login()` flow (pure where
+  possible; `SolveFunc` injected for tests; `Transport` interface over
+  UDP so the handshake is script-testable offline): `client.go`
+  (`Client`: config/key/solver/socket/peer/reply-ID sequence),
+  `transport.go` (`Transport`, satisfied by `*net.UDPConn`),
+  `login.go` (legacy `Login()` wrapper + builders), `logonparams.go`
   (packed strings, pwd_token, RSA chunking: partSize 213, 256 B blocks
   out), `crypto.go` (Blowfish-ECB+XOR-chain decrypt + verified encrypt,
   `decryptSession`), `rewrite.go` (`RewriteLoginReply`: length-preserving
