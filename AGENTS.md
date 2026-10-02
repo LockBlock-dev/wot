@@ -851,7 +851,21 @@ speak back. Established Sep 20:
 1. Event-mode entities in vendored `testdata/wotdefs` (`white_tiger`,
    `fun_random`, `last_stand`, `comp7*`, `frontline`, `story_mode`,
    battle-royale `Loot`/`Mine`/`ThunderStrike`/`Placement`/
-   `InfluenceZone`): data archaeology, zero live needs.
+   `InfluenceZone`): data archaeology, zero live needs — DONE Oct-02:
+   White Tiger = PvE boss raid (generator capture w/ miniboss block,
+   boss health/shield/plasma/hyperion, respawns, teleporters,
+   lightning, impact zones); Last Stand = wave survival (~30 buff
+   components: nitro/invis/ignite/drain/stun/laser/souls, beams,
+   phases, bot spawns); story = abilities (arty channel, recon,
+   distraction, detection delay) + lootables; frontline = reserves/
+   upgrades, stealth radar, regen kits, respawn; comp7 = ranked 7v7
+   (role skills, vehicle ban voting + timers, prestige, inspire);
+   BR entities = Loot (pickup ranges, PYTHON content, pickedUpBy),
+   Mines (owner, deployTime, detonated), ThunderStrike (attacker,
+   delay), Placement drops (team, yaw), InfluenceZone (DoT),
+   Radio (`<Volatile><position/>` — bare engine builtin, confirming
+   the task-1 model drop); Radar readiness + cone vision angles.
+   FallTanks = evacuation state.
 2. Client ballistics (`Avatar.pyc` `__projectileMover`, gravity/drag):
    static shell-flight model from shipped bytecode — DONE Oct-02:
    integrator is engine `BigWorld.PyBallisticsSimulator` (pure
