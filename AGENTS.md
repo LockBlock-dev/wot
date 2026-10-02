@@ -869,7 +869,12 @@ speak back. Established Sep 20:
    NOT a standard session-md5 transform (needs `-middle-out`
    blob pairs live); `token` = 8 digits; 12-key login census pinned.
 6. Battle-results answers (852B `CMD_REQ_BATTLE_RESULTS` replies):
-   straight pickle decode from captures on hand.
+   straight pickle decode from captures on hand — DONE Oct-02 (see
+   `NETWORK_PROTOCOL.md` §17): full cache mechanism from shipped
+   `.pyc`, 0x45 `(smallint, id)` shape on 2 live answers, stream
+   found inside the 852's own train (63-list + roster pairs),
+   1500/1501 linkage + direct-base A1 flavor; open: status→resultID
+   mapping, 5472 semantics, full 63-field schema.
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
    `eu2-mitmproxy-flows`) — DONE Oct-02 (see `NETWORK_PROTOCOL.md`
    §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,
