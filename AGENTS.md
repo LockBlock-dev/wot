@@ -868,4 +868,16 @@ speak back. Established Sep 20:
    straight pickle decode from captures on hand.
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
    `eu2-mitmproxy-flows`).
-8. FairPlay surface (observed-data-shapes only — dual-use adjacent).
+8. FairPlay surface (observed-data-shapes only — dual-use adjacent) —
+   DONE Oct-02: 6 def components (5 empty shells; Account
+   `setupArena(config: PYTHON)` opaque cell-side; Avatar
+   `showWarningMessage(STRING)` server→client push with no Python
+   consumer = engine-side dialog); battle-results carry
+   `fairplayViolations` (warnings/penalties/violations masks [+
+   percent]) → BAN/PENALTY/WARNING ladder (+banDuration, AFK flag);
+   catalog `scripts/item_defs/fairplay_violation_types.xml` (11
+   violations × DESERTER/SUICIDE/AFK, masks 1<<xml-order, per-mode
+   + NO_WARNING variants; BR excluded from arena bonuses);
+   `ArenaFairplayKafkaLoggingComponent` is server-side only (zero
+   kafka strings client-side or in exe). No detection internals
+   touched.
