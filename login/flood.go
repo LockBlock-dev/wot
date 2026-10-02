@@ -35,6 +35,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"github.com/LockBlock-dev/wot/lobby"
 	"io"
 	"os"
 	"strings"
@@ -118,7 +119,7 @@ type FloodStats struct {
 // gap-filled from the missing indices in arrival order.
 // Continuation payloads append raw. Per-datagram trailers follow
 // flags bit5 (0x20): 12B when set, else 8B.
-func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, blockKey string) (frags []Frag, offsets []int, st FloodStats, err error) {
+func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, blockKey string) (frags []lobby.Frag, offsets []int, st FloodStats, err error) {
 	type group struct {
 		seq     uint32
 		head    []byte // trailer-stripped head payload (header incl.)
@@ -241,7 +242,7 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 	for _, g := range groups {
 		offsets = append(offsets, off)
 		off += len(g.payload)
-		frags = append(frags, Frag{Seq: g.seq, NN: g.ddNN, Payload: g.payload})
+		frags = append(frags, lobby.Frag{Seq: g.seq, NN: g.ddNN, Payload: g.payload})
 	}
 	st.FragBytes = off
 	return frags, offsets, st, nil
@@ -294,7 +295,7 @@ func BulkStream(app []byte) []byte {
 // isolation with FRESH decoder state (memo/stack never span chunks).
 // Chunk 1 is a TRUNCATED shared-memo pickle (no STOP in-chunk), so the
 // harvest is prefix SALVAGE — closed containers before the first noise
-// site via DecodePrefix — not STOP docs. Counts are schema key NAMES
+// site via lobby.DecodePrefix — not STOP docs. Counts are schema key NAMES
 // only.
 type ChunkHarvest struct {
 	NN       int
@@ -314,13 +315,13 @@ type ChunkHarvest struct {
 // to ~0 keys by design, which is the verdict — not a failure. The one
 // exception is the standalone session dict riding a chunk head
 // (flows3 nn=13: databaseID,token in 42B).
-func HarvestChunks(frags []Frag) []ChunkHarvest {
+func HarvestChunks(frags []lobby.Frag) []ChunkHarvest {
 	out := make([]ChunkHarvest, 0, len(frags))
 	for _, fr := range frags {
-		stk, n, _ := DecodePrefix(fr.Payload)
+		stk, n, _ := lobby.DecodePrefix(fr.Payload)
 		counts := map[string]int{}
 		for _, s := range stk {
-			HarvestKeys(s, counts)
+			lobby.HarvestKeys(s, counts)
 		}
 		ch := ChunkHarvest{NN: fr.NN, Seq: fr.Seq, Bytes: len(fr.Payload), Prefix: n, Stack: len(stk), Distinct: len(counts)}
 		for k, v := range counts {
@@ -414,7 +415,7 @@ type SmallStat struct {
 	Type    byte // 0x1a subtype, else 0
 	Count   int
 	NLens   int // distinct body lengths
-	Decoded int // bodies DecodeAt accepted (1a/46 only)
+	Decoded int // bodies lobby.DecodeAt accepted (1a/46 only)
 	Summary string
 }
 
@@ -448,12 +449,12 @@ func CensusSmalls(dump []DumpDatagram, flowSubstr string, fragSize int, blockKey
 			if m.ID != 0x1a && m.ID != 0x46 {
 				continue
 			}
-			v, _, _, err := DecodeAt(m.Body, 15)
+			v, _, _, err := lobby.DecodeAt(m.Body, 15)
 			if err != nil {
 				continue
 			}
 			if r.Summary == "" {
-				r.Summary = PickleSummary(v)
+				r.Summary = lobby.PickleSummary(v)
 			}
 			r.Decoded++
 		}

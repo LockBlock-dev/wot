@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"github.com/LockBlock-dev/wot/lobby"
 	"testing"
 )
 
@@ -213,7 +214,7 @@ func TestClassifySmalls5b(t *testing.T) {
 func TestHarvestChunksIsolates(t *testing.T) {
 	doc := []byte("\x80\x02}q\x00X\x01\x00\x00\x00aK\x01s.")
 	random := []byte{0x13, 0x53, 0x46, 0xeb, 0xb7, 0xf3, 0x68, 0xfa, 0x19, 0x47, 0xb2, 0x6e, 0xd9, 0xe8, 0xdc, 0xd3}
-	frags := []Frag{{Seq: 1, NN: 1, Payload: doc}, {Seq: 2, NN: 2, Payload: random}}
+	frags := []lobby.Frag{{Seq: 1, NN: 1, Payload: doc}, {Seq: 2, NN: 2, Payload: random}}
 	got := HarvestChunks(frags)
 	if len(got) != 2 {
 		t.Fatalf("chunks=%d", len(got))

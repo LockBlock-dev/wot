@@ -3,7 +3,11 @@ package login
 // Channel framing of lobby bundles (login side): primeBundled apps
 // size exactly like the genuine wire (60/36/124B) and round-trip the
 // channel footers. Builder bytes come from the lobby package.
-import "testing"
+import (
+	"testing"
+
+	"github.com/LockBlock-dev/wot/lobby"
+)
 
 func TestLobbyBundleFraming(t *testing.T) {
 	// Game UDP sizes from the channel math (flags + prime + calls +
@@ -14,12 +18,12 @@ func TestLobbyBundleFraming(t *testing.T) {
 		bun  []byte
 		udp  int
 	}{
-		{"poll", BuildLobbyBundle(nk, DoCmdInt3(202, 501, 0, 0, 0)), 60},
-		{"token", BuildLobbyBundle(nk, BuildRequestToken(1, 1)), 36},
-		{"sync1", BuildLobbyBundle(nk,
-			DoCmdInt3(220, 100, 0, 0, 0),
-			DoCmdInt3(221, 300, 0, 0, 0),
-			DoCmdInt3(222, 600, 0, 0, 0)), 124},
+		{"poll", lobby.BuildLobbyBundle(nk, lobby.DoCmdInt3(202, 501, 0, 0, 0)), 60},
+		{"token", lobby.BuildLobbyBundle(nk, lobby.BuildRequestToken(1, 1)), 36},
+		{"sync1", lobby.BuildLobbyBundle(nk,
+			lobby.DoCmdInt3(220, 100, 0, 0, 0),
+			lobby.DoCmdInt3(221, 300, 0, 0, 0),
+			lobby.DoCmdInt3(222, 600, 0, 0, 0)), 124},
 	}
 	for _, c := range cases {
 		pkt, err := buildChannelPacket(floodTestKey, flagsRel, c.bun, nil, 9, 0x345)

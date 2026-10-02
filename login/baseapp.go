@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"github.com/LockBlock-dev/wot/lobby"
 	"net"
 	"os"
 	"strings"
@@ -865,7 +866,7 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 	// flags 0458, [02][newkey], concatenated base calls, no aux) and
 	// reports its size only.
 	sendLobby := func(tag string, calls ...[]byte) error {
-		pkt, err := buildChannelPacket(blockKey, flagsRel, BuildLobbyBundle(stageKey, calls...), nil, unrel, lastSeq+1)
+		pkt, err := buildChannelPacket(blockKey, flagsRel, lobby.BuildLobbyBundle(stageKey, calls...), nil, unrel, lastSeq+1)
 		if err != nil {
 			return err
 		}
@@ -1015,7 +1016,7 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 		}
 		// TEMPORARY doCmd probe (revert after).
 		if !StageLobby && tempProbe && rotated && recFile != nil && probeIdx < 4 && (probedAt.IsZero() && time.Since(recUntil) > 3*time.Second || !probedAt.IsZero() && time.Since(probedAt) > 2*time.Second) {
-			app := DoCmdInt3(202, 501, 0, 0, 0) // A1 0x95 inside
+			app := lobby.DoCmdInt3(202, 501, 0, 0, 0) // A1 0x95 inside
 			pr, err := buildChannelPacket(blockKey, flagsUnrel, app, auxFor(relSent), unrel, lastSeq+1)
 			if err != nil {
 				return err
@@ -1036,28 +1037,28 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 			switch {
 			case openStep == 0 && time.Since(firstData) > time.Second:
 				if err := sendLobby("sync1",
-					DoCmdInt3(poolID, 100, 0, 0, 0),
-					DoCmdInt3(poolID+1, 300, 0, 0, 0),
-					DoCmdInt3(poolID+2, 600, 0, 0, 0)); err != nil {
+					lobby.DoCmdInt3(poolID, 100, 0, 0, 0),
+					lobby.DoCmdInt3(poolID+1, 300, 0, 0, 0),
+					lobby.DoCmdInt3(poolID+2, 600, 0, 0, 0)); err != nil {
 					return err
 				}
 				poolID += 3
 				openStep = 1
 				openAt = time.Now()
 			case openStep == 1 && time.Since(openAt) > 150*time.Millisecond:
-				if err := sendLobby("token", BuildRequestToken(1, 1)); err != nil {
+				if err := sendLobby("token", lobby.BuildRequestToken(1, 1)); err != nil {
 					return err
 				}
 				openStep = 2
 			case openStep == 2 && time.Since(openAt) > 6*time.Second:
-				if err := sendLobby("sync2", DoCmdInt3(poolID, 100, 0, 0, 0)); err != nil {
+				if err := sendLobby("sync2", lobby.DoCmdInt3(poolID, 100, 0, 0, 0)); err != nil {
 					return err
 				}
 				poolID++
 				openStep = 3
 			}
 			if openStep >= 1 && time.Since(openAt) > 15*time.Second && time.Since(lastPoll) > 5*time.Second {
-				if err := sendLobby("poll", DoCmdInt3(202, 501, 0, 0, 0)); err != nil {
+				if err := sendLobby("poll", lobby.DoCmdInt3(202, 501, 0, 0, 0)); err != nil {
 					return err
 				}
 				lastPoll = time.Now()

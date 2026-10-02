@@ -26,8 +26,7 @@ live.env -baseapp`. Protocol truth lives in `../NETWORK_PROTOCOL.md`
   `decryptSession`), `rewrite.go` (`RewriteLoginReply`: length-preserving
   232B endpoint swap + `encryptLogin` mirror for the BaseApp MITM), `baseapp.go` (`buildBaseAppLoginMsg`,
   `buildChannelAck`, `buildAuthenticate`, `checkBaseAppReply`,
-  stage-1/stage-2 script), `lobby_alias.go` (re-exports of the lobby
-  package: same symbols, new address), `hijack.go` (wotproxy dump parser +
+  stage-1/stage-2 script), `hijack.go` (wotproxy dump parser +
   `SessionFromDump` + `LoginSourcePort`), `config.go` (stdlib `.env`
   parser + `Config`; sorted+spaced username JSON; `cpsaltSession`),
   `flood.go` (bulk chunk reassembly by channel-seq + NN headers,
@@ -39,9 +38,8 @@ live.env -baseapp`. Protocol truth lives in `../NETWORK_PROTOCOL.md`
   `Frag`), `lobby_state.go` (prefix salvage → plain maps/slices),
   `lobbycalls.go` (C>S base-call builders: doCmdInt2/3/4/Str,
   requestToken, primeBundle prefix, chat tails), `battle.go` (avatar
-  position parser). Split out of `login/` Oct 2026; callers migrate
-  from the `login/lobby_alias.go` re-exports to `lobby` directly
-  (`cmd/wotflood` already does for inventory/stream).
+  position parser). Split out of `login/` Oct 2026; all callers
+  import `lobby` directly (compat aliases removed).
   Tests: `login_test.go` (offline codec vectors), `hijack_test.go`,
   `paired_replay_test.go` (byte-identical replay of the paired genuine
   stage-1/stage-2 capture, `../captures/flows3` + `../captures/key3.txt`;
