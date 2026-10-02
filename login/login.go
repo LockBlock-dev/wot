@@ -235,10 +235,16 @@ func Login(ctx context.Context, conn *net.UDPConn, cfg Config, pubkey *RSAPublic
 // IDA sub_140E6E100; useful to isolate RSA-layer from layout-layer faults
 // against the live server oracle).
 func encodeLogOnParams(cfg Config, pubkey *RSAPublicKey) ([]byte, error) {
+	return encodeLogOnParamsWithProvider(cfg, ProviderForConfig(cfg), pubkey)
+}
+
+// encodeLogOnParamsWithProvider renders the same body with the identity
+// half supplied by auth (Client path).
+func encodeLogOnParamsWithProvider(cfg Config, auth AuthProvider, pubkey *RSAPublicKey) ([]byte, error) {
 	if !cfg.Encrypted {
-		return buildLogOnParamsClear(cfg), nil
+		return buildLogOnParamsClearWithProvider(cfg, auth), nil
 	}
-	return encryptLogOnParams(cfg, pubkey)
+	return encryptLogOnParamsWithProvider(cfg, auth, pubkey)
 }
 
 // SolveFunc turns a Challenge into a response key + 42 nonces.

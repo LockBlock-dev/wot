@@ -171,9 +171,17 @@ func (k *RSAPublicKey) Size() int {
 // gui/login/manager.initiateLogin (clientContext = JSON
 // {lang_id, publication}).
 func buildLogOnParamsClear(cfg Config) []byte {
+	return buildLogOnParamsClearWithProvider(cfg, ProviderForConfig(cfg))
+}
+
+// buildLogOnParamsClearWithProvider renders the same cleartext with
+// the identity half supplied by auth (Client path). Byte-identical to
+// buildLogOnParamsClear for consistent configs (auth_method matching
+// the token keys present — the only shape the genuine client sends).
+func buildLogOnParamsClearWithProvider(cfg Config, auth AuthProvider) []byte {
 	clear := []byte{0x01} // HAS_ALL; digest follows
-	clear = appendPackedString(clear, cfg.Username())
-	clear = appendPackedString(clear, pwdToken(cfg.Lang, cfg.Password))
+	clear = appendPackedString(clear, auth.Username())
+	clear = appendPackedString(clear, auth.Password(cfg.Lang))
 	clear = appendPackedString(clear, cfg.BlockKey)
 	clear = appendPackedString(clear, cfg.ClientContext)
 	// Defs digest: MD5 over the entity definitions (OSE
@@ -194,12 +202,24 @@ func buildLogOnParamsClear(cfg Config) []byte {
 // 2x253 or 1x506, never k x 256), so a hardcoded 214 would over-chunk
 // (or fail to encrypt at all) against the live key.
 func encryptLogOnParams(cfg Config, pubkey *RSAPublicKey) ([]byte, error) {
-	clear := buildLogOnParamsClear(cfg)
+	return encryptLogOnParamsWithProvider(cfg, ProviderForConfig(cfg), pubkey)
+}
+
+// encryptLogOnParamsWithProvider builds the LogOnParams cleartext via
+// auth and RSA-OAEP-SHA1 encrypts it in chunks of partSize = keySize -
+// RSA_PADDING - 1 bytes in, keySize bytes out (PublicKeyCipher::encrypt,
+// OSE: RSA_PADDING=41, the "magic 41" of RSA_public_encrypt OAEP
+// overhead). partSize MUST follow the loaded key: the wire forces
+// non-2048 login keys (506-B params = 2x253 or 1x506, never k x 256),
+// so a hardcoded 214 would over-chunk (or fail to encrypt at all)
+// against the live key.
+func encryptLogOnParamsWithProvider(cfg Config, auth AuthProvider, pubkey *RSAPublicKey) ([]byte, error) {
+	clear := buildLogOnParamsClearWithProvider(cfg, auth)
 	// Lengths only, never values: proves which fields went on the wire
 	// (e.g. a stale CLIENT_CONTEXT override in the .env shows up as a
 	// short ctx here) without leaking secrets.
 	cfg.debugf("logonparams clear=%d (user=%d pwd=%d key=%d ctx=%d) chunks=%d",
-		len(clear), len(cfg.Username()), len(pwdToken(cfg.Lang, cfg.Password)),
+		len(clear), len(auth.Username()), len(auth.Password(cfg.Lang)),
 		len(cfg.BlockKey), len(cfg.ClientContext),
 		(len(clear)+pubkey.key.Size()-42-1)/(pubkey.key.Size()-42))
 

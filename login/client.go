@@ -17,6 +17,7 @@ import (
 // (genuine stage-1 rids are exactly login#2+1).
 type Client struct {
 	cfg    Config
+	auth   AuthProvider
 	pubkey *RSAPublicKey
 	solve  SolveFunc
 	conn   Transport
@@ -30,12 +31,22 @@ type Client struct {
 // the reply-ID sequence from Config.FirstReplyID (genuine IDs stay
 // small, < 2^17 — see LoadEnv).
 func NewClient(cfg Config, pubkey *RSAPublicKey, solve SolveFunc, conn Transport) (*Client, error) {
+	return NewClientWithProvider(cfg, ProviderForConfig(cfg), pubkey, solve, conn)
+}
+
+// NewClientWithProvider binds a login exchange with an explicit auth
+// provider (tests pinning a method, token2 legs reusing a base config).
+// The provider's username/password render the LogOnParams identity half.
+func NewClientWithProvider(cfg Config, auth AuthProvider, pubkey *RSAPublicKey, solve SolveFunc, conn Transport) (*Client, error) {
 	peer, err := cfg.Peer()
 	if err != nil {
 		return nil, fmt.Errorf("wotlogin: resolve: %w", err)
 	}
-	return &Client{cfg: cfg, pubkey: pubkey, solve: solve, conn: conn, peer: peer, nextID: cfg.FirstReplyID}, nil
+	return &Client{cfg: cfg, auth: auth, pubkey: pubkey, solve: solve, conn: conn, peer: peer, nextID: cfg.FirstReplyID}, nil
 }
+
+// Provider returns the client's auth provider (method + identity).
+func (c *Client) Provider() AuthProvider { return c.auth }
 
 // Config returns the client's config (post-LoadEnv defaults included).
 func (c *Client) Config() Config { return c.cfg }
@@ -62,7 +73,7 @@ func (c *Client) Login(ctx context.Context) (Session, error) {
 	var zero Session
 	cfg := c.cfg
 	// Attempt 1: bare login (no challenge data yet).
-	params, err := encodeLogOnParams(cfg, c.pubkey)
+	params, err := encodeLogOnParamsWithProvider(cfg, c.auth, c.pubkey)
 	if err != nil {
 		return zero, err
 	}
@@ -106,7 +117,7 @@ func (c *Client) Login(ctx context.Context) (Session, error) {
 		return zero, fmt.Errorf("wotlogin: own PoW solution fails verify (key=%q)", key)
 	}
 	cfg.debugf("pow solved: key=%q nonces=%d in %v", key, len(nonces), time.Since(started))
-	params2, err := encodeLogOnParams(cfg, c.pubkey)
+	params2, err := encodeLogOnParamsWithProvider(cfg, c.auth, c.pubkey)
 	if err != nil {
 		return zero, err
 	}

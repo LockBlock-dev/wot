@@ -14,16 +14,13 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
 	crand "crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/LockBlock-dev/wot/login"
@@ -208,7 +205,7 @@ func main() {
 	// message carries token2, start over like a brand-new client
 	// (fresh socket, ids, block key) with auth_method=token2 and empty
 	// password, and use the token2-originated session below.
-	if token2 := upgradeToken(session.ServerMsg); token2 != "" && cfg.AuthMethod == "basic" && *relogin {
+	if token2 := login.ExtractUpgradeToken(session.ServerMsg); token2 != "" && cfg.AuthMethod == "basic" && *relogin {
 		fmt.Printf("relogin from zero with token2\n")
 		conn.Close()
 		cfg2, err := login.LoadEnv(*envPath)
@@ -218,9 +215,7 @@ func main() {
 		if *solveTimeout > 0 {
 			cfg2.SolveTimeout = *solveTimeout
 		}
-		cfg2.AuthMethod = "token2"
-		cfg2.Token2 = token2
-		cfg2.Password = ""
+		cfg2 = login.ReloginConfig(cfg2, token2)
 		conn2, err := net.ListenUDP("udp", nil)
 		if err != nil {
 			fatal(err)
@@ -270,14 +265,17 @@ func main() {
 	// stage scripts).
 	bctx, bcancel := context.WithTimeout(ctx, *baseBudget)
 	defer bcancel()
-	if err := login.BaseAppLogin(bctx, bconn, conn, basePeer, session, cfg.BlockKey, cfg.MTU, baseReplyID); err != nil {
+	stage := login.NewBaseAppSession(session, cfg.BlockKey, cfg.MTU, bconn, conn, basePeer)
+	if err := stage.Run(bctx, baseReplyID); err != nil {
 		fatal(err)
 	}
 	fmt.Println("LOBBY flood reached (decrypted stage-2 burst)")
 }
 
-// upgradeToken extracts token2 from a login reply message without logging
-// it (SSO material). Returns "" when there is nothing to upgrade to.
+// upgradeToken reports the token2 SHAPE in a login reply message
+// (prefix + raw length, never the value: SSO material) and returns the
+// value for the opt-in -relogin path. Extraction lives in the library
+// (login.ExtractUpgradeToken); this stays CLI-side for the shape log.
 func upgradeToken(msg string) string {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(msg), &m); err != nil {
@@ -296,11 +294,7 @@ func upgradeToken(msg string) string {
 		pre = pre[:14] + "…"
 	}
 	fmt.Fprintf(os.Stderr, "[wotlogin] servermsg token2 raw=%s len=%d\n", pre, len(raw))
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return ""
-	}
-	return s
+	return login.ExtractUpgradeToken(msg)
 }
 
 // hijackSession runs BaseApp stage-1 against an externally supplied live
@@ -364,35 +358,23 @@ func hijackSession(cfg login.Config, dumpPath string, budget time.Duration, port
 	defer bconn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	if err := login.BaseAppLogin(ctx, bconn, lconn, basePeer, session, cfg.BlockKey, cfg.MTU, stageRID); err != nil {
+	stage := login.NewBaseAppSession(session, cfg.BlockKey, cfg.MTU, bconn, lconn, basePeer)
+	if err := stage.Run(ctx, stageRID); err != nil {
 		fatal(err)
 	}
 	fmt.Println("LOBBY flood reached (decrypted stage-2 burst)")
 }
 
 // recordMiddle appends one sessionmd5,middle pair for the offline
-// token2-middle function fit. The pairs file is 0600 (middles are
-// auth material); stdout carries lengths only, never values. The
-// session md5 is wire-visible anyway (username JSON); the middle is
-// the sensitive half.
+// token2-middle function fit (library owns the 0600 file write; here
+// only the lengths-only log). Values never touch stdout.
 func recordMiddle(path, sessionBlob, token2 string) {
-	segs := strings.SplitN(token2, ":", 3)
-	if len(segs) != 3 {
-		return
-	}
-	sum := md5.Sum([]byte(sessionBlob)) //nolint:gosec // game-mandated hashing
-	line := hex.EncodeToString(sum[:]) + "," + segs[1] + "\n"
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	n, err := login.RecordMiddle(path, sessionBlob, token2)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[wotlogin] middle-out: %v\n", err)
 		return
 	}
-	defer f.Close()
-	if _, err := f.WriteString(line); err != nil {
-		fmt.Fprintf(os.Stderr, "[wotlogin] middle-out: %v\n", err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[wotlogin] middle-out: pairs-file len grows (sessionmd5=32 middle=%d)\n", len(segs[1]))
+	fmt.Fprintf(os.Stderr, "[wotlogin] middle-out: pairs-file len grows (sessionmd5=32 middle=%d)\n", n)
 }
 
 func fatal(err error) {
