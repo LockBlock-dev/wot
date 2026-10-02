@@ -535,6 +535,20 @@ speak back. Established Sep 20:
   STILL OPEN: 11B field map, ID semantics, head layout, dir fields —
   needs engine volatile-write-for-client specifics or a fresh angle,
   not more blind correlation.
+  Volatile scan CLOSED Oct-02 (model + live walk agree): exactly ONE
+  volatile prop exists in the whole 332-entry client map
+  (GunMarkerComponent.gunMarker, var-size FIXED_DICT — cannot be in
+  fixed 11B records); zero `<Volatile>` in live entity_defs. The 11B
+  payloads are engine-builtin volatile data (position/yaw/pitch/roll),
+  layout in the exe only → IDA task.
+  11B FIELD MAP CLOSED Oct-02 (IDA + wire-fit, see
+  `NETWORK_PROTOCOL.md` §14): `[ID u8][posType0 6B][dirType0 4B]`;
+  unpacker `0x140E37200` (+mirror `0x140E55350`), BitReader
+  MSB-first, custom 1+4+N floats (bias −2.0, per-entity scale),
+  direction (roll10, pitch11-half, yaw11) with absolute 2π scales;
+  yaw tracking med-step 0.10 rad; 14 entities/snapshot + visitors.
+  Open (runtime): position scale value, base-add mode, ID namespace,
+  x/z convention.
 - Item 4 CLOSED (unknown-led harvest, 3 sessions: Oct-01 54338,
   Sep-29 44395, flows3-s2): 1-byte resync inside rests recovers full
   trains where the strict walker stopped at the first unknown ID —
