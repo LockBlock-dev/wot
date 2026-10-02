@@ -567,8 +567,13 @@ speak back. Established Sep 20:
   MSB-first, custom 1+4+N floats (bias −2.0, per-entity scale),
   direction (roll10, pitch11-half, yaw11) with absolute 2π scales;
   yaw tracking med-step 0.10 rad; 14 entities/snapshot + visitors.
-  Open (runtime): position scale value, base-add mode, ID namespace,
-  x/z convention.
+  Static follow-up Oct-02 (classes, sentinels, sources — see §14):
+  `CellAppDefaultEntityVolatilePacker`/`ClientDefaultVolatileUnpacker`,
+  posType{0,1,2}/dirType{0,1,2,3}, invalid = -13000/FLT_MAX, bias
+  exactly -2.0, scale = runtime `[entity+0x130]+0x77C` (not a
+  constant — scatter explained), ID = BW entity ID (lookup miss →
+  `No such entity`), per-axis mantissas 12/12/9b. Remaining static:
+  x/z convention, `[entity+13A8h]` conditional tail.
 - Item 4 CLOSED (unknown-led harvest, 3 sessions: Oct-01 54338,
   Sep-29 44395, flows3-s2): 1-byte resync inside rests recovers full
   trains where the strict walker stopped at the first unknown ID —
@@ -587,8 +592,10 @@ speak back. Established Sep 20:
   continuation, head lost or in-bulk; client tolerates). 1220B trains
   in 44395 (vs 1244B elsewhere — frag size varies). 5c pair is custom
   binary (DecodePrefix dies at byte 1, both sizes). PARKED singles
-  (98/5d/ab/4f/a2, one sample each, zero cross-session recurrence —
-  session-specific content like 116 bursts: shape, not value).
+  (98/5d/ab/4f/a2: stop-byte recurrence in Oct-01 (5d×4/a2×2/ab×1/
+  4f×1, 98 absent) but content still unvalidated (5d 4/4
+  DecodeAt-fail) — session-specific shapes, no validated content;
+  verdict stands).
 - REDIRECT-FOLLOWING (Sep 21, live-verified): without it the server
   parks us on the login-assigned instance (infos, no entities,
   redirect repeated ~10 s). Following works: p5/AWS → EU2-metal
@@ -762,25 +769,39 @@ speak back. Established Sep 20:
   not packed-int streams either; cross-session (Sep-17/29 ×3:
   28/26/27 bodies) finds ZERO identical bodies and ZERO positional
   first-byte matches — per-session unique content, tails start
-  249/252/253 stepping +9 throughout.
-  804B infos = headerless text+binary interleave
-  (`TargetAreaEnabled…`, zero interior docs ≥30B) — subsystem PINNED
-  (sole `targetarea` hit: server_settings.pyc
-  `_SpgRedesignFeatures.markTargetAreaEnabled`); framing open, two
-  hypotheses: mid-bundle bulk fragment vs genuinely custom (test:
-  decrypt + scan for pickle opcodes at higher offsets). ABSENT from
-  the Sep-29 proxy session (session-dependent infos). That session's
-  infos instead: 84B account-info (flood-burst HEAD position in both
+  249/252/253 stepping +9 throughout. Engine side (Oct-02 IDA):
+  `createEntity` wire registration located (thunks `0x140240740`,
+  arginfo `0x1442DCC00` — descriptor format not yet decoded);
+  counter-as-entity-ID tested same-session vs 0x45 tuples → 0/30
+  overlap (0x45s are 3 poll-answer classes, not entity-indexed);
+  body[0] vs wire-ID tested → 30 distinct in [32,247], excludes
+  [0,40). Envelope-only verdict stands with new evidence
+  (acked-only parity-sufficient for v1).
+  804B infos CLOSED Oct-02 (flows3-s2, fixed key): server_settings /
+  feature-flags small (genuinely custom, NOT a bulk fragment: no
+  chunk header, zero pickle docs ≥30B at any offset, 794B cleartext
+  flags 0478): 23 identifier-shaped text runs (`TargetAreaEnabled`,
+  `ab_feature_test`, `newbieHints*`, `isTankmanRestoreEnabled`,
+  `xmpp_resource`, `xmpp_bosh_connections` + `woteu34` bosh host,
+  `vehicle_post_progression_config`, `forbiddenVehicles`,
+  `enabledFeatures`, `shells_consumables_switch`,
+  `opt_dev_boosters_switch`…) + binary values, unknown-led framing.
+  Session-dependent (Sep-17 only). That session's infos instead:
+  84B account-info (flood-burst HEAD position in both
   S>C 84s; mixed framing suggests engine packing; lead:
   AccountVersion.def version-as-property), 124B XMPP endpoint list
   (consumer XmppServerSettings; `woteu34…` = bosh host element;
   `b8→bc` walk + `KP` marker likely C++ XmppClient framing, no .pyc
   parser),
   220B = tick + 1a76 session dict (156B STOP-truncated pickle,
-  salvaged) + 1a79 redirect (byte0 = IP-string length conjecture:
-  `0d`=13 for 13-char IPs; then port u16 LE + 13B trailer, OPEN:
-  constant→magic/version, varies→routing info; compare across
-  sessions). 1a76 session dict + 1a5c queue blob re-verified here.
+  salvaged) + 1a79 redirect CLOSED Oct-02 (19 samples, 3 sessions:
+  Sep-17 flows3 + Sep-29 + Oct-01): byte0 = IP-string length EXACT
+  (11/12/13 all fit; the old 14-char misread withdrawn), port
+  ALWAYS 32956, 13B trailer byte-constant
+  (`687720000000000f0040771b00`, 19/19 across days) — magic, not
+  routing info; the redirect pool is STABLE across Sep-17→Oct-01
+  (83.229.15.109, 52.57.68.91, 63.182.9.216 recur). 1a76 session
+  dict + 1a5c queue blob re-verified here.
   148B/84B end with a (98,25) carrier (28B: `[98][1900]` + 25B
   args; `BuildChatCommandFromClient` frames it, both vectors pinned
   byte-exact in `TestChatCommandFromClientVectors`). It is a 4th
@@ -910,8 +931,9 @@ speak back. Established Sep 20:
    `parseIntCompactDescr`); ext IDs never live (per-nation <255,
    shipped compares lo4==1 verbatim); camo tail length-less (absorbs
    truncation by design). Wire proof: 69B blob in Sep-29 S>C smalls
-   sections t=2 clean (carrier parses as 1a/ba, 308B — framing open,
-   sectioning closed); 5× 89B tankman blobs (type 8) correctly
+   sections t=2 clean (carrier 1a/ba is framing-real in lobby —
+   parser-accepted len8; the battle 1a-ba appearance stays misparse,
+   different domain); 5× 89B tankman blobs (type 8) correctly
    rejected; trawl 38 candidates. Open: component-ID resolution
    against vehicle XML tables.
    Resolution DONE Oct-02 (`lobby/vehicle_table.go` + `vehicle_load.go`,
