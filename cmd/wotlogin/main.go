@@ -74,36 +74,41 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	// CLI flag overrides compose as library options (verbatim sets;
+	// unset flags contribute nothing). Order mirrors the old inline
+	// block: empty-key then raw-key, so raw wins when both are given.
+	var opts []login.Option
 	if *hostOverride != "" {
-		cfg.Host = *hostOverride
+		opts = append(opts, login.WithHost(*hostOverride))
 	}
 	if *emptyKey {
-		cfg.BlockKey = ""
+		opts = append(opts, login.WithBlockKey(""))
 	}
 	if *sessionGuid != "" {
-		cfg.Session = *sessionGuid
+		opts = append(opts, login.WithSession(*sessionGuid))
 	}
 	if *temporary != "" {
-		cfg.Temporary = *temporary
+		opts = append(opts, login.WithTemporary(*temporary))
 	}
 	if *clientCtx != "" {
-		cfg.ClientContext = *clientCtx
+		opts = append(opts, login.WithClientContext(*clientCtx))
 	}
 	if *rawKey {
 		var kb [16]byte
 		if _, err := crand.Read(kb[:]); err != nil {
 			fatal(err)
 		}
-		cfg.BlockKey = string(kb[:])
+		opts = append(opts, login.WithBlockKey(string(kb[:])))
 	}
-	login.StageBareAuth = *bareAuth
-	login.StageLobby = *lobbyFlag
 	if *threads > 0 {
-		cfg.Threads = *threads
+		opts = append(opts, login.WithThreads(*threads))
 	}
 	if *solveTimeout > 0 {
-		cfg.SolveTimeout = *solveTimeout
+		opts = append(opts, login.WithSolveTimeout(*solveTimeout))
 	}
+	cfg = login.ApplyOptions(cfg, opts...)
+	login.StageBareAuth = *bareAuth
+	login.StageLobby = *lobbyFlag
 	if *hijack != "" {
 		hijackSession(cfg, *hijack, *baseBudget, *hijackPort)
 		return

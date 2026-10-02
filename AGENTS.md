@@ -13,7 +13,12 @@ live.env -baseapp`. Protocol truth lives in `../NETWORK_PROTOCOL.md`
 - `login/` — framing builders/parsers + `Client.Login()` flow (pure where
   possible; `SolveFunc` injected for tests; `Transport` interface over
   UDP so the handshake is script-testable offline): `client.go`
-  (`Client`: config/key/solver/socket/peer/reply-ID sequence),
+  (`Client`: config/auth-provider/solver/socket/peer/reply-ID sequence),
+  `auth.go` (`AuthProvider`: basic/token/token2 identity + username
+  JSON + `ExtractUpgradeToken` + `ReloginConfig`),
+  `session.go` (`BaseAppSession` machine owning stage-1/stage-2 +
+  `Session.UpgradeToken` + `RecordMiddle` pairs file),
+  `options.go` (`Option`/`ApplyOptions` CLI overrides),
   `transport.go` (`Transport`, satisfied by `*net.UDPConn`),
   `login.go` (legacy `Login()` wrapper + builders), `logonparams.go`
   (packed strings, pwd_token, RSA chunking: partSize 213, 256 B blocks
@@ -21,16 +26,22 @@ live.env -baseapp`. Protocol truth lives in `../NETWORK_PROTOCOL.md`
   `decryptSession`), `rewrite.go` (`RewriteLoginReply`: length-preserving
   232B endpoint swap + `encryptLogin` mirror for the BaseApp MITM), `baseapp.go` (`buildBaseAppLoginMsg`,
   `buildChannelAck`, `buildAuthenticate`, `checkBaseAppReply`,
-  stage-1/stage-2 script), `hijack.go` (wotproxy dump parser +
+  stage-1/stage-2 script), `lobby_alias.go` (re-exports of the lobby
+  package: same symbols, new address), `hijack.go` (wotproxy dump parser +
   `SessionFromDump` + `LoginSourcePort`), `config.go` (stdlib `.env`
   parser + `Config`; sorted+spaced username JSON; `cpsaltSession`),
   `flood.go` (bulk chunk reassembly by channel-seq + NN headers,
-  smalls taxonomy + census, keyfile/recover helpers), `pickle.go`
-  (hand-rolled proto 0-2 decoder, triple-verified vs CPython
-  execution + independent emulator on 3 captures; LONG1/4 sign fix
-  Sep 28; `DecodeAt`/`DecodePrefix`/
-  `Inventory` resync), `lobbycalls.go` (C>S base-call builders:
-  doCmdInt2/3/4/Str, requestToken, primeBundle prefix).
+  smalls taxonomy + census, keyfile/recover helpers).
+- `lobby/` — offline application layer, stdlib-only (no transport):
+  `pickle.go` (hand-rolled proto 0-2 decoder, triple-verified vs
+  CPython execution + independent emulator on 3 captures; LONG1/4
+  sign fix Sep 28; `DecodeAt`/`DecodePrefix`/`Inventory` resync +
+  `Frag`), `lobby_state.go` (prefix salvage → plain maps/slices),
+  `lobbycalls.go` (C>S base-call builders: doCmdInt2/3/4/Str,
+  requestToken, primeBundle prefix, chat tails), `battle.go` (avatar
+  position parser). Split out of `login/` Oct 2026; callers migrate
+  from the `login/lobby_alias.go` re-exports to `lobby` directly
+  (`cmd/wotflood` already does for inventory/stream).
   Tests: `login_test.go` (offline codec vectors), `hijack_test.go`,
   `paired_replay_test.go` (byte-identical replay of the paired genuine
   stage-1/stage-2 capture, `../captures/flows3` + `../captures/key3.txt`;
