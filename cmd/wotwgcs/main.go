@@ -132,8 +132,10 @@ func main() {
 // HRESULTs/lengths only, buffers scrubbed.
 func runRemember(api *wgcs.API, mark func(string)) {
 	for _, name := range []string{"binding_WGCApiIsLaunchedFromWgc", "binding_WGCApiGetPublication"} {
-		r1, rerr := api.Raw(name)
-		fmt.Fprintf(os.Stderr, "[wotwgcs] %s r1=%#x err=%v\n", name, r1, rerr)
+		ob := make([]byte, 8)
+		r1, rerr := api.Raw(name, ptr(ob))
+		fmt.Fprintf(os.Stderr, "[wotwgcs] %s r1=%#x out-dword=%x err=%v\n", name, r1, ob[:4], rerr)
+		clear(ob)
 	}
 	st := make([]byte, wgcs.RememberMeStruct)
 	wb := make([]byte, wgcs.RememberMeBuf)
