@@ -800,7 +800,12 @@ speak back. Established Sep 20:
   `CompressionIStream` (type byte 0–9) — our first bytes spread
   [32,247], ruling stock compression out for the WoT fork;
   head-vs-tail ID tested 0/30. +9 stride open (cumulative vs
-  ID-stride).
+  ID-stride). Content exclusion (Oct-02): stock
+  `CompressionIStream`/zlib ruled OUT (first bytes spread [32,247],
+  no 78xx, zlib linked but never struck; only zlib strings in the
+  image, no Oodle/LZ4/Snappy) — the fork packs these bodies
+  differently (server-side packer, not in this image). +9 best
+  remaining read: reliable-slot consumption per burst (untested).
   804B infos CLOSED Oct-02 (flows3-s2, fixed key): server_settings /
   feature-flags small (genuinely custom, NOT a bulk fragment: no
   chunk header, zero pickle docs ≥30B at any offset, 794B cleartext
