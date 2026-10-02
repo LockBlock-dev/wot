@@ -94,3 +94,12 @@ const (
 )
 
 var ParseAvatarUpdate = lobby.ParseAvatarUpdate
+
+// Vehicle descr surface (structural, table-free).
+type CompactSections = lobby.CompactSections
+
+var (
+	ParseIntDescr       = lobby.ParseIntDescr
+	NationName          = lobby.NationName
+	SectionCompactDescr = lobby.SectionCompactDescr
+)

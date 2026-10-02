@@ -898,7 +898,22 @@ speak back. Established Sep 20:
    `logUXEvents`, server-gated); aogas = playtime-control;
    HTTP bootstrap mapped (CSIS, WebCache, Vivox, dcont, RSS).
 4. Vehicle compDescr (10304 battle doc + `vehTypeCompDescr` blobs):
-   tank descriptor format; unlocks dossier/vehicle parsing.
+   tank descriptor format; unlocks dossier/vehicle parsing — DONE
+   Oct-02: full layout from shipped `items/vehicles.pyc`
+   (`_split/_combine`, `makeCompactDescr`, `parseIntCompactDescr`)
+   in `lobby/vehicle.go` (table-free sectioning + int-head reader,
+   synthetic writer-mirror round-trip green): header
+   (type lo4=1|nation hi4|+2 ext), typeID, components (8B + 4B/turret),
+   flags (optdev mask|16 enh|32 emb|64 skip|128 camo), optdev u16s,
+   enh 6B, emb 6B/inscr 7B, camo tail; nations ussr0..italy10;
+   `vehTypeCompDescr` ≡ compactDescr (dossier `utils` parses via
+   `parseIntCompactDescr`); ext IDs never live (per-nation <255,
+   shipped compares lo4==1 verbatim); camo tail length-less (absorbs
+   truncation by design). Wire proof: 69B blob in Sep-29 S>C smalls
+   sections t=2 clean (carrier parses as 1a/ba, 308B — framing open,
+   sectioning closed); 5× 89B tankman blobs (type 8) correctly
+   rejected; trawl 38 candidates. Open: component-ID resolution
+   against vehicle XML tables.
 5. Token anatomy (`token`/`token2`/`session` structures) — DONE
    Oct-02 (offline, shapes only, see `WGC.md` §6): token2 =
    `{9-digit accountID}:{18–19-digit middle}:{39-digit tail}` all
