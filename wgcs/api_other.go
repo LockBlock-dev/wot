@@ -15,6 +15,12 @@ func Load(dllPath string) (*API, error) {
 
 func (a *API) CreateGlobalInstance() error { return ErrNeedWindows }
 func (a *API) Prepare(arg uintptr) error   { return ErrNeedWindows }
+func (a *API) CreateInstanceEx() (uintptr, error) {
+	return 0, ErrNeedWindows
+}
+func (a *API) CallSlot(ppv uintptr, slot int, arg uintptr) (uintptr, error) {
+	return 0, ErrNeedWindows
+}
 func (a *API) Raw(name string, args ...uintptr) (uintptr, error) {
 	return 0, ErrNeedWindows
 }

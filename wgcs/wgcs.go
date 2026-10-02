@@ -12,7 +12,10 @@
 // RCX == 0x1600020001247C (else 0x80EE0001) and writes *ppv.
 package wgcs
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // InstanceIID is the interface id the game passes as RCX to
 // WGCApiCreateInstance / binding_WGCApiCreateGlobalInstance
@@ -22,6 +25,16 @@ const InstanceIID = 0x1600020001247C
 // ErrNeedWindows reports that the broker API only exists inside the
 // Proton/Wine prefix (GOOS=windows helper run via proton).
 var ErrNeedWindows = errors.New("wgcs: broker API requires the windows helper (GOOS=windows via proton)")
+
+// HR interprets a raw HRESULT register (negative = failure).
+// Negative values are broker errors (e.g. 0x80EE1003 = session
+// missing, 0x80EE1007 = null arg, 0x80EE2006 = no instance).
+func HR(r uintptr) error {
+	if int32(r) < 0 {
+		return fmt.Errorf("wgcs: HRESULT 0x%08x", uint32(r))
+	}
+	return nil
+}
 
 // LoginInfoProbe is the scratch size for GetLoginInfo out-param
 // probing (layout unknown statically; iterated live).
