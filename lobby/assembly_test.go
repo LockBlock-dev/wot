@@ -92,3 +92,104 @@ func TestAccessors(t *testing.T) {
 		t.Fatal("type mismatch must miss")
 	}
 }
+
+func questTree() []interface{} {
+	return []interface{}{
+		map[string]interface{}{
+			"quests": map[string]interface{}{
+				"dq:6abe9630:QUEST_MEDIUM::c:218__2000::r:ett__1": map[string]interface{}{
+					"expiryTime": int64(1780000000),
+					"progress":   map[string]interface{}{},
+				},
+				"wq::6ABBEA70::1::c:30001": map[string]interface{}{
+					"expiryTime": int64(1780000001),
+				},
+				"bogus": map[string]interface{}{"expiryTime": int64(1)},
+				"dq:6abe9630:NOPE::c:1__1": map[string]interface{}{
+					"expiryTime": int64(1),
+				},
+			},
+		},
+	}
+}
+
+func TestParseQuests(t *testing.T) {
+	qs := ParseQuests(questTree())
+	if len(qs) != 2 {
+		t.Fatalf("quests=%d, want 2", len(qs))
+	}
+	var dq, wq *Quest
+	for i := range qs {
+		switch qs[i].Kind {
+		case "dq":
+			dq = &qs[i]
+		case "wq":
+			wq = &qs[i]
+		}
+	}
+	if dq == nil || dq.Diff != "QUEST_MEDIUM" || len(dq.Conds) != 1 || len(dq.Rewards) != 1 {
+		t.Fatalf("dq = %+v", dq)
+	}
+	if dq.Conds[0].ID != "218" || dq.Conds[0].Count != "2000" || dq.Rewards[0].Op != "r" {
+		t.Fatalf("dq legs = %+v", dq)
+	}
+	if dq.Progress == nil {
+		t.Fatal("empty progress must stay a present map")
+	}
+	if wq == nil || wq.Diff != "" || wq.Hash != "6ABBEA70" {
+		t.Fatalf("wq = %+v", wq)
+	}
+}
+
+func TestParsePiggyBank(t *testing.T) {
+	items := []interface{}{
+		map[string]interface{}{"piggyBank": map[string]interface{}{"credits": int64(5000)}},
+	}
+	pb, ok := ParsePiggyBank(items)
+	if !ok || pb.Credits != 5000 {
+		t.Fatalf("piggy = %+v ok=%v", pb, ok)
+	}
+	if _, ok := ParsePiggyBank([]interface{}{map[string]interface{}{}}); ok {
+		t.Fatal("absent piggy must miss")
+	}
+}
+
+func TestParseModeConfigs(t *testing.T) {
+	items := []interface{}{
+		map[string]interface{}{
+			"configs": map[string]interface{}{
+				"squad": map[string]interface{}{
+					"allowedTankLevels":          int64(8),
+					"isAssemblingEnabled":        true,
+					"tankLevelPreferenceEnabled": false,
+					"voiceChatPreferenceEnabled": true,
+					"hardVoiceCheckTime":         1.5,
+				},
+			},
+		},
+	}
+	mc := ParseModeConfigs(items)
+	if len(mc) != 1 || mc[0].Mode != "squad" || mc[0].AllowedTankLevels != 8 {
+		t.Fatalf("modes = %+v", mc)
+	}
+	if !mc[0].IsAssemblingEnabled || !mc[0].HardVoiceCheckTimeKnown {
+		t.Fatalf("mode flags = %+v", mc[0])
+	}
+}
+
+func TestParseSlotCharges(t *testing.T) {
+	items := []interface{}{
+		map[string]interface{}{
+			"vehiclesSlotsConfig": map[string]interface{}{
+				"ussr:R46_KV-13_SH": map[string]interface{}{
+					"charge1": int64(1), "charge2": int64(2), "charge3": int64(3), "charge4": int64(4),
+				},
+				"broken": map[string]interface{}{"charge1": int64(1)},
+			},
+		},
+	}
+	sc := ParseSlotCharges(items)
+	if len(sc) != 1 || sc[0].Vehicle != "ussr:R46_KV-13_SH" || sc[0].Charges != [4]int64{1, 2, 3, 4} {
+		t.Fatalf("charges = %+v", sc)
+	}
+}

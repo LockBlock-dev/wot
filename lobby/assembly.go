@@ -144,3 +144,284 @@ func OfferPages(offers []Offer) map[string]int {
 	}
 	return pages
 }
+
+// QuestLeg is one condition (`c:<id>__<n>`) or reward (`r:<type>__<n>`)
+// leg from a quest key. Empty legs (the `::` separators) never reach
+// here — the key splitter drops them.
+type QuestLeg struct {
+	Op    string // "c" condition, "r" reward
+	ID    string
+	Count string
+}
+
+// Quest is one daily/weekly quest: key segments + expiry + progress
+// subtree (progress is session-shaped and stays a raw map — empty on
+// fresh sessions). Key form `dq:<hash>:QUEST_<DIFF>:<legs…>` /
+// `wq:<hash>:<legs…>` (legs `c:<id>__<n>` / `r:<type>__<n>`).
+type Quest struct {
+	Key      string
+	Kind     string // "dq" daily, "wq" weekly
+	Hash     string
+	Diff     string // QUEST_* or "" for wq
+	Conds    []QuestLeg
+	Rewards  []QuestLeg
+	Expiry   int64
+	Progress map[string]interface{}
+}
+
+// ParseQuests collects quest entries from salvaged items (quest dicts
+// keyed by quest ID inside a `quests` map, one level down from the
+// top doc — matched structurally, never by position).
+func ParseQuests(items []interface{}) []Quest {
+	var out []Quest
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			if qm, ok := t["quests"]; ok {
+				if qd, ok := qm.(map[string]interface{}); ok {
+					for k, e := range qd {
+						if sub, ok := e.(map[string]interface{}); ok {
+							if q, ok := parseQuest(k, sub); ok {
+								out = append(out, q)
+							}
+						}
+					}
+				}
+			}
+			for _, e := range t {
+				walk(e)
+			}
+		case []interface{}:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	for _, it := range items {
+		walk(it)
+	}
+	return out
+}
+
+// parseQuest splits the quest key and reads expiry/progress.
+func parseQuest(key string, sub map[string]interface{}) (Quest, bool) {
+	var q Quest
+	parts := strings.Split(key, ":")
+	if len(parts) < 3 || (parts[0] != "dq" && parts[0] != "wq") {
+		return q, false
+	}
+	q.Key, q.Kind = key, parts[0]
+	idx := 1
+	for idx < len(parts) && parts[idx] == "" {
+		idx++
+	}
+	if idx >= len(parts) {
+		return q, false
+	}
+	q.Hash = parts[idx]
+	idx++
+	legs := parts[idx:]
+	if q.Kind == "dq" {
+		if len(legs) == 0 || !strings.HasPrefix(legs[0], "QUEST_") {
+			return q, false
+		}
+		q.Diff = legs[0]
+		legs = legs[1:]
+	} else if len(legs) > 0 && isDigits(legs[0]) {
+		legs = legs[1:] // wq version segment
+	}
+	for i := 0; i < len(legs); i++ {
+		leg := legs[i]
+		if leg == "" {
+			continue
+		}
+		// Legs span two segments: op (`c`/`r`) then `<id>__<n>`.
+		if leg != "c" && leg != "r" {
+			continue
+		}
+		if i+1 >= len(legs) || legs[i+1] == "" {
+			continue
+		}
+		id, n, _ := strings.Cut(legs[i+1], "__")
+		i++
+		l := QuestLeg{Op: leg, ID: id, Count: n}
+		if leg == "c" {
+			q.Conds = append(q.Conds, l)
+		} else {
+			q.Rewards = append(q.Rewards, l)
+		}
+	}
+	var ok bool
+	if q.Expiry, ok = Int(sub, "expiryTime"); !ok {
+		return q, false
+	}
+	if p, ok := Dict(sub, "progress"); ok {
+		q.Progress = p
+	}
+	return q, true
+}
+
+// isDigits reports all-decimal (quest version segments).
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// PiggyBank is the credit reserve (`{credits}`).
+type PiggyBank struct {
+	Credits int64
+}
+
+// ParsePiggyBank reads the piggyBank block (absent → miss, never zero
+// — a zero reserve is real data).
+func ParsePiggyBank(items []interface{}) (PiggyBank, bool) {
+	var out PiggyBank
+	found := false
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			if pb, ok := t["piggyBank"]; ok {
+				if pm, ok := pb.(map[string]interface{}); ok {
+					if c, ok := Int(pm, "credits"); ok {
+						out, found = PiggyBank{Credits: c}, true
+					}
+				}
+			}
+			for _, e := range t {
+				walk(e)
+			}
+		case []interface{}:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	for _, it := range items {
+		walk(it)
+	}
+	return out, found
+}
+
+// ModeConfig is one matchmaker mode block (`configs/<mode>`:
+// allowedTankLevels + voice/assembly toggles, shared shape across
+// epic/last_stand/squad).
+type ModeConfig struct {
+	Mode                    string
+	AllowedTankLevels       int64
+	IsAssemblingEnabled     bool
+	TankLevelPreference     bool
+	VoiceChatPreference     bool
+	HardVoiceCheckTime      float64
+	HardVoiceCheckTimeKnown bool
+}
+
+// ParseModeConfigs collects `configs/<mode>` blocks.
+func ParseModeConfigs(items []interface{}) []ModeConfig {
+	var out []ModeConfig
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			if cm, ok := t["configs"]; ok {
+				if cd, ok := cm.(map[string]interface{}); ok {
+					for mode, e := range cd {
+						if em, ok := e.(map[string]interface{}); ok {
+							out = append(out, parseModeConfig(mode, em))
+						}
+					}
+				}
+			}
+			for _, e := range t {
+				walk(e)
+			}
+		case []interface{}:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	for _, it := range items {
+		walk(it)
+	}
+	return out
+}
+
+func parseModeConfig(mode string, m map[string]interface{}) ModeConfig {
+	c := ModeConfig{Mode: mode}
+	if v, ok := Int(m, "allowedTankLevels"); ok {
+		c.AllowedTankLevels = v
+	}
+	if v, ok := m["isAssemblingEnabled"].(bool); ok {
+		c.IsAssemblingEnabled = v
+	}
+	if v, ok := m["tankLevelPreferenceEnabled"].(bool); ok {
+		c.TankLevelPreference = v
+	}
+	if v, ok := m["voiceChatPreferenceEnabled"].(bool); ok {
+		c.VoiceChatPreference = v
+	}
+	if v, ok := m["hardVoiceCheckTime"].(float64); ok {
+		c.HardVoiceCheckTime, c.HardVoiceCheckTimeKnown = v, true
+	}
+	return c
+}
+
+// SlotCharges is one `vehiclesSlotsConfig/<nation>:<vehicle>` entry
+// (four charge counters).
+type SlotCharges struct {
+	Vehicle string
+	Charges [4]int64
+}
+
+// ParseSlotCharges collects vehiclesSlotsConfig entries.
+func ParseSlotCharges(items []interface{}) []SlotCharges {
+	var out []SlotCharges
+	var walk func(v interface{})
+	walk = func(v interface{}) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			if sm, ok := t["vehiclesSlotsConfig"]; ok {
+				if sd, ok := sm.(map[string]interface{}); ok {
+					for veh, e := range sd {
+						if em, ok := e.(map[string]interface{}); ok {
+							var sc SlotCharges
+							sc.Vehicle = veh
+							okAll := true
+							for i, k := range []string{"charge1", "charge2", "charge3", "charge4"} {
+								v, ok := Int(em, k)
+								if !ok {
+									okAll = false
+									break
+								}
+								sc.Charges[i] = v
+							}
+							if okAll {
+								out = append(out, sc)
+							}
+						}
+					}
+				}
+			}
+			for _, e := range t {
+				walk(e)
+			}
+		case []interface{}:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	for _, it := range items {
+		walk(it)
+	}
+	return out
+}

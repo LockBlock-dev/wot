@@ -679,7 +679,13 @@ speak back. Established Sep 20:
   (Sep-29 proxy session: 404 closed items = 103 maps + 55 lists +
   scalars; schema count/id/expires/tokens/customizations/
   vehTypeCompDescr/credits/seasonPoints… = shop/goodie/inventory
-  state). Shape census (Sep-29 dump, names only): 79 top-level
+  state). Typed assembly UNDERWAY (`lobby/assembly.go`: presence-
+  boolean accessors + `Offer` (both key shapes, `expires:{at}`,
+  8/8 Oct-01) + `Quest` (dq/wq legs, 3/3 Oct-01) + `PiggyBank` +
+  `ModeConfig` (epic/last_stand/squad) + `SlotCharges` (8+16 nations
+  over 2 sessions) — synthetic green, live-validated counts;
+  dossier objects (playerVehicles/marksOnGun) stay key-only (headless
+  fragment, no value schema on hand). Shape census (Sep-29 dump, names only): 79 top-level
   shapes (17× empty, 6× {enabled}, season/battle-pass, arena-config,
   missions|onboarding…) + 217 nested shapes in depth (28×
   enabled|milestones|vehicles, 20× count|expires and level|quest,
@@ -781,7 +787,13 @@ speak back. Established Sep 20:
   counter-as-entity-ID tested same-session vs 0x45 tuples → 0/30
   overlap (0x45s are 3 poll-answer classes, not entity-indexed);
   body[0] vs wire-ID tested → 30 distinct in [32,247], excludes
-  [0,40). Envelope-only verdict stands with new evidence
+  [0,40). Registration shape Oct-02 (bounded attempt):
+  `sub_142AD7A30(iface, name, r8b=1, r9d=argc, arginfo)`; arginfo
+  entries are Mercury dispatch machinery
+  (`InputMessageHandlerT`, `ServerConnection&+BinaryIStream&`
+  lambdas at `0x140E448E0+`), NOT per-arg readers — the arg stream
+  layout needs dispatch-following RE from the lambda. Envelope-only
+  verdict stands with new evidence
   (acked-only parity-sufficient for v1). 14.4 reference
   (`server_connection.cpp::createEntity`): `[EntityID u32][type]
   [pos][packedYPR][vehicleID][props]`, whole-message
