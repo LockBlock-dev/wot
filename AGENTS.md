@@ -855,7 +855,11 @@ speak back. Established Sep 20:
 2. Client ballistics (`Avatar.pyc` `__projectileMover`, gravity/drag):
    static shell-flight model from shipped bytecode.
 3. Telemetry census (`aogas…`, `collectUiStats` senders): what the
-   game phones home (`.pyc` + captures).
+   game phones home (`.pyc` + captures) — DONE Oct-02 (see
+   `NETWORK_PROTOCOL.md` §15): in-band UX events (7 subsystems ×
+   ~35 types incl. keyDown/Up, 70/batch, ≤70/session, engine
+   `logUXEvents`, server-gated); aogas = playtime-control;
+   HTTP bootstrap mapped (CSIS, WebCache, Vivox, dcont, RSS).
 4. Vehicle compDescr (10304 battle doc + `vehTypeCompDescr` blobs):
    tank descriptor format; unlocks dossier/vehicle parsing.
 5. Token anatomy (`token`/`token2`/`session` structures) — DONE
