@@ -845,3 +845,27 @@ speak back. Established Sep 20:
   is cross-cluster, the push is per-session. Game flows everywhere.
 - Archive captures as `captures/ours-p5-lobby-<date>.hex` + key file
   when a run is worth keeping.
+
+## Potential todos (untouched game surface, Oct-02)
+
+1. Event-mode entities in vendored `testdata/wotdefs` (`white_tiger`,
+   `fun_random`, `last_stand`, `comp7*`, `frontline`, `story_mode`,
+   battle-royale `Loot`/`Mine`/`ThunderStrike`/`Placement`/
+   `InfluenceZone`): data archaeology, zero live needs.
+2. Client ballistics (`Avatar.pyc` `__projectileMover`, gravity/drag):
+   static shell-flight model from shipped bytecode.
+3. Telemetry census (`aogas…`, `collectUiStats` senders): what the
+   game phones home (`.pyc` + captures).
+4. Vehicle compDescr (10304 battle doc + `vehTypeCompDescr` blobs):
+   tank descriptor format; unlocks dossier/vehicle parsing.
+5. Token anatomy (`token`/`token2`/`session` structures) — DONE
+   Oct-02 (offline, shapes only, see `WGC.md` §6): token2 =
+   `{9-digit accountID}:{18–19-digit middle}:{39-digit tail}` all
+   numeric (9 samples, 4 families); middle uniform-random-looking,
+   NOT a standard session-md5 transform (needs `-middle-out`
+   blob pairs live); `token` = 8 digits; 12-key login census pinned.
+6. Battle-results answers (852B `CMD_REQ_BATTLE_RESULTS` replies):
+   straight pickle decode from captures on hand.
+7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
+   `eu2-mitmproxy-flows`).
+8. FairPlay surface (observed-data-shapes only — dual-use adjacent).
