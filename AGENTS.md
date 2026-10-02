@@ -532,6 +532,15 @@ speak back. Established Sep 20:
   names, numbers, "battle") + 1148B structured table (u16s + space
   name "bwr.default") — the roster ground truth, unparsed. 1a/0x88
   tiny-zlib values fully decoded (slots 1–4, clock-like ~42–43 s).
+  1a/0x93 CLOSED Oct-02: battle-start arena-params doc — head
+  (player-name + account DB ID + ints + `ff aa 01 00`) + proto-2
+  pickle (10 keys: arenaKind/arenaTypeID/battleLevel/
+  battleModifiersDescr=nil/bonusCapsOverrides/botsDifficulty/
+  gameParamsRev/isRandomEventsAllowed/postmortemSettings{config,
+  gamemode}/reservesModifier), fully decoded with the existing
+  decoder (426B consumed); only the first 532B table carries it
+  (others = vehicle-descriptor doc + binary blobs); consumer
+  AvatarPostmortemComponent (shipped .pyc carries the keys).
   STILL OPEN: 11B field map, ID semantics, head layout, dir fields —
   needs engine volatile-write-for-client specifics or a fresh angle,
   not more blind correlation.
@@ -601,7 +610,10 @@ speak back. Established Sep 20:
   chunk 13 head carries one standalone session dict; whole flood is
   one ~6 s burst (no demand pattern vs C>S). Chunks 2+ are
   second-layer-or-pad — indistinguishable offline, acked-only is
-  parity-sufficient. Chunks are NOT independent (memo refs span chunks — chunk 2+
+  parity-sufficient (Oct-02 flows3 re-proof, 4th session: 40 frags
+  reassembled clean; chunk payloads reject all 6 rotation/login-key
+  forms + zlib; no static lever left — needs a live known-content
+  session or engine second-layer source). Chunks are NOT independent (memo refs span chunks — chunk 2+
   fails standalone at byte 1). Content = shop/offer defs (per-offer
   subdicts keyed `offer:<page>:<kind>:paid:<N>`, sequential memo).
   Per-capture NOISE: a few single/few-byte edits per 625KB at
@@ -822,7 +834,12 @@ speak back. Established Sep 20:
   not signal.
   OPEN: live fire from our client (builders offline-tested only);
   116B entity tables (envelope closed, content opaque — needs engine
-  pack tables or a live experiment, not more offline grinding).
+  pack tables or a live experiment, not more offline grinding: Oct-02
+  flows3 re-proof (correct-key channel decrypt) — 88B bodies uniform
+  4.8b entropy at EVERY position 0–83, concat 2464B H=7.85 no
+  zlib/ASCII/magic, ECB-2nd-layer under 6 key forms H≈6.1 unstructured,
+  all rotation/login-key chained forms fail; envelope-only verdict
+  stands).
 - EU2 wall MOVED Sep 27: p2 (.213:32821) now gives rotation+ticks
   like p5 (was zero bytes at 22B) but still no redirect — the park
   is cross-cluster, the push is per-session. Game flows everywhere.
