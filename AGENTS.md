@@ -914,6 +914,16 @@ speak back. Established Sep 20:
    sectioning closed); 5× 89B tankman blobs (type 8) correctly
    rejected; trawl 38 candidates. Open: component-ID resolution
    against vehicle XML tables.
+   Resolution DONE Oct-02 (`lobby/vehicle_table.go` + `vehicle_load.go`,
+   synthetic green): `ComponentTable`/`StaticTable`/`ResolveCompactDescr`
+   over unpacked item_defs (11 nations, 1252 vehicles, turret counts
+   from `<turrets0>` definitions — bare `<turret>` tags are position
+   vectors, `<turret>/<gun>` wrappers carry names as text); unknown
+   IDs fail loud. Real-tree validation: all turret names resolve in
+   nation ids tables. Wire cross-check anomaly (open): the single 69B
+   blob sections t=2 but its table row says 1 turret — mode roster,
+   battle-mode descr, or arithmetic coincidence; needs a second blob
+   to decide.
 5. Token anatomy (`token`/`token2`/`session` structures) — DONE
    Oct-02 (offline, shapes only, see `WGC.md` §6): token2 =
    `{9-digit accountID}:{18–19-digit middle}:{39-digit tail}` all
