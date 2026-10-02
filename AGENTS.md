@@ -570,8 +570,12 @@ speak back. Established Sep 20:
   posType{0,1,2}/dirType{0,1,2,3}, invalid = -13000/FLT_MAX, bias
   exactly -2.0, scale = runtime `[entity+0x130]+0x77C` (not a
   constant — scatter explained), ID = BW entity ID (lookup miss →
-  `No such entity`), per-axis mantissas 12/12/9b. Remaining static:
-  x/z convention, `[entity+13A8h]` conditional tail.
+  `No such entity`), per-axis mantissas 12/12/9b. Base-add CLOSED:
+  conditional on the `[entity+0x40]`-slot call returning NULL (base
+  triple `[entity+0x130]+{0x13A8,0x13AC,0x13B0}`, else used as-is).
+  Direction REFINED to signed reads with exact scales (roll11
+  2π/2048, pitch11 π/2048 half, yaw10 2π/1024; 8b 2π/256).
+  Remaining static: x/z convention, creation parse.
 - Item 4 CLOSED (unknown-led harvest, 3 sessions: Oct-01 54338,
   Sep-29 44395, flows3-s2): 1-byte resync inside rests recovers full
   trains where the strict walker stopped at the first unknown ID —
@@ -687,7 +691,11 @@ speak back. Established Sep 20:
   (pickle/zlib magic hits at chance rate, token strings zero) —
   incl. a recovered stage-1 rotation key as second layer; first
   bytes 22/26 ≥35, not method indices), chunks 2+ (indistinguishable offline),
-  subsystem assembly + speak-back (needs a stage-2 window).
+  subsystem assembly UNDERWAY (`lobby/assembly.go`: typed accessors
+  with presence booleans + `Offer` parse — key shapes
+  `offer:<page>:<kind>` and `offer:<page>:<kind>:paid:<N>:<M>`,
+  `{count, expires:{at}[, limit]}`, synthetic green, 8/8 offers from
+  Oct-01 salvage; speak-back still needs a stage-2 window).
 - Battle (CellApp arena) parsing is UNDERWAY (Sep-29 proxy match,
   11,421 datagrams, own channel key from the 790/984 token2-login
   leg — NOT the lobby keys): C>S = one family `[02 8b 58 4a][93
@@ -774,7 +782,13 @@ speak back. Established Sep 20:
   overlap (0x45s are 3 poll-answer classes, not entity-indexed);
   body[0] vs wire-ID tested → 30 distinct in [32,247], excludes
   [0,40). Envelope-only verdict stands with new evidence
-  (acked-only parity-sufficient for v1).
+  (acked-only parity-sufficient for v1). 14.4 reference
+  (`server_connection.cpp::createEntity`): `[EntityID u32][type]
+  [pos][packedYPR][vehicleID][props]`, whole-message
+  `CompressionIStream` (type byte 0–9) — our first bytes spread
+  [32,247], ruling stock compression out for the WoT fork;
+  head-vs-tail ID tested 0/30. +9 stride open (cumulative vs
+  ID-stride).
   804B infos CLOSED Oct-02 (flows3-s2, fixed key): server_settings /
   feature-flags small (genuinely custom, NOT a bulk fragment: no
   chunk header, zero pickle docs ≥30B at any offset, 794B cleartext
