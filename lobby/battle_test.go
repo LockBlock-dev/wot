@@ -1,4 +1,4 @@
-package login
+package lobby
 
 // Offline battle parser tests (synthetic fixtures only).
 import (

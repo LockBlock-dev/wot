@@ -1,4 +1,4 @@
-package login
+package lobby
 
 // Stage-2 lobby base-call builders (C>S, game-vector pinned Sep 27).
 //

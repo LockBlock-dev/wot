@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/LockBlock-dev/wot/lobby"
 	"github.com/LockBlock-dev/wot/login"
 )
 
@@ -127,7 +128,7 @@ func analyzeStream(path string) {
 }
 
 func printInventory(app []byte) {
-	segs := login.Inventory(app)
+	segs := lobby.Inventory(app)
 	fmt.Printf("inventory segments=%d\n", len(segs))
 	for i, s := range segs {
 		if i >= 12 {
@@ -144,7 +145,7 @@ func printInventory(app []byte) {
 			fmt.Printf("  doc@%d %s (%dB)\n", s.Offset, s.Summary, s.Consumed)
 		}
 	}
-	counts, docs, gaps, valid := login.HarvestStream(app)
+	counts, docs, gaps, valid := lobby.HarvestStream(app)
 	fmt.Printf("harvest: docs=%d gaps=%d validPrefix=%dB distinctKeys=%d\n", docs, gaps, valid, len(counts))
 	type kv struct {
 		k string

@@ -1,4 +1,4 @@
-package login
+package lobby
 
 import (
 	"encoding/binary"

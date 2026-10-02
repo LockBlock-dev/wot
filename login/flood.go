@@ -106,15 +106,6 @@ type FloodStats struct {
 	Skipped   int
 }
 
-// Frag is one stage-2 bulk chunk: the server sends each chunk as a
-// burst of same-seq datagrams (first = header, rest = continuations;
-// bursts arrive contiguously — audited 48/48 runs on two captures).
-type Frag struct {
-	Seq     uint32
-	NN      int // 1-based chunk index from the head header (0 if unrecognized)
-	Payload []byte
-}
-
 // ReassembleFrags reassembles the stage-2 bulk bundle: S>C datagrams
 // of fragSize on the flow, decrypted with blockKey, grouped by
 // channel seq (chunk id) in first-arrival order with cumulative

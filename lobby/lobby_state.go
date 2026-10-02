@@ -1,4 +1,4 @@
-package login
+package lobby
 
 // Lobby application state from the stage-2 bulk bundle (offline).
 //

@@ -1,4 +1,4 @@
-package login
+package lobby
 
 // Offline lobby-state conversion tests (synthetic fixtures only).
 import (
