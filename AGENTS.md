@@ -871,7 +871,11 @@ speak back. Established Sep 20:
 6. Battle-results answers (852B `CMD_REQ_BATTLE_RESULTS` replies):
    straight pickle decode from captures on hand.
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
-   `eu2-mitmproxy-flows`).
+   `eu2-mitmproxy-flows`) — DONE Oct-02 (see `NETWORK_PROTOCOL.md`
+   §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,
+   XMPPCS token login, disconnects reported to server; 124B list
+   proven bosh-only on lobby-#2 wire (per-flow key recovery);
+   distinct layer from the (98,25) BaseApp tails.
 8. FairPlay surface (observed-data-shapes only — dual-use adjacent) —
    DONE Oct-02: 6 def components (5 empty shells; Account
    `setupArena(config: PYTHON)` opaque cell-side; Avatar
