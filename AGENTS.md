@@ -853,7 +853,15 @@ speak back. Established Sep 20:
    battle-royale `Loot`/`Mine`/`ThunderStrike`/`Placement`/
    `InfluenceZone`): data archaeology, zero live needs.
 2. Client ballistics (`Avatar.pyc` `__projectileMover`, gravity/drag):
-   static shell-flight model from shipped bytecode.
+   static shell-flight model from shipped bytecode — DONE Oct-02:
+   integrator is engine `BigWorld.PyBallisticsSimulator` (pure
+   gravity `(0,-g,0)`, NO drag field anywhere; server-authoritative
+   `collideWithSpaceBB`; client snaps to server snapshot beyond
+   20 m); per-(gun,shell) `speed` 750–1000 m/s, `gravity` 9.81
+   standard / 125–190 HE+howitzer plunging arcs / 0.8 meme (JP
+   12cm Funshinhou) / 8.81 story-mode, `maxDistance` 720 (10000
+   arty); visuals hidden-model + tracers, own-shot autoscale ≤180 m,
+   arty via `PySalvo`, hide/explode/hold lifecycle.
 3. Telemetry census (`aogas…`, `collectUiStats` senders): what the
    game phones home (`.pyc` + captures) — DONE Oct-02 (see
    `NETWORK_PROTOCOL.md` §15): in-band UX events (7 subsystems ×
