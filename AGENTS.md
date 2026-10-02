@@ -698,7 +698,8 @@ speak back. Established Sep 20:
   float tail, packed formats need engine tables); fragmented
   ff/45/46 shapes fail cleanly (16/3/3, need reassembly).
 - STAGE-1 PARK (Sep 21 ~18:35–19:45, 12+ consecutive identical runs,
-  plus Sep 27 ~22:43 p5 and ~22:55 p2, plus Sep 28 p5 live-fire:
+  plus Sep 27 ~22:43 p5 and ~22:55 p2, plus Sep 28 p5 live-fire, plus
+  Oct-02 `.215:32836` re-proof (fresh GUID, 90 s budget):
   rotation-ok throughout, 250+ ticks, no redirect — opener unfired):
   server sends rotation (36B) + ticks only (cumul=0, no 52B reply, no
   0x44 redirect, auth1 never answered) then 25 s timeout. NOT the live
@@ -711,6 +712,9 @@ speak back. Established Sep 20:
   needs WGC (Proton env). Park = likely account-level velocity
   throttle (slow decay) and/or basic-auth deprioritization — STAND
   DOWN live attempts for hours, not minutes.
+  Oct-02 parked-tick detail (same run): each 28B server tick carries
+  an incrementing app byte (walker `id` 0x00→0xfb across the run —
+  new observable, meaning open: tick counter vs channel echo).
   Genuine stage-1 mirror fix ARMED in the same window: auth1 is now
   unreliable 28B `[02][key]` with NO early 0x0b (flows 38/10 prove
   the game sends 28+28, server sends the 52B; our reliable-52B+0x0b
