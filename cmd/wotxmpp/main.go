@@ -244,6 +244,7 @@ func main() {
 	envPath := flag.String("env", "live.env", "KEY=VALUE secrets file (for -auth)")
 	auth := flag.Bool("auth", false, "attempt SASL PLAIN with live.env creds (read-only after)")
 	token := flag.String("token", "", "XMPPCS/JWT chat token (from the requestToken answer smalls); SASL PLAIN with DBID identity")
+	tokenFile := flag.String("token-file", "", "read the token from a file instead (avoids shell history)")
 	authcid := flag.String("authcid", "", "SASL username override (default LOGIN)")
 	bosh := flag.Bool("bosh", false, "BOSH session create over HTTPS (framing only)")
 	dbid := flag.String("dbid", "", "SASL authcid override (default: live.env LOGIN); JID node for display lengths")
@@ -255,7 +256,15 @@ func main() {
 		return
 	}
 	if *auth {
-		saslAuth(*host, *tcpPort, *domain, *envPath, *dbid, *authcid, *token, *timeout)
+		tok := *token
+		if *tokenFile != "" {
+			raw, err := os.ReadFile(*tokenFile)
+			if err != nil {
+				fatal(err)
+			}
+			tok = strings.TrimSpace(string(raw))
+		}
+		saslAuth(*host, *tcpPort, *domain, *envPath, *dbid, *authcid, tok, *timeout)
 		return
 	}
 	tcpPing(*host, *tcpPort, *domain, *timeout)
