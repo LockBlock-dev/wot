@@ -49,6 +49,13 @@ game.env
 
 # Scratch / local artifacts (never commit)
 zz-*
+zz_*
 *.clear
 flood.hex
 stage2.key
+
+# Live keyfile tailed by wotproxy -keyfile / written by wotkeydump (cwd)
+wotkeys.txt
+
+# Local run logs
+*.log

@@ -162,6 +162,10 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 			g.shape, g.ddNN = 0, 1
 		case len(pay) >= 8 && pay[5] == 0xDD && pay[6] == 0x00:
 			g.shape = 1
+			// NN validity window 1..128 is a LOCAL sanity bound
+			// (observed bundles run 40-48 chunks; 128 caps a
+			// corrupt pay[7] from forging phantom chunks), not a
+			// wire constant.
 			if nn := int(pay[7]); nn >= 1 && nn <= 128 {
 				g.ddNN = nn
 			}
@@ -203,6 +207,7 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 			nn, body = g.ddNN, g.head[8:]
 		case 2:
 			if base != 0 {
+				// Same 1..128 local sanity bound as above.
 				if n := g.oddB - base; n >= 1 && n <= 128 {
 					nn = n
 				}
@@ -449,6 +454,10 @@ func CensusSmalls(dump []DumpDatagram, flowSubstr string, fragSize int, blockKey
 			if m.ID != 0x1a && m.ID != 0x46 {
 				continue
 			}
+			// DecodeAt's 15-byte scan cap is a LOCAL parse budget
+			// (small bodies open with framing bytes, so a doc
+			// starting past 15 is noise for census purposes),
+			// not a wire constant.
 			v, _, _, err := lobby.DecodeAt(m.Body, 15)
 			if err != nil {
 				continue

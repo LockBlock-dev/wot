@@ -141,3 +141,74 @@ func TestDoCmdIntArrLongCount(t *testing.T) {
 		t.Fatalf("lenword=%d want %d", binary.LittleEndian.Uint16(app[1:3]), wantLen)
 	}
 }
+
+func TestRequestSequences(t *testing.T) {
+	// Base sequence: repository starts at 220, first allocation 221,
+	// wraps 30000 -> 220 (Account.__getRequestID + UNRESERVED range).
+	b := NewBaseRequestIDs()
+	for want := uint16(221); want <= 223; want++ {
+		if got := b.NextBaseID(); got != want {
+			t.Fatalf("base id = %d, want %d", got, want)
+		}
+	}
+	b.cur = 29999
+	if got := b.NextBaseID(); got != 220 {
+		t.Fatalf("base wrap = %d, want 220", got)
+	}
+	if got := b.NextBaseID(); got != 221 {
+		t.Fatalf("base rewrap = %d, want 221", got)
+	}
+	// Token sequence: shared class-level generator from 0, first
+	// allocation 1 (TokenRequester), wrap 32767 -> 0.
+	tk := NewTokenRequestIDs()
+	if got := tk.NextTokenID(); got != 1 {
+		t.Fatalf("token id = %d, want 1", got)
+	}
+	tk.cur = 32766
+	if got := tk.NextTokenID(); got != 0 {
+		t.Fatalf("token wrap = %d, want 0", got)
+	}
+	if got := tk.NextTokenID(); got != 1 {
+		t.Fatalf("token rewrap = %d, want 1", got)
+	}
+	// Chat sequence: per-ClientChat generator, same 0/32767 rule.
+	ch := NewChatRequestIDs()
+	if got := ch.NextChatID(); got != 1 {
+		t.Fatalf("chat id = %d, want 1", got)
+	}
+	if got := ch.NextChatID(); got != 2 {
+		t.Fatalf("chat id = %d, want 2", got)
+	}
+}
+
+func TestOpenerIDOrder(t *testing.T) {
+	// The genuine opener IDs are allocator outputs, not constants:
+	// replaying the fixed call order through fresh sequences must
+	// yield exactly the wire IDs (Oct-01: base 221-226, token 1-2,
+	// chat 1-2), with the fire-and-forget poll pinned at 202.
+	baseIDs := NewBaseRequestIDs()
+	tokenIDs := NewTokenRequestIDs()
+	chatIDs := NewChatRequestIDs()
+	var base, token, chat []uint64
+	base = append(base, uint64(baseIDs.NextBaseID()), uint64(baseIDs.NextBaseID()), uint64(baseIDs.NextBaseID()))
+	token = append(token, uint64(tokenIDs.NextTokenID()))
+	base = append(base, uint64(baseIDs.NextBaseID()))
+	token = append(token, uint64(tokenIDs.NextTokenID()))
+	base = append(base, uint64(baseIDs.NextBaseID()), uint64(baseIDs.NextBaseID()))
+	chat = append(chat, uint64(chatIDs.NextChatID()), uint64(chatIDs.NextChatID()))
+	wantBase := []uint64{221, 222, 223, 224, 225, 226}
+	for i, w := range wantBase {
+		if base[i] != w {
+			t.Fatalf("base[%d] = %d, want %d", i, base[i], w)
+		}
+	}
+	if token[0] != 1 || token[1] != 2 {
+		t.Fatalf("token ids = %v, want [1 2]", token)
+	}
+	if chat[0] != 1 || chat[1] != 2 {
+		t.Fatalf("chat ids = %v, want [1 2]", chat)
+	}
+	if RequestIDNoResponse != 202 {
+		t.Fatalf("no-response id = %d, want 202", RequestIDNoResponse)
+	}
+}

@@ -47,6 +47,6 @@ touches the network path, skipped under `-short`).
 ## Docs
 
 - `AGENTS.md` — layout, standards, live status/blockades.
-- `../NETWORK_PROTOCOL.md` — LoginApp/BaseApp wire truth.
-- `../REPLAY.md` — replay container/crypto/playback (§6 before
+- `../docs/NETWORK_PROTOCOL.md` — LoginApp/BaseApp wire truth.
+- `../docs/REPLAY.md` — replay container/crypto/playback (§6 before
   regenerating `replay/*_gen.go`).

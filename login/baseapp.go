@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"github.com/LockBlock-dev/wot/lobby"
 	"net"
@@ -467,18 +468,10 @@ func structSig(clear []byte, replyID uint32) string {
 // (proven live on p5). Default mirrors the genuine wire.
 var StageBareAuth = false
 
-// StageLobby (CLI -lobby) speaks the genuine stage-2 opening script
-// (sync bundles, requestToken, server-stats polls — game vectors,
-// primeBundled, reliable, no aux; replaces heartbeat+probes).
-// Builders in lobbycalls.go; live effect under test.
-var StageLobby = false
-
-// parseRedirect scans a stage-2 cleartext for the 0x1a/type-0x79 redirect:
+// parseLobbyRedirect scans a stage-2 cleartext for the 0x1a/type-0x79 redirect:
 // [1a][79][len8][innerlen8][IP string][sep u8][port u16 BE][13B]. The
 // server repeats it (~10 s cadence, rotating candidate hosts, constant
 // port 32956) until the client follows (genuine: switchBaseApp).
-// TEMPORARY experiment scaffolding (revert with recorder) — the parse
-// itself documents §11 wire truth.
 func parseLobbyRedirect(clear []byte) (string, int, bool) {
 	for i := 0; i+4 < len(clear); i++ {
 		if clear[i] != 0x1a || clear[i+1] != 0x79 {
@@ -646,15 +639,33 @@ func stageRead(conns []Transport, end time.Time, buf []byte) []byte {
 	return nil
 }
 
+// StageOneBudget is the negotiation-channel window: the genuine client
+// resends its 22B unbounded (~0.5 s cadence, 192 attempts ≈ 96 s seen
+// vs a silent manager in logins.pcapng), so a short budget can miss a
+// late redirect. Default stays single-shot leases (25 s); long-haul
+// runs raise it (game-like 120 s) via the CLI.
+var StageOneBudget = 25 * time.Second
+
+// StageOneResends caps unreliable-auth1 retransmits while the server
+// stays silent (one per 1 s quiet loop). Default 9; long-haul raises
+// it to cover the extended budget (game resends unbounded).
+var StageOneResends = 9
+
 // stageOneScript runs the negotiation-channel script on the LOGIN
-// socket: the rotation is already in hand (newKey), so the
-// rotation-ack/ping + reliable authenticate go out immediately, every
-// later server message gets a pure ack, and the [13][3f] redirect ends
-// the stage. Counters mirror genuine: unreliable seq from 2, reliable
-// seq 0, cumul = acked server seq + 1. The reliable authenticate is
-// resent while the server stays silent (exe timer wheel keeps reliable
-// in flight via sendNextRequest; exact interval unresolved, 1 s here),
-// same reliable seq 0 with the latest cumul. Sizes only in errors.
+// socket: ack0 (bare aux, no app) then the reliable authenticate
+// (~10 ms later, mirroring the game's Python/dispatcher lag), every
+// later server message gets a pure ack, and the [44] redirect ends
+// the stage. Decrypt-proven on TWO successful lobby sessions (flows3
+// Sep-17 + proxy-20261001 Oct-01, both via recovered login keys):
+// auth1 is RELIABLE [02][key] WITH the 0x0b enableEntities trailer
+// (flags 5804, reliable seq 0) — the server answers 52B, then ticks,
+// then the redirect. (A size-only reading of 28+28 once suggested an
+// unreliable bare auth1 — WITHDRAWN Oct-03: both shapes are 28B on
+// the wire, only decrypt decides, and decrypt says reliable+0b
+// twice.) Counters mirror genuine: reliable seq 0 (auth1, resent in
+// place while silent), unreliable seq from 2, cumul = acked server
+// seq + 1, aux = (reliableSent-1) per exe ch+0x158 (all-bits before
+// auth1, 0 after). Sizes only in errors.
 func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net.UDPAddr, newKey uint32, blockKey string, outcomes []string) (*net.UDPAddr, error) {
 	got := append([]string{}, outcomes...)
 	send := func(tag string, pkt []byte) error {
@@ -680,38 +691,30 @@ func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net
 	if err := send("→ack0", append(append([]byte{}, prefix[:]...), ack0enc...)); err != nil {
 		return nil, err
 	}
-	// GENUINE SHAPE (flows 38/10): the stage-1 authenticate is a second
-	// UNRELIABLE 28B ([02][key], NO 0x0b — enableEntities belongs to the
-	// stage-2 first authenticate), not a reliable 52B. The reliable
-	// auth1 + early 0x0b was our invention; the server tolerates it
-	// only sometimes (3/11 runs). Mirror the game exactly.
-	// TEMPORARY no-auth1 experiment (revert after): maybe the game sends
-	// NO authenticate at stage-1 at all (its 28B#2 = re-ack; the 0x0b
-	// was never ours to send early) and our unsolicited auth1 parks us
-	// when the server is strict. ack0 + pure acks until 0x44 redirect.
-	const tempNoAuth1 = true
-	auth1, err := buildChannelPacket(blockKey, flagsUnrel, buildAuthenticate(newKey), auxFor(0), 2, 1)
+	// Decrypt-proven shape (flows3 + proxy-20261001, both successful
+	// lobbies): auth1 is RELIABLE [02][key] WITH 0x0b (flags 5804,
+	// reliable seq 0, cumul 1) ~10 ms after ack0 — the 52B answer
+	// follows only with the 0b trailer present (bare-auth runs get
+	// heartbeats but never infos).
+	auth1, err := buildChannelPacket(blockKey, flagsRel, authApp(newKey), nil, 0, 1)
 	if err != nil {
 		return nil, err
 	}
 	// 1:1 MIRROR: the genuine client authenticates ~10ms after the
-	// rotation (EU2 532→544, EU5 632→642 — Python/dispatcher lag).
+	// rotation (flows3 532→544, Oct-01 20:08:01.181→.192 —
+	// Python/dispatcher lag).
 	time.Sleep(10 * time.Millisecond)
-	if !tempNoAuth1 {
-		if err := send("→auth1", auth1); err != nil {
-			return nil, err
-		}
-	} else {
-		got = append(got, "→auth1 SKIPPED (tempNoAuth1)")
+	if err := send("→auth1", auth1); err != nil {
+		return nil, err
 	}
-	var relSent uint32 // reliable-send counter; aux word source (exe ch+0x158)
-	// No reliable sends at stage-1 anymore (genuine shape): aux stays
-	// all-bits, unreliable seq continues after auth1's seq 2.
-	var unrel uint32 = 3
+	var relSent uint32 = 1 // reliable auth1 went out (seq 0): later
+	// aux words are 0 (exe ch+0x158 = reliableSent-1); unreliable seq
+	// continues from 2 (flows3 pure-acks 2,2 3,3 4,4).
+	var unrel uint32 = 2
 	var lastSeq uint32 // rotation reply was server seq 0
 	buf := make([]byte, 2048)
-	end := time.Now().Add(25 * time.Second)
-	resends := 0 // reliable-auth1 retransmits after the first send
+	end := time.Now().Add(StageOneBudget)
+	resends := 0 // reliable-auth1 retransmits (same seq 0) after the first send
 	for {
 		wait := time.Now().Add(1 * time.Second)
 		if wait.After(end) {
@@ -722,18 +725,16 @@ func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net
 			if !time.Now().Before(end) {
 				return nil, fmt.Errorf("wotlogin: stage-1 no redirect (%v)", got)
 			}
-			if resends >= 9 {
+			if resends >= StageOneResends {
 				return nil, fmt.Errorf("wotlogin: stage-1 auth unacked (%v)", got)
 			}
-			if tempNoAuth1 {
-				resends++
-				continue
-			}
-			retry, err := buildChannelPacket(blockKey, flagsUnrel, buildAuthenticate(newKey), auxFor(relSent), unrel, lastSeq+1)
+			// Resend the reliable auth1 in place (same seq 0, latest
+			// cumul — exe timer wheel keeps reliable in flight via
+			// sendNextRequest).
+			retry, err := buildChannelPacket(blockKey, flagsRel, authApp(newKey), nil, 0, lastSeq+1)
 			if err != nil {
 				return nil, err
 			}
-			unrel++
 			if err := send(fmt.Sprintf("→auth1r%d(c%d)", resends+1, lastSeq+1), retry); err != nil {
 				return nil, err
 			}
@@ -747,14 +748,6 @@ func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net
 		if err != nil {
 			got = append(got, fmt.Sprintf("%dB undecryptable", len(data)))
 			continue
-		}
-		// TEMPORARY stage-1 forensics (revert after): cleartext of the
-		// 40-60B infos only (rotation/key material excluded by size).
-		if len(data) >= 40 && len(data) <= 60 {
-			if sf, err := os.OpenFile("/tmp/opencode/stage1.hex", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-				fmt.Fprintf(sf, "S>C %d %x\n", len(data), clear)
-				sf.Close()
-			}
 		}
 		entry := fmt.Sprintf("%dB", len(data))
 		if sq, cu, ok := channelSeqs(clear); ok {
@@ -795,9 +788,10 @@ func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net
 // stage-2 info is 76B, heartbeats top out at 68B — the old ≥76B gate
 // accepted the pre-flood info as success).
 func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uint32, blockKey string, mtu int) error {
-	// TEMPORARY burst-loss experiment (revert after): the lobby bundle
-	// lands ~150×1252B in ~6 ms; a small rcvbuf drops fragments the
-	// server then considers acked (cumul overshoot) and never resends.
+	// The lobby bundle lands ~150×1252B in ~6 ms; a small rcvbuf drops
+	// fragments the server then considers acked (cumul overshoot) and
+	// never resends (burst loss is real: 175 frags vs ~150). 4 MiB
+	// keeps the burst in-kernel.
 	_ = conn.SetReadBuffer(4 << 20)
 	rid2 := smallRID()
 	build22 := func(rid uint32, att uint8) []byte {
@@ -825,52 +819,61 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 	var lastSeq uint32
 	var rotated, progress bool
 	var stageKey uint32 // rotation key (primeBundle auth for lobby sends)
-	// StageLobby opener state (genuine script, game vectors Sep 27).
+	// Lobby opener state (genuine script, game vectors Sep 27 +
+	// Oct-01). Request IDs are NOT constants: base/token/chat each
+	// allocate from their own fresh sequence (lobby.RequestSequence),
+	// and the genuine IDs fall out of the fixed call order (base
+	// 221,222,223,224,225,226; token 1,2; chat 1,2).
+	baseIDs := lobby.NewBaseRequestIDs()
+	tokenIDs := lobby.NewTokenRequestIDs()
+	chatIDs := lobby.NewChatRequestIDs()
 	var firstData time.Time
 	var openStep int
 	var openAt, lastPoll time.Time
-	var poolID uint16 = 220 // client request-ID pool (MIN+20)
-	var nredir int          // TEMPORARY redirect-follow experiment (revert after)
-	// TEMPORARY flood recorder (revert after): dump stage-2 traffic.
+	// Lobby answer census (post-flood S>C small sizes + poll-answer
+	// watch): the live success signals for speak-back.
+	var census = map[int]int{}
+	var lastPollSent time.Time
+	var pollAnswers int
+	var pollsSent int
+	// Flood recorder (offline-analysis harness): when WOT_FLOOD_DUMP is
+	// set, dump stage-2 traffic to /tmp/opencode/flood.hex (<ts> <dir>
+	// <len> <hex>) with the per-run channel key alongside (stage2.key,
+	// RAW bytes, ephemeral session — dead in minutes). Off by default:
+	// the library otherwise writes nothing to disk.
 	var recFile *os.File
-	var recUntil time.Time
-	// TEMPORARY heartbeat experiment (revert after): clientToServerHeartbeat
-	// (BaseAppExt wire ID 14 = 0x0e, FIXED-0, registered with length 0 at
-	// sub_140240640, sent via Bundle::addMessage at sub_140E50600) every 5 s.
-	const tempHeartbeat = true
-	const msgHeartbeat = 0x0e
-	var lastBeat time.Time
-	// TEMPORARY doCmd probe (revert after): genuine lobby sends 60B
-	// doCmdInt3-shaped calls (A1 0x95 = 136 + rank13, codebook-closed).
-	// Probe doCmdInt3(202, 501, 0, 0, 0) (server-stats query,
-	// read-only), one per ~2 s after flood+3 s — watch for any 36B+
-	// response.
-	const tempProbe = true
-	var probedAt time.Time
-	var probeIdx int
+	var recStart time.Time
+	floodDump := os.Getenv("WOT_FLOOD_DUMP") != ""
+	// clientToServerHeartbeat note (BaseAppExt wire ID 14 = 0x0e, FIXED-0,
+	// sub_140240640): fired during the pre-lobby experiments (accepted, no
+	// kick, no observable effect — keepalive only). The lobby phase
+	// supersedes it: syncs + polls + ack traffic keep the channel alive,
+	// so no heartbeat is sent anymore.
+	var floodSeen bool
+	var floodSeenAt time.Time
 	sendLogged := func(pkt []byte) error {
 		if recFile != nil {
-			fmt.Fprintf(recFile, "%.3f C>S %d %x\n", time.Since(recUntil).Seconds(), len(pkt), pkt)
+			fmt.Fprintf(recFile, "%.3f C>S %d %x\n", time.Since(recStart).Seconds(), len(pkt), pkt)
 		}
 		return send(pkt)
 	}
 	buf := make([]byte, 2048)
-	end := time.Now().Add(30 * time.Second)
-	if tempHeartbeat {
-		end = time.Now().Add(60 * time.Second)
-	}
-	if StageLobby {
-		end = time.Now().Add(90 * time.Second)
-	}
+	end := time.Now().Add(90 * time.Second)
 	// sendLobby frames one primeBundled reliable app bundle (game shape:
 	// flags 0458, [02][newkey], concatenated base calls, no aux) and
-	// reports its size only.
+	// reports its size only. Reliable seq is the reliable-send counter
+	// (genuine Oct-01: s2auth 0, sync1 1, token 2, sync2 3, poll 4 ... —
+	// one counter, incremented per reliable send, NOT the unreliable
+	// counter): relSent tracks it (1 after the double-auth above).
 	sendLobby := func(tag string, calls ...[]byte) error {
-		pkt, err := buildChannelPacket(blockKey, flagsRel, lobby.BuildLobbyBundle(stageKey, calls...), nil, unrel, lastSeq+1)
+		pkt, err := buildChannelPacket(blockKey, flagsRel, lobby.BuildLobbyBundle(stageKey, calls...), nil, relSent, lastSeq+1)
 		if err != nil {
 			return err
 		}
-		unrel++
+		relSent++
+		if tag == "poll" {
+			lastPollSent = time.Now()
+		}
 		if err := sendLogged(pkt); err != nil {
 			return err
 		}
@@ -882,6 +885,24 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 		return err
 	}
 	for {
+		// The lobby phase runs 45 s past the flood (opener + polls +
+		// answers), then reports the census: the flood is the
+		// entry, the answers are the proof of speak-back. This is
+		// the default -baseapp behavior (hangar-ward, no extra
+		// flags): single-shot victory at the flood is gone.
+		if !floodSeenAt.IsZero() {
+			if want := floodSeenAt.Add(60 * time.Second); end.Before(want) {
+				end = want
+			}
+			if time.Since(floodSeenAt) > 45*time.Second {
+				fmt.Fprintf(os.Stderr, "[wotlogin] lobby done polls=%d answers~%d smalls=%v\n",
+					pollsSent, pollAnswers, census)
+				if recFile != nil {
+					recFile.Close()
+				}
+				return nil
+			}
+		}
 		if time.Now().After(end) {
 			if recFile != nil {
 				recFile.Close()
@@ -910,19 +931,37 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 		got = append(got, fmt.Sprintf("%dB", len(data)))
 		if len(data) >= 1000 {
 			// Size alone is not proof (unconnected socket): the
-			// flood must decrypt under our channel key.
+			// flood must decrypt under our channel key. The bulk
+			// is 1252B exactly in every capture (327–489
+			// datagrams; smalls trains top out at 1244B and only
+			// ever answer our syncs, which we haven't sent) — so
+			// a decrypt-verified 1252B IS the lobby flood.
 			if _, err := decryptBlowfish(blockKey, data[4:]); err != nil {
 				continue
 			}
-			if recFile == nil {
+			if len(data) == 1252 {
+				if !floodSeen {
+					floodSeen = true
+					floodSeenAt = time.Now()
+					fmt.Fprintf(os.Stderr, "[wotlogin] stage2 FLOOD 1252B (decrypt-verified)\n")
+				}
+				// Stay on the channel into the lobby phase below
+				// (dump mode records the window alongside).
+			}
+			// NOTE: floodSeen is 1252-only. Other decrypt-verified
+			// 1000B+ trains (1244/1220 smalls answers) still open
+			// the dump recorder below when asked, but must not
+			// start the lobby-exit clock or the answer census.
+			if floodDump && recFile == nil {
 				recFile, _ = os.Create("/tmp/opencode/flood.hex")
-				recUntil = time.Now()
-				// TEMPORARY (revert with recorder): per-run channel key.
+				recStart = time.Now()
+				// Per-run channel key alongside (RAW bytes,
+				// ephemeral session — dead in minutes).
 				os.WriteFile("/tmp/opencode/stage2.key", []byte(blockKey), 0600)
 			}
 		}
 		if recFile != nil {
-			fmt.Fprintf(recFile, "%.3f S>C %d %x\n", time.Since(recUntil).Seconds(), len(data), data)
+			fmt.Fprintf(recFile, "%.3f S>C %d %x\n", time.Since(recStart).Seconds(), len(data), data)
 			if time.Now().After(end) {
 				recFile.Close()
 				return nil // recorded full window
@@ -941,41 +980,47 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 		if firstData.IsZero() {
 			firstData = time.Now()
 		}
-		// TEMPORARY redirect-policy experiment (revert after): follow the
-		// FIRST redirect and STAY (log later ones without following) —
-		// tests whether hop #1 serves entities on its own.
+		// Post-flood census + poll-answer watch (genuine: every 60B
+		// poll draws a 36B answer in ~100 ms — the live signal that
+		// a sync was heard). A 324 body is the dossier answer the
+		// sweep hunts: logged loudly with its position.
+		if floodSeen {
+			census[len(data)]++
+			if len(data) == 36 && !lastPollSent.IsZero() && time.Since(lastPollSent) < time.Second {
+				pollAnswers++
+			}
+			if len(data) == 324 {
+				fmt.Fprintf(os.Stderr, "[wotlogin] lobby 324 DOSSIER[channel-seq]\n")
+			}
+		}
+		// Lobby offers (1a79): the game NEVER follows these (Oct-01
+		// genuine session: 4 offers, client stayed put) — only the
+		// stage-1 [44] redirect moves us, and that already happened
+		// (stageTwo starts at its target). Re-hopping here abandons a
+		// possibly-primed channel and resets the handshake, which is
+		// the prime suspect for the post-redirect stall. So: log and
+		// stay, like the game.
 		if host, port, ok := parseLobbyRedirect(clear); ok {
 			addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
 			if err == nil && (target == nil || addr.String() != target.String()) {
-				if nredir < 1 {
-					nredir++
-					target = addr
-					rid2 = smallRID()
-					att = 1
-					rotated = false
-					relSent = 0
-					unrel = 2
-					lastSeq = 0
-					progress = false
-					stageKey = 0
-					firstData = time.Time{}
-					openStep = 0
-					poolID = 220
-					lastPoll = time.Time{}
-					lastBeat = time.Now()
-					fmt.Fprintf(os.Stderr, "[wotlogin] redirect #%d → %s\n", nredir, addr.String())
-					if err := send(build22(rid2, att)); err != nil {
-						return err
-					}
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "[wotlogin] redirect ignored (staying) → %s\n", addr.String())
+				fmt.Fprintf(os.Stderr, "[wotlogin] stage2 lobby offer (staying) → %s\n", addr.String())
 			}
 		}
 		if !rotated {
 			if key2, ok := stageKeyOf(data, rid2, blockKey); ok {
 				rotated = true
 				stageKey = key2
+				fmt.Fprintf(os.Stderr, "[wotlogin] stage2 rotation-2 ok\n")
+				if floodDump {
+					// Persist the rotation key for offline
+					// second-layer probing (undecryptable
+					// answers, bulk chunks 2+): RAW LE bytes
+					// hex, ephemeral session, 0600. Lengths
+					// only in logs, never values.
+					var kb [4]byte
+					binary.LittleEndian.PutUint32(kb[:], key2)
+					os.WriteFile("/tmp/opencode/stage2-rot.key", []byte(hex.EncodeToString(kb[:])), 0600)
+				}
 				first, err := buildChannelPacket(blockKey, flagsUnrel, buildAuthenticate(key2), auxFor(relSent), 1, lastSeq+1)
 				if err != nil {
 					return err
@@ -991,6 +1036,7 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 					return err
 				}
 				relSent = 1 // s2auth went out (reliable seq 0)
+				fmt.Fprintf(os.Stderr, "[wotlogin] stage2 double-auth out\n")
 				continue
 			}
 		}
@@ -1002,65 +1048,67 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 		if err := sendLogged(ack); err != nil {
 			return err
 		}
-		// TEMPORARY heartbeat experiment (revert after).
-		if !StageLobby && tempHeartbeat && rotated && time.Since(lastBeat) > 5*time.Second {
-			hb, err := buildChannelPacket(blockKey, flagsUnrel, []byte{msgHeartbeat}, auxFor(relSent), unrel, lastSeq+1)
-			if err != nil {
-				return err
-			}
-			unrel++
-			if err := sendLogged(hb); err != nil {
-				return err
-			}
-			lastBeat = time.Now()
-		}
-		// TEMPORARY doCmd probe (revert after).
-		if !StageLobby && tempProbe && rotated && recFile != nil && probeIdx < 4 && (probedAt.IsZero() && time.Since(recUntil) > 3*time.Second || !probedAt.IsZero() && time.Since(probedAt) > 2*time.Second) {
-			app := lobby.DoCmdInt3(202, 501, 0, 0, 0) // A1 0x95 inside
-			pr, err := buildChannelPacket(blockKey, flagsUnrel, app, auxFor(relSent), unrel, lastSeq+1)
-			if err != nil {
-				return err
-			}
-			unrel++
-			if err := sendLogged(pr); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "[wotlogin] probe #%d A1=0x95 doCmdInt3(202,501,0,0,0)\n", probeIdx)
-			probedAt = time.Now()
-			probeIdx++
-		}
-		// StageLobby opener (genuine script, game vectors Sep 27):
-		// sync bundle ~1 s after first infos, requestToken +150 ms,
-		// second sync +6 s, server-stats polls q5 s from +15 s.
-		// Zero-state args (fresh client); sizes only on stderr.
-		if StageLobby && rotated && stageKey != 0 && !firstData.IsZero() {
+		// Lobby opener (genuine Oct-01 script: 148B sync bundle ~1 s
+		// after first infos, requestToken +150 ms, 84a second sync
+		// +4 s, 68B poll+token +4 s, 84b +6 s, server-stats polls q5 s
+		// after. Command IDs are protocol constants (lobby.Cmd*);
+		// request IDs allocate in call order (baseIDs/tokenIDs/
+		// chatIDs); the per-call i64 args below are account-state
+		// data exhumed from the Oct-01 capture for this account
+		// (zeros drew 852-class answers; the full arg sets are the
+		// next knob — see the 84b note). Sizes only on stderr.
+		if rotated && stageKey != 0 && !firstData.IsZero() {
 			switch {
 			case openStep == 0 && time.Since(firstData) > time.Second:
 				if err := sendLobby("sync1",
-					lobby.DoCmdInt3(poolID, 100, 0, 0, 0),
-					lobby.DoCmdInt3(poolID+1, 300, 0, 0, 0),
-					lobby.DoCmdInt3(poolID+2, 600, 0, 0, 0)); err != nil {
+					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncData, 0, 0x0ed33d39, 0),
+					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncShop, 0, 0x323077c, -1949787292),
+					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncDossiers, 24, 0x6abc08ed, 0),
+					lobby.BuildChatCommandFromClient(chatIDs.NextChatID(), lobby.ChatCmdRequestLastSysMessages, 0, 0, 0, nil, nil)); err != nil {
 					return err
 				}
-				poolID += 3
 				openStep = 1
 				openAt = time.Now()
 			case openStep == 1 && time.Since(openAt) > 150*time.Millisecond:
-				if err := sendLobby("token", lobby.BuildRequestToken(1, 1)); err != nil {
+				if err := sendLobby("token", lobby.BuildRequestToken(tokenIDs.NextTokenID(), lobby.TokenTypeXMPPCS)); err != nil {
 					return err
 				}
 				openStep = 2
-			case openStep == 2 && time.Since(openAt) > 6*time.Second:
-				if err := sendLobby("sync2", lobby.DoCmdInt3(poolID, 100, 0, 0, 0)); err != nil {
+			case openStep == 2 && time.Since(openAt) > 4*time.Second:
+				// 224-a is 80 genuine (not 0), same sync ref.
+				if err := sendLobby("sync2a",
+					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncData, 80, 0x0ed33d39, 0),
+					lobby.BuildChatCommandFromClient(chatIDs.NextChatID(), lobby.ChatCmdInitAck, 0, 2, 0, nil, nil)); err != nil {
 					return err
 				}
-				poolID++
 				openStep = 3
+			case openStep == 3 && time.Since(openAt) > 8*time.Second:
+				if err := sendLobby("poll68",
+					lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0),
+					lobby.BuildRequestToken(tokenIDs.NextTokenID(), lobby.TokenTypeWGNIJWT)); err != nil {
+					return err
+				}
+				openStep = 4
+			case openStep == 4 && time.Since(openAt) > 14*time.Second:
+				// Paired 84b (genuine shape): zero-state args are
+				// the neutral baseline — live invIDs (286),
+				// Oct-01 values (1746/0x6abe9ee), and pre-select
+				// + ask all draw the same "No such vehicle" text
+				// with no 324, so account-specific guessing is
+				// retired until a live battle-ref source exists
+				// (record a play-a-battle session).
+				if err := sendLobby("sync2b",
+					lobby.DoCmdInt2(baseIDs.NextBaseID(), lobby.CmdSetActiveVehSeason, 0, 0),
+					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncDossiers, 0, 0, 0)); err != nil {
+					return err
+				}
+				openStep = 5
 			}
 			if openStep >= 1 && time.Since(openAt) > 15*time.Second && time.Since(lastPoll) > 5*time.Second {
-				if err := sendLobby("poll", lobby.DoCmdInt3(202, 501, 0, 0, 0)); err != nil {
+				if err := sendLobby("poll", lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0)); err != nil {
 					return err
 				}
+				pollsSent++
 				lastPoll = time.Now()
 			}
 		}

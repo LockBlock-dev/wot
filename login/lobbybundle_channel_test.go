@@ -11,19 +11,29 @@ import (
 
 func TestLobbyBundleFraming(t *testing.T) {
 	// Game UDP sizes from the channel math (flags + prime + calls +
-	// footers, padded): poll 60B, token 36B, 3-call sync 124B.
+	// footers, padded): poll 60B, token 36B, genuine 148B sync opener
+	// (3× Int3 + chat tail).
 	const nk = 0x01020304
 	cases := []struct {
 		name string
 		bun  []byte
 		udp  int
 	}{
-		{"poll", lobby.BuildLobbyBundle(nk, lobby.DoCmdInt3(202, 501, 0, 0, 0)), 60},
+		{"poll", lobby.BuildLobbyBundle(nk, lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0)), 60},
 		{"token", lobby.BuildLobbyBundle(nk, lobby.BuildRequestToken(1, 1)), 36},
 		{"sync1", lobby.BuildLobbyBundle(nk,
-			lobby.DoCmdInt3(220, 100, 0, 0, 0),
-			lobby.DoCmdInt3(221, 300, 0, 0, 0),
-			lobby.DoCmdInt3(222, 600, 0, 0, 0)), 124},
+			lobby.DoCmdInt3(221, 100, 0, 0, 0),
+			lobby.DoCmdInt3(222, 300, 0, 0, 0),
+			lobby.DoCmdInt3(223, 600, 0, 0, 0),
+			lobby.BuildChatCommandFromClient(1, 22, 0, 0, 0, nil, nil)), 148},
+		{"sync2b", lobby.BuildLobbyBundle(nk,
+			lobby.DoCmdInt2(225, 121, 0, 0),
+			lobby.DoCmdInt3(226, 600, 0, 0, 0)), 84},
+		{"poll68", lobby.BuildLobbyBundle(nk,
+			lobby.DoCmdInt3(202, 501, 0, 0, 0),
+			lobby.BuildRequestToken(2, 5)), 68},
+		{"select52", lobby.BuildLobbyBundle(nk,
+			lobby.DoCmdInt2(228, 121, 10577, 2)), 52},
 	}
 	for _, c := range cases {
 		pkt, err := buildChannelPacket(floodTestKey, flagsRel, c.bun, nil, 9, 0x345)

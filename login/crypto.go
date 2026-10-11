@@ -108,9 +108,8 @@ func encryptBlowfish(key string, src []byte) ([]byte, error) {
 	return dst, nil
 }
 
-// tryZlib reports whether blob zlib-decodes (TEMPORARY probe for a
-// compression layer in the login reply; returns decoded bytes, never
-// logged). Capped at 1 MiB against zip bombs.
+// tryZlib reports whether blob zlib-decodes (compression-layer probe;
+// returns decoded bytes, never logged). Capped at 1 MiB against zip bombs.
 func tryZlib(blob []byte) ([]byte, bool) {
 	r, err := zlib.NewReader(bytes.NewReader(blob))
 	if err != nil {

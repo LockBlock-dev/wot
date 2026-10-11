@@ -75,3 +75,55 @@ func TestReloginConfig(t *testing.T) {
 		t.Fatal("relogin must preserve login")
 	}
 }
+
+func TestParseBrokerParams(t *testing.T) {
+	// Synthetic 12-key broker dump (shapes only): mixed string/number
+	// values in a pinned live order; session must render md5'd while
+	// numbers stay unquoted (game json.dumps verbatim).
+	const dump = `{"order":["token2","session","temporary","publication",` +
+		`"auth_realm","login","auth_method","account_complete","account_id",` +
+		`"allowed_peripheries","gameId","requested_for","token"],` +
+		`"params":{"token2":"123456789:1234567890123456789:123456789012345678901234567890123456789",` +
+		`"session":"rawblobtext","temporary":"0","publication":"0",` +
+		`"auth_realm":"EU","login":"","auth_method":"token2",` +
+		`"account_complete":"1","account_id":123456789,` +
+		`"allowed_peripheries":"201 202","gameId":"WOT","requested_for":"WOT",` +
+		`"token":12345678}}`
+	a, err := ParseBrokerParams([]byte(dump))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if a.Method() != "token2" {
+		t.Fatalf("method = %q", a.Method())
+	}
+	if got := a.Password("en"); got != "" {
+		t.Fatalf("broker password = %q, want empty", got)
+	}
+	u := a.Username()
+	wantSession := md5hex(cpsaltSession("rawblobtext"))
+	want := `{"token2": "123456789:1234567890123456789:123456789012345678901234567890123456789", ` +
+		`"session": "` + wantSession + `", "temporary": "0", "publication": "0", ` +
+		`"auth_realm": "EU", "login": "", "auth_method": "token2", ` +
+		`"account_complete": "1", "account_id": 123456789, ` +
+		`"allowed_peripheries": "201 202", "gameId": "WOT", "requested_for": "WOT", ` +
+		`"token": 12345678}`
+	if u != want {
+		t.Fatalf("username mismatch:\n got %s\nwant %s", u, want)
+	}
+	// Fail loud, never spend a tail on a malformed shape.
+	for name, bad := range map[string]string{
+		"order-params-mismatch": `{"order":["token2"],` +
+			`"params":{"token2":"a:b:c","session":"s"}}`,
+		"no-token2": `{"order":["session"],` +
+			`"params":{"session":"s"}}`,
+		"empty-token2": `{"order":["token2","session"],` +
+			`"params":{"token2":"","session":"s"}}`,
+		"nonstring-session": `{"order":["token2","session"],` +
+			`"params":{"token2":"a:b:c","session":42}}`,
+		"not-json": `not json`,
+	} {
+		if _, err := ParseBrokerParams([]byte(bad)); err == nil {
+			t.Fatalf("%s must fail", name)
+		}
+	}
+}

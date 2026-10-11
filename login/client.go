@@ -152,13 +152,5 @@ func (c *Client) Login(ctx context.Context) (Session, error) {
 		return zero, fmt.Errorf("wotlogin: rejected status=%d msg=%q", status2, msg)
 	}
 	cfg.debugf("login reply body: %d B", len(rest2))
-	if s, err := decryptSession(rest2, cfg.BlockKey); err == nil {
-		return s, nil
-	}
-	// TEMPORARY probe: entity digest (16 B, known to both sides) as key.
-	if s, err := decryptSession(rest2, string(cfg.Digest[:])); err == nil {
-		cfg.debugf("session decrypted with digest key")
-		return s, nil
-	}
 	return decryptSession(rest2, cfg.BlockKey)
 }

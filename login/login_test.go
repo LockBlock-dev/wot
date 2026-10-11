@@ -516,3 +516,15 @@ func TestSessionWireValue(t *testing.T) {
 		t.Fatalf("raw blob on the wire: %s", u)
 	}
 }
+
+func TestStageOneDefaults(t *testing.T) {
+	// Single-shot behavior guard: plain -baseapp runs a 25 s stage-1
+	// window with at most 9 auth resends; -longhaul raises both
+	// explicitly and restores them after.
+	if StageOneBudget != 25*time.Second {
+		t.Fatalf("StageOneBudget = %v, want 25s", StageOneBudget)
+	}
+	if StageOneResends != 9 {
+		t.Fatalf("StageOneResends = %d, want 9", StageOneResends)
+	}
+}

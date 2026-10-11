@@ -16,7 +16,7 @@ package login
 // rotation in the first 36B, ack0/auth1/pure-ack/auth2 shapes, cumul =
 // acked server seq + 1, [13][XX][44][ip BE][port BE] redirect (XX varies:
 // 0x3f flows3, 0xbc logins.pcapng — only the 0x44 core is matched), stage-2
-// double authenticate. See ../NETWORK_PROTOCOL.md.
+// double authenticate. See ../../docs/NETWORK_PROTOCOL.md.
 
 import (
 	"encoding/hex"
@@ -71,12 +71,33 @@ func TestPairedReplay(t *testing.T) {
 			t.Errorf("%s RAW mismatch: want-raw=%x", name, raw)
 		}
 	}
-	// auth1: reliable authenticate + 0b, seq 0, cumul 1.
+	// auth1 (flows3 vector): reliable authenticate + 0b, seq 0, cumul 1.
+	// Decrypt-proven genuine shape on two successful lobby sessions
+	// (flows3 here, proxy-20261001 below) — the live script mirrors it.
 	p, err := buildChannelPacket(K, flagsRel, authApp(authKey), nil, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkPkt("auth1", p, vec("s1_c28_1"), "58040288ae6a690b0000000001000000")
+	// Cross-session proof (proxy-20261001, Oct-01 lobby, key recovered
+	// offline via the MITM privkey): the game's stage-1 auth1 there
+	// decrypts to RELIABLE [02][key]+0b too — raw
+	// "580402c46532e40b0000000001000000" (key 0xe43265c4 LE, the
+	// rotation from that session's 36B). Two successful sessions, one
+	// shape; the old unreliable-no-0b reading (size-only 28+28) is
+	// withdrawn.
+	octKey := uint32(0xe43265c4)
+	octAuth1, err := buildChannelPacket(K, flagsRel, authApp(octKey), nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	octRaw, err := decryptBlowfish(K, octAuth1[4:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hex.EncodeToString(octRaw) != "580402c46532e40b0000000001000000" {
+		t.Errorf("oct-01-shaped auth1 raw = %x", octRaw)
+	}
 	// pure acks seq/cumul 2,2 3,3 4,4.
 	for i, name := range []string{"s1_c28_2", "s1_c28_3", "s1_c28_4"} {
 		q, err := buildChannelPacket(K, flagsUnrel, nil, midZero, uint32(i+2), uint32(i+2))

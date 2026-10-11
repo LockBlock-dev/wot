@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/LockBlock-dev/wot/login"
@@ -32,16 +33,18 @@ func main() {
 	emptyKey := flag.Bool("empty-key", false, "send an empty Blowfish key (server unencrypted-fallback probe; also needs BLOCK_KEY_EMPTY=1 semantics: skips key generation)")
 	sessionGuid := flag.String("session-guid", "", "override SESSION (stored session blob text): reuse one value across runs to emulate an established machine (stable session-md5) instead of minting fresh per run")
 	solveTimeout := flag.Duration("solve-timeout", 0, "override PoW budget (default from .env)")
-	doBaseApp := flag.Bool("baseapp", false, "attempt baseAppLogin after LoginApp success")
+	doBaseApp := flag.Bool("baseapp", false, "attempt baseAppLogin after LoginApp success (hangar-ward: handshake, flood, lobby syncs)")
 	relogin := flag.Bool("relogin", false, "re-login from zero with the token2 from the basic reply (NOT game behavior — the client never re-logs; diagnostic only)")
 	temporary := flag.String("temporary", "", "override TEMPORARY (\"0\" = remembered session like the genuine client, \"1\" = throwaway)")
 	clientCtx := flag.String("client-context", "", "override CLIENT_CONTEXT JSON (game sends {lang_id, publication})")
 	rawKey := flag.Bool("raw-key", false, "use 16 full-range random bytes as Blowfish key (like the game's RAND_bytes) instead of alphanumeric")
 	bareAuth := flag.Bool("bare-auth", false, "send authenticate as bare [02][key] without the 0b trailer (poison test)")
-	lobbyFlag := flag.Bool("lobby", false, "stage-2: speak the genuine opening script (syncs, requestToken, stats polls) instead of heartbeat+probes")
+	lobbyFlag := flag.Bool("lobby", false, "no-op: lobby speak-back is default -baseapp behavior now (kept so old invocations still parse)")
 	probePort := flag.Bool("probe-port", false, "only test if the BaseApp port is open (connected UDP socket surfaces ICMP refused vs timeout); needs a live session, so it logs in first and skips the handshake")
+	brokerParams := flag.String("broker-params", "", "broker loginData dump FILE ({order,params} pasted from mods/wgc-token-mod python.log): from-zero token2 login with the broker's verbatim params + empty password (single-use tail — mint-then-fire; conflicts with -relogin)")
 	baseDelay := flag.Duration("baseapp-delay", 0, "wait after LOGGED_ON before the first BaseApp packet (push-race probe: LoginApp->manager pending propagation may lose to an immediate stage-1; the game waits ~200ms+)")
 	baseBudget := flag.Duration("baseapp-budget", 150*time.Second, "outer budget for the BaseApp attempt (shorten for delay-sweep probes)")
+	longHaul := flag.Duration("longhaul", 0, "grind mode total budget (e.g. 30m): loop fresh-login + extended stage-1 (120 s window, game-like resends) across server-assigned managers with 7 s game-like pacing; victory (lobby flood) stops the loop, tally at end (counts only)")
 	hijack := flag.String("hijack", "", "wotproxy -dump FILE: skip LoginApp and run BaseApp stage-1 with the GAME's live session (dump's last LOGGED_ON reply, decrypted via BLOCK_KEY_HEX = the CE key from the .env) from OUR sockets — pending-record probe; use a short -baseapp-budget, the game's pending record expires ~30 s after its LOGGED_ON, and success consumes the game's session")
 	hijackPort := flag.Int("hijack-port", 0, "with -hijack: bind the stage-1 socket to this local port (0 = auto-steal the game's login source port from the dump's last 534 B C>S line); the game must be DEAD, not frozen, or the bind fails loud — a frozen game still holds the port and voids the experiment")
 	onlySolve := flag.Bool("solve", false, "only solve: args are PREFIX MAXNONCE, prints key + nonces hex")
@@ -108,7 +111,7 @@ func main() {
 	}
 	cfg = login.ApplyOptions(cfg, opts...)
 	login.StageBareAuth = *bareAuth
-	login.StageLobby = *lobbyFlag
+	_ = *lobbyFlag // -lobby is default behavior now (hangar-ward speak-back); kept so old invocations still parse.
 	if *hijack != "" {
 		hijackSession(cfg, *hijack, *baseBudget, *hijackPort)
 		return
@@ -116,6 +119,18 @@ func main() {
 	pubkey, err := login.LoadRSAPublicKey(cfg.PubkeyPath)
 	if err != nil {
 		fatal(err)
+	}
+	// Grind mode (the game's persistence, which single-shot runs never
+	// mirror): loop fresh-login + extended stage-1 across whatever
+	// manager each login assigns, at game-like cadence. Single-use
+	// tails can't grind (one tail per iteration), and -relogin doubles
+	// legs per iteration — both refused here; this is the basic path.
+	if *longHaul > 0 {
+		if *brokerParams != "" || *relogin || *probePort {
+			fatal(fmt.Errorf("-longhaul conflicts with -broker-params/-relogin/-probe-port"))
+		}
+		runLongHaul(*envPath, opts, pubkey, *longHaul, *baseBudget, *baseDelay)
+		return
 	}
 	// One unconnected socket for the login phase (LoginApp sees a single
 	// source). BaseApp gets its own fresh socket below (2026 game
@@ -129,15 +144,47 @@ func main() {
 
 	fmt.Printf("login %s (%s) via %s:%d prot=17.1.0.5\n", cfg.Login, cfg.AuthMethod, cfg.Host, cfg.Port)
 	ctx := context.Background()
-	client, err := login.NewClient(cfg, pubkey, login.SolveCuckoo(cfg.Threads), conn)
-	if err != nil {
-		fatal(err)
-	}
-	solveCtx, cancel := context.WithTimeout(ctx, cfg.SolveTimeout)
-	defer cancel()
-	session, err := client.Login(solveCtx)
-	if err != nil {
-		fatal(err)
+	// Broker-verbatim login (mods/wgc-token-mod dump): from zero with
+	// the broker's full params + empty password (the game's own WGC
+	// shape). Single-use tail — mint-then-fire; never combined with
+	// -relogin (that path mints its own 7-key token2 leg).
+	var client *login.Client
+	var session login.Session
+	if *brokerParams != "" {
+		if *relogin {
+			fatal(fmt.Errorf("-broker-params conflicts with -relogin"))
+		}
+		raw, err := os.ReadFile(*brokerParams)
+		if err != nil {
+			fatal(err)
+		}
+		bauth, err := login.ParseBrokerParams(raw)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("broker params: keys=%d method=%s\n", len(bauth.Order), bauth.Method())
+		client, err = login.NewClientWithProvider(cfg, bauth, pubkey, login.SolveCuckoo(cfg.Threads), conn)
+		if err != nil {
+			fatal(err)
+		}
+		solveCtx, cancel := context.WithTimeout(ctx, cfg.SolveTimeout)
+		defer cancel()
+		session, err = client.Login(solveCtx)
+		if err != nil {
+			fatal(err)
+		}
+	} else {
+		var err error
+		client, err = login.NewClient(cfg, pubkey, login.SolveCuckoo(cfg.Threads), conn)
+		if err != nil {
+			fatal(err)
+		}
+		solveCtx, cancel := context.WithTimeout(ctx, cfg.SolveTimeout)
+		defer cancel()
+		session, err = client.Login(solveCtx)
+		if err != nil {
+			fatal(err)
+		}
 	}
 	// NOTE: session.ServerMsg is never printed: for upgraded logins it
 	// carries token2/session_id SSO material.
@@ -300,6 +347,115 @@ func upgradeToken(msg string) string {
 	}
 	fmt.Fprintf(os.Stderr, "[wotlogin] servermsg token2 raw=%s len=%d\n", pre, len(raw))
 	return login.ExtractUpgradeToken(msg)
+}
+
+// runLongHaul grinds fresh-login + extended stage-1 until the lobby
+// flood lands or total expires: the game's persistence (unbounded
+// ~0.5 s resends, relogin seconds after failure, whatever manager
+// each login assigns), which single-shot runs never mirror. Pacing is
+// game-like (7 s between attempts), never a hammer. Tally is counts
+// only (endpoints, rotations, server-message counts), never secrets.
+func runLongHaul(envPath string, opts []login.Option, pubkey *login.RSAPublicKey, total, baseBudget, baseDelay time.Duration) {
+	oldBudget, oldResends := login.StageOneBudget, login.StageOneResends
+	login.StageOneBudget = 120 * time.Second
+	login.StageOneResends = 240
+	defer func() { login.StageOneBudget, login.StageOneResends = oldBudget, oldResends }()
+	deadline := time.Now().Add(total)
+	var n, nLogged, nRot, nWin, tickSum int
+	for n = 0; ; {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		n++
+		iterCfg, err := login.LoadEnv(envPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[longhaul #%d] env: %v\n", n, err)
+			break
+		}
+		iterCfg = login.ApplyOptions(iterCfg, opts...)
+		conn, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[longhaul #%d] socket: %v\n", n, err)
+			break
+		}
+		bconn, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			conn.Close()
+			fmt.Fprintf(os.Stderr, "[longhaul #%d] socket: %v\n", n, err)
+			break
+		}
+		win := func() bool {
+			defer conn.Close()
+			defer bconn.Close()
+			client, err := login.NewClient(iterCfg, pubkey, login.SolveCuckoo(iterCfg.Threads), conn)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[longhaul #%d] client: %v\n", n, err)
+				return false
+			}
+			solveCtx, cancel := context.WithTimeout(context.Background(), iterCfg.SolveTimeout)
+			defer cancel()
+			session, err := client.Login(solveCtx)
+			if err != nil {
+				msg := err.Error()
+				if len(msg) > 160 {
+					msg = msg[:160] + "…"
+				}
+				fmt.Fprintf(os.Stderr, "[longhaul #%d] login: %s\n", n, msg)
+				return false
+			}
+			nLogged++
+			peer := &net.UDPAddr{IP: session.ServerAddr, Port: int(session.ServerPort)}
+			if baseDelay > 0 {
+				time.Sleep(baseDelay)
+			}
+			bctx, bcancel := context.WithTimeout(context.Background(), baseBudget)
+			defer bcancel()
+			stage := login.NewBaseAppSession(session, iterCfg.BlockKey, iterCfg.MTU, bconn, conn, peer)
+			rerr := stage.Run(bctx, client.NextReplyID())
+			if rerr == nil {
+				nWin++
+				fmt.Printf("[longhaul #%d] LOBBY flood reached via %s\n", n, peer.String())
+				return true
+			}
+			msg := rerr.Error()
+			// Reached-stage comes from the error text: stage-1
+			// errors carry the rotation/tick outcomes, stage-2
+			// errors mean stage-1 passed (rotation+redirect ok).
+			reached := "login?"
+			if strings.Contains(msg, "stage-1") {
+				reached = "stage-1"
+			} else if strings.Contains(msg, "stage-2 stalled") {
+				reached = "stage-2"
+			}
+			rot := strings.Contains(msg, "rotation-ok")
+			if rot {
+				nRot++
+			}
+			ticks := strings.Count(msg, " seq=")
+			tickSum += ticks
+			fmt.Fprintf(os.Stderr, "[longhaul #%d] %s reached=%s rotation=%v serverticks~%d redirect=no\n",
+				n, peer.String(), reached, rot, ticks)
+			return false
+		}()
+		if win {
+			break
+		}
+		// Game-like pacing between attempts (relogin ~7 s after a
+		// failure in captures/login3-game.log), bounded by deadline.
+		if rest := time.Until(deadline); rest <= 0 {
+			break
+		} else if rest < 7*time.Second {
+			time.Sleep(rest)
+			break
+		} else {
+			time.Sleep(7 * time.Second)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[longhaul] attempts=%d logged=%d rotations=%d serverticks~%d wins=%d\n",
+		n, nLogged, nRot, tickSum, nWin)
+	if nWin > 0 {
+		fmt.Println("LOBBY flood reached (decrypted stage-2 burst)")
+	}
 }
 
 // hijackSession runs BaseApp stage-1 against an externally supplied live
