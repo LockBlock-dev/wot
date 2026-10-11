@@ -55,9 +55,15 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `endpoints.go` (124B endpoint-list parser, pinned on the Sep-29
   lobby #2 genuine vector: key name + KP-terminated bosh host;
   ports default, not wire), `stanza.go` (message/IQ/presence
-  build+parse, WG extensions passthrough), `bosh.go` (XEP-0124
-  framing, `/bosh/` path). Tests offline (one genuine vector,
-  rest synthetic). BaseApp chat tails stay in `lobby`.
+  build+parse, stream open, features mechanisms, WG extensions
+  passthrough), `bosh.go` (XEP-0124 framing, `/bosh/` path).
+  Tests offline (genuine endpoint vector + genuine roster-IQ and
+  live-features vectors, rest synthetic). BaseApp chat tails stay
+  in `lobby`. Live Oct-12 (`cmd/wotxmpp`, read-only): TCP 5222 open,
+  stream domain `c2s.xmpp-wot-eu.wargaming.net` (others get
+  host-unknown), PLAIN-only no STARTTLS, identity = DBID, password
+  auth dead (LOGIN 500 / DBID rejected — XMPPCS broker token
+  required, Steam-gated); BOSH :5280 RSTs creates, :443 refused.
 - `ping/` — LoginApp ping library (`ping.go`: framing consts,
   `encodeRequestWithPrefix`, `decodeReply` for 16 B current and 18 B
   2022 replies, `Client`, `Classify`, `NewReplyID`) + `ping_test.go`.

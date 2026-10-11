@@ -85,3 +85,45 @@ func TestBuildBOSH(t *testing.T) {
 		t.Fatal("bad xml accepted")
 	}
 }
+
+func TestStreamOpenBuilder(t *testing.T) {
+	got := BuildStreamOpen(DefaultDomain)
+	want := `<?xml version='1.0'?><stream:stream to='c2s.xmpp-wot-eu.wargaming.net' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>`
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestLiveFeaturesMechanisms(t *testing.T) {
+	// Genuine server bytes, EU live Oct-12 (stream id varies per
+	// connection; mechanisms do not): PLAIN only, no STARTTLS.
+	features := `<stream:features xmlns='http://etherx.jabber.org/streams'><mechanisms xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><mechanism xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>PLAIN</mechanism></mechanisms></stream:features>`
+	if m := SASLMechanisms(features); len(m) != 1 || m[0] != "PLAIN" {
+		t.Fatalf("mechanisms=%v", m)
+	}
+	p, err := ParseStanza(features)
+	if err != nil || p.Name != "features" { // prefix dropped by encoding/xml; see ParseBOSH for prefixed form
+		t.Fatalf("parsed %+v %v", p, err)
+	}
+}
+
+func TestGenuineRosterIQ(t *testing.T) {
+	// Genuine client bytes, Sep-29 lobby #2 flow (own account only;
+	// roster answers carry other players and stay out of tests):
+	// roster pull with uid:hex:counter id shape.
+	raw := `<iq id='uid:6aac8c76:00000003' type='get' from='123456789@c2s.xmpp-wot-eu.wargaming.net/wot' xmlns='jabber:client'><query xmlns='http://wargaming.net/xmpp#filter-roster'/></iq>`
+	p, err := ParseStanza(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "iq" || p.Attrs["id"] != "uid:6aac8c76:00000003" || p.Attrs["type"] != "get" {
+		t.Fatalf("parsed %+v", p)
+	}
+	from, err := ParseJID(p.Attrs["from"])
+	if err != nil || from.Node != "123456789" || from.Domain != DefaultDomain || from.Resource != "wot" {
+		t.Fatalf("from %+v %v", from, err)
+	}
+	if !strings.Contains(p.Inner, "filter-roster") {
+		t.Fatalf("inner %q", p.Inner)
+	}
+}

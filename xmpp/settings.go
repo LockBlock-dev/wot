@@ -5,6 +5,12 @@ import (
 	"math/rand"
 )
 
+// DefaultDomain is the live EU stream domain, proven by a live
+// session open (the server answers `host-unknown` for
+// `xmpp.wargaming.net` and friends; JIDs use it too:
+// DBID@c2s.xmpp-wot-eu.wargaming.net/resource).
+const DefaultDomain = "c2s.xmpp-wot-eu.wargaming.net"
+
 // Default ports: the endpoint lists carry hosts only (proven on the
 // genuine 124B vector, which holds no 5222/5280/443 in any width or
 // endianness), so the client pairs hosts with these. They are

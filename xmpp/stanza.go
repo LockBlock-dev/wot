@@ -137,6 +137,25 @@ func BuildIQ(q IQ) string {
 	return sb.String()
 }
 
+// BuildStreamOpen renders the client stream header (gloox shape,
+// single quotes like the genuine client).
+func BuildStreamOpen(domain string) string {
+	return `<?xml version='1.0'?><stream:stream to='` + domain +
+		`' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>`
+}
+
+// SASLMechanisms extracts mechanism names from a <stream:features>
+// blob (live EU advertises PLAIN only, no STARTTLS).
+func SASLMechanisms(features string) []string {
+	var out []string
+	for _, m := range []string{"PLAIN", "XMPPCS", "DIGEST-MD5", "SCRAM-SHA-1", "ANONYMOUS"} {
+		if strings.Contains(features, ">"+m+"<") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Parsed is a decoded stanza: name + attributes + raw inner XML +
 // the text of a body/show/status child when present.
 type Parsed struct {
