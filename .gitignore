@@ -46,6 +46,7 @@ game.env
 /wotkeydump
 /wotwgcs
 /wotdpapi
+/wotxmpp
 
 # Scratch / local artifacts (never commit)
 zz-*
