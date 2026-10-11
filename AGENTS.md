@@ -63,8 +63,11 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   in `lobby`. Live Oct-12 (`cmd/wotxmpp`, read-only): TCP 5222 open,
   stream domain `c2s.xmpp-wot-eu.wargaming.net` (others get
   host-unknown), PLAIN-only no STARTTLS, identity = DBID, password
-  auth dead (LOGIN 500 / DBID rejected — XMPPCS broker token
-  required, Steam-gated); BOSH :5280 RSTs creates, :443 refused.
+  auth dead (LOGIN 500 / DBID rejected); FULL LOGIN launcherless via
+  `-token` (XMPPCS token = 8-digit INT from the int token-dict ~1 s
+  after requestToken — NOT the JWT, which is WGNI/shop; SASL PLAIN
+  DBID+token, bind + presence + roster all green, no WGC/Steam);
+  BOSH :5280 RSTs creates, :443 refused.
 - `ping/` — LoginApp ping library (`ping.go`: framing consts,
   `encodeRequestWithPrefix`, `decodeReply` for 16 B current and 18 B
   2022 replies, `Client`, `Classify`, `NewReplyID`) + `ping_test.go`.
