@@ -156,6 +156,20 @@ func SASLMechanisms(features string) []string {
 	return out
 }
 
+// BuildSASLAuth renders the initial-response auth stanza for
+// mechanism (PLAIN takes "\x00user\x00pass", XMPPCS the raw token).
+// Callers base64 the payload first via SASLPlainPayload or pass the
+// token bytes directly.
+func BuildSASLAuth(mechanism, b64 string) string {
+	return `<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='` +
+		escAttr(mechanism) + `'>` + b64 + `</auth>`
+}
+
+// SASLPlainPayload renders the PLAIN initial response for user/pass.
+func SASLPlainPayload(user, pass string) string {
+	return "\x00" + user + "\x00" + pass
+}
+
 // Parsed is a decoded stanza: name + attributes + raw inner XML +
 // the text of a body/show/status child when present.
 type Parsed struct {

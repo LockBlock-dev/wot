@@ -10,8 +10,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 
 ## Layout
 
-- `login/` — framing builders/parsers + `Client.Login()` flow (pure where
-  possible; `SolveFunc` injected for tests; `Transport` interface over
+- `login/` — framing builders/parsers + `Client.Login()` flow (pure where  possible; `SolveFunc` injected for tests; `Transport` interface over
   UDP so the handshake is script-testable offline): `client.go`
   (`Client`: config/auth-provider/solver/socket/peer/reply-ID sequence),
   `auth.go` (`AuthProvider`: basic/token/token2 identity + username
@@ -30,7 +29,9 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `SessionFromDump` + `LoginSourcePort`), `config.go` (stdlib `.env`
   parser + `Config`; sorted+spaced username JSON; `cpsaltSession`),
   `flood.go` (bulk chunk reassembly by channel-seq + NN headers,
-  smalls taxonomy + census, keyfile/recover helpers).
+  smalls taxonomy + census, keyfile/recover helpers),
+  `tokendict.go` (`FindTokenDicts`: pickled `{databaseID, token}`
+  hunt in decrypted S>C, TokenResponse-shaped).
 - `lobby/` — offline application layer, stdlib-only (no transport):
   `pickle.go` (hand-rolled proto 0-2 decoder, triple-verified vs
   CPython execution + independent emulator on 3 captures; LONG1/4
@@ -151,6 +152,11 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `cmd/wotdpapi/main.go` — Wine-DPAPI unwrap CLI (GOOS=windows,
   proton-run, prefix-local only): hex blob in, 0600 plaintext out,
   lengths only. No network/broker/game.
+- `cmd/wotxmpp/main.go` — live XMPP endpoint client (TCP stream +
+  features by default, no auth; `-bosh` framing; `-auth` SASL PLAIN
+  with live.env; `-token` XMPCCS/JWT token auth): read-only after
+  login (presence + roster IQ, names only). Thin CLI, protocol in
+  `xmpp/`.
 - `dpapi/` — unwrap library (stdlib `syscall` LazyDLL crypt32,
   windows helper + stub, offline tests; `GOOS=windows go vet`
   clean).
@@ -166,7 +172,8 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `cmd/wotflood/main.go` — offline lobby analyzer (structure only):
   `-stream` bundle inventory + prefix salvage, `-dump -flow` chunk
   table + inventory, `-recover-key` (MITM key to keyfile, lengths
-  only), `-smalls` census. Thin CLI, protocol in `login/`.
+  only), `-smalls` census, `-tokens` (token-dict hunt in S>C,
+  lengths/hashes only unless `-show-token`). Thin CLI, protocol in `login/`.
 - `cmd/wotunpack/main.go` — packed binaries (`.def`/`.xml`, magic
   `0x62a14e45`) to readable XML on stdout.
 - `cmd/wotreplay/main.go` — thin CLI (`file.wotreplay`, `-meta`,

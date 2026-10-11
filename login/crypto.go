@@ -23,6 +23,16 @@ const (
 	bfMagic     = 0xdeadbeef
 )
 
+// DecryptChannel decrypts one S>C channel datagram (4B prefix +
+// Blowfish-ECB+XOR-chain past it) for offline tools. The key is the
+// session block key (lengths/hashes only in logs, never values).
+func DecryptChannel(key string, pkt []byte) ([]byte, error) {
+	if len(pkt) < 4+8 {
+		return nil, fmt.Errorf("wotlogin: datagram too short (%d B)", len(pkt))
+	}
+	return decryptBlowfish(key, pkt[4:])
+}
+
 // decryptBlowfish reverses one EncryptionFilter::decrypt pass: Blowfish-ECB
 // decrypt every 8-byte block, then XOR all but the first with the previous
 // PLAINTEXT block (mirrors encrypt, which XORs each plaintext block with

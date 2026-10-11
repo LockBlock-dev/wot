@@ -79,7 +79,7 @@ func tcpPing(host string, port int, domain string, timeout time.Duration) {
 		len(head), mechanisms(head), strings.Contains(head, "starttls"))
 }
 
-func saslAuth(host string, port int, domain, envPath, dbid, authcid string, timeout time.Duration) {
+func saslAuth(host string, port int, domain, envPath, dbid, authcid, token string, timeout time.Duration) {
 	cfg, err := login.LoadEnv(envPath)
 	if err != nil {
 		fatal(err)
@@ -138,18 +138,22 @@ func saslAuth(host string, port int, domain, envPath, dbid, authcid string, time
 		fatal(fmt.Errorf("PLAIN not offered (offered=%v): password auth unavailable, XMPPCS needs a broker token", mechs))
 	}
 	user := cfg.Login
-	if authcid != "" {
+	pass := cfg.Password
+	if token != "" {
+		user = jid.Node
+		pass = token
+	} else if authcid != "" {
 		user = authcid
 	}
-	raw := "\x00" + user + "\x00" + cfg.Password
+	raw := "\x00" + user + "\x00" + pass
 	auth := `<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>` +
 		base64.StdEncoding.EncodeToString([]byte(raw)) + `</auth>`
 	if _, err := c.Write([]byte(auth)); err != nil {
 		fatal(err)
 	}
 	resp, err := readUntil(c, "/>", timeout)
-	fmt.Fprintf(os.Stderr, "[wotxmpp] sasl %dB node-len=%d ok=%v err=%v\n",
-		len(resp), len(jid.Node), strings.Contains(resp, "success"), err)
+	fmt.Fprintf(os.Stderr, "[wotxmpp] sasl %dB node-len=%d token-len=%d ok=%v err=%v\n",
+		len(resp), len(jid.Node), len(token), strings.Contains(resp, "success"), err)
 	if !strings.Contains(resp, "success") {
 		head := resp
 		if len(head) > 200 {
@@ -239,6 +243,7 @@ func main() {
 	domain := flag.String("domain", xmpp.DefaultDomain, "stream `to` domain")
 	envPath := flag.String("env", "live.env", "KEY=VALUE secrets file (for -auth)")
 	auth := flag.Bool("auth", false, "attempt SASL PLAIN with live.env creds (read-only after)")
+	token := flag.String("token", "", "XMPPCS/JWT chat token (from the requestToken answer smalls); SASL PLAIN with DBID identity")
 	authcid := flag.String("authcid", "", "SASL username override (default LOGIN)")
 	bosh := flag.Bool("bosh", false, "BOSH session create over HTTPS (framing only)")
 	dbid := flag.String("dbid", "", "SASL authcid override (default: live.env LOGIN); JID node for display lengths")
@@ -250,7 +255,7 @@ func main() {
 		return
 	}
 	if *auth {
-		saslAuth(*host, *tcpPort, *domain, *envPath, *dbid, *authcid, *timeout)
+		saslAuth(*host, *tcpPort, *domain, *envPath, *dbid, *authcid, *token, *timeout)
 		return
 	}
 	tcpPing(*host, *tcpPort, *domain, *timeout)

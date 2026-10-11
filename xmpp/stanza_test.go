@@ -127,3 +127,18 @@ func TestGenuineRosterIQ(t *testing.T) {
 		t.Fatalf("inner %q", p.Inner)
 	}
 }
+
+func TestBuildSASLAuth(t *testing.T) {
+	got := BuildSASLAuth("PLAIN", "AGxpbl9wYXNz")
+	if got != `<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' mechanism='PLAIN'>AGxpbl9wYXNz</auth>` {
+		t.Fatalf("got %s", got)
+	}
+	if p := SASLPlainPayload("u", "p"); p != "\x00u\x00p" {
+		t.Fatalf("got %q", p)
+	}
+	got = BuildSASLAuth("XMPPCS", "dG9rZW4=")
+	p, err := ParseStanza(got)
+	if err != nil || p.Name != "auth" || p.Attrs["mechanism"] != "XMPPCS" || p.Text != "" {
+		t.Fatalf("parsed %+v %v", p, err)
+	}
+}

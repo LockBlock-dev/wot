@@ -3,9 +3,11 @@ package main
 // Offline stage-2 lobby flood analyzer (structure only — sizes,
 // counts, type/key-name summaries; never values, never key bytes).
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/LockBlock-dev/wot/lobby"
 	"github.com/LockBlock-dev/wot/login"
@@ -19,6 +21,9 @@ func fatal(err error) {
 func main() {
 	stream := flag.String("stream", "", "reassembled bundle file (skip dump stage)")
 	dump := flag.String("dump", "", "wotproxy -dump file")
+	flood := flag.String("flood", "", "WOT_FLOOD_DUMP hex file (<ts> <dir> <len> <hex>) for -tokens")
+	tokens := flag.Bool("tokens", false, "scan S>C datagrams for token dicts ({databaseID, token} pickles)")
+	showToken := flag.Bool("show-token", false, "print token values (default: lengths/hashes only)")
 	flow := flag.String("flow", "", "flow substring (e.g. 50436->)")
 	fragSize := flag.Int("fragsize", 1252, "bulk datagram size")
 	keyFile := flag.String("keyfile", "", "hex block-key file (in; also -recover-key target)")
@@ -35,6 +40,10 @@ func main() {
 
 	if *stream != "" {
 		analyzeStream(*stream)
+		return
+	}
+	if *tokens {
+		tokenScan(*dump, *flood, *keyFile, *showToken)
 		return
 	}
 	if *dump == "" || (*flow == "" && !*recoverKey) {
@@ -125,6 +134,79 @@ func analyzeStream(path string) {
 	}
 	fmt.Printf("stream %s bytes=%d\n", path, len(raw))
 	printInventory(raw)
+}
+
+// tokenScan hunts XMPPCS/WGNI token dicts ({databaseID, token}
+// pickles) in S>C datagrams of a dump. Values stay hidden unless
+// -show-token (lengths/hashes only by default).
+func tokenScan(dumpPath, floodPath, keyFile string, show bool) {
+	key, err := login.ReadKeyFile(keyFile)
+	if err != nil {
+		// Stage recorders write the key RAW (see baseapp.go);
+		// keyfiles from -recover-key are hex.
+		raw, rerr := os.ReadFile(keyFile)
+		if rerr != nil {
+			fatal(err)
+		}
+		key = string(raw)
+	}
+	type dg struct {
+		ts   string
+		data []byte
+	}
+	var dgs []dg
+	if floodPath != "" {
+		raw, err := os.ReadFile(floodPath)
+		if err != nil {
+			fatal(err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			f := strings.Fields(line)
+			if len(f) != 4 || f[1] != "S>C" {
+				continue
+			}
+			data, err := hex.DecodeString(f[3])
+			if err != nil {
+				fatal(fmt.Errorf("dump hex: %w", err))
+			}
+			dgs = append(dgs, dg{f[0], data})
+		}
+	} else {
+		if dumpPath == "" {
+			fatal(fmt.Errorf("need -dump or -flood"))
+		}
+		f, err := os.Open(dumpPath)
+		if err != nil {
+			fatal(err)
+		}
+		defer f.Close()
+		dd, err := login.ParseWotproxyDump(f)
+		if err != nil {
+			fatal(err)
+		}
+		for _, d := range dd {
+			if d.Dir != "S>C" {
+				continue
+			}
+			dgs = append(dgs, dg{"", d.Data})
+		}
+	}
+	n := 0
+	for _, d := range dgs {
+		clear, err := login.DecryptChannel(key, d.data)
+		if err != nil {
+			continue
+		}
+		for _, h := range login.FindTokenDicts(clear) {
+			n++
+			if show {
+				fmt.Printf("ts=%s dbid=%d jwt=%v token=%s\n", d.ts, h.DBID, h.JWT, h.Token)
+			} else {
+				fmt.Printf("ts=%s dbid=%d jwt=%v %s\n", d.ts, h.DBID, h.JWT, h.TokenID())
+			}
+		}
+	}
+	fmt.Printf("tokens datagrams=%d hits=%d\n", len(dgs), n)
 }
 
 func printInventory(app []byte) {
