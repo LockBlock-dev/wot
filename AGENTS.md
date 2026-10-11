@@ -1157,10 +1157,15 @@ speak back. Established Sep 20:
 6. Battle-results answers (852B `CMD_REQ_BATTLE_RESULTS` replies):
    straight pickle decode from captures on hand — DONE Oct-02 (see
    `../docs/NETWORK_PROTOCOL.md` §17): full cache mechanism from shipped
-   `.pyc`, 0x45 `(smallint, id)` shape on 2 live answers, stream
-   found inside the 852's own train (63-list + roster pairs),
-   1500/1501 linkage + direct-base A1 flavor; open: status→resultID
-   mapping, 5472 semantics, full 63-field schema.
+   `.pyc`, 0x45 `[len][req BE][res=RES_SUCCESS][extlen][ext pickle
+   tuple]` on 4 live answers (varying byte proven to be ext length,
+   not status), stream inside the 852's own train (63-list +
+   arenaUID pickle + roster), 1500/1501 linkage + direct-base A1
+   flavor; Meta checksum CLOSED Oct-11 (263845007 = REGULAR SELF,
+   BP-integrated, reproduced by real py2.7 config execution) with
+   the full 62-name map in `../docs/NETWORK_PROTOCOL.md` §17;
+   open: tuple semantics (stream-handle reading) and the res=0 vs
+   RES_STREAM consumer synthesis (C++ 0x45 dispatcher unlocated).
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
    `eu2-mitmproxy-flows`) — DONE Oct-02 (see `../docs/NETWORK_PROTOCOL.md`
    §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,
