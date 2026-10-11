@@ -1176,6 +1176,10 @@ speak back. Established Sep 20:
    the full 62-name map in `../docs/NETWORK_PROTOCOL.md` §17;
    open: tuple semantics (stream-handle reading) and the res=0 vs
    RES_STREAM consumer synthesis (C++ 0x45 dispatcher unlocated).
+   `mods/response-logger-mod` (Oct-12, 2.4.0.2, compiled) hooks the
+   Python consumer side (onCmdResponse*, _subscribeForStream,
+   __onGetResponse, __onSyncStreamComplete) — one hangar-idle +
+   stats-UI game run closes both via python.log shapes.
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
    `eu2-mitmproxy-flows`) — DONE Oct-02 (see `../docs/NETWORK_PROTOCOL.md`
    §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,
