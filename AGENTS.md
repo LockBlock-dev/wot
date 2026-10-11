@@ -48,6 +48,16 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   stage-2 flow to `../captures/flows3-s2.txt`; re-run after any /tmp
   wipe),
   `scratch_flood_test.go`. Offline only.
+- `xmpp/` — offline XMPP chat layer, stdlib-only (NO network: no
+  TCP/UDP/HTTP clients — builders/parsers only): `jid.go` (DBID@
+  domain/resource), `settings.go` (`ServerSettings` + TCP-first
+  2-sample `Iterator`, mirrors `XmppServerSettings.pyc`),
+  `endpoints.go` (124B endpoint-list parser, pinned on the Sep-29
+  lobby #2 genuine vector: key name + KP-terminated bosh host;
+  ports default, not wire), `stanza.go` (message/IQ/presence
+  build+parse, WG extensions passthrough), `bosh.go` (XEP-0124
+  framing, `/bosh/` path). Tests offline (one genuine vector,
+  rest synthetic). BaseApp chat tails stay in `lobby`.
 - `ping/` — LoginApp ping library (`ping.go`: framing consts,
   `encodeRequestWithPrefix`, `decodeReply` for 16 B current and 18 B
   2022 replies, `Client`, `Classify`, `NewReplyID`) + `ping_test.go`.
@@ -57,7 +67,10 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `dispatch.go`, `entities.go`, `values.go`, `methods.go` +
   `methods_gen.go` (GENERATED from 2.4.0.0 entity_defs via `entdef`
   DescribeDeep + iface-first stable size-sort; var lists doc order —
-  see `../docs/REPLAY.md` §6 before regenerating), `properties.go` +
+  see `../docs/REPLAY.md` §6 before regenerating; Bundle codec mapped Oct-11
+  (see `../docs/NETWORK_PROTOCOL.md` §4: length formats, startMessage/
+  startRequest(extra=6)/startReply/doFinalise — the Go builders mirror
+  this exactly), `properties.go` +
   `properties_gen.go` (generated FullIndex table via entdef
   `CSPropsOrdered`), `nested.go`, `creates.go`, `misc.go`, `events.go`,
   `timeline.go`. Tests pin Prohorovka (2.4.0) + Mines (2.3.1) +
@@ -438,9 +451,15 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
 
 The 16 B stream key (`DE 72 BE A0 … AD BE EF`) is
 community-published and verified here (test decrypts to a valid zlib
-stream). It is NOT in the exe verbatim (contiguous/halves/XOR/mask/md5
-all absent) — the client runtime-constructs or obfuscates it; the
-green test is the proof. Cite this file, not the provenance.
+stream). It is NOT in the exe verbatim (Oct-11: full16/halves/
+immediates all absent image-wide) — but the reader was found
+(`sub_14057BEE0` → stock-Blowfish cipher from the static at
+`0x1442DA5A8` = `DEADBEEF`×4 + mask/`BWTB` region), and that
+static provably does NOT decrypt real streams (10/16 bytes shared
+with the working key; tested deadbeef-fails/de72-passes). So the
+static is placeholder/seed and the runtime key fills at runtime, or
+a second decrypt path exists — open with two leads (reader
+callers, writer side). Cite this file, not the provenance.
 
 ## Replay — TODO: live EU5 lobby application (hangar)
 
@@ -616,8 +635,16 @@ speak back. Established Sep 20:
   conditional on the `[entity+0x40]`-slot call returning NULL (base
   triple `[entity+0x130]+{0x13A8,0x13AC,0x13B0}`, else used as-is).
   Direction REFINED to signed reads with exact scales (roll11
-  2π/2048, pitch11 π/2048 half, yaw10 2π/1024; 8b 2π/256).
-  Remaining static: x/z convention, creation parse.
+  2π/2048, pitch11 π/2046 exact — measured `0.0015354804`, NOT
+  π/2048, yaw10 2π/1024; 8b 2π/256).
+  Slot order CLOSED Oct-11 (IDA output mapping, see §14): position
+  wire (x, z, y) → out (x, y, z), y third and ABSOLUTE (no scale);
+  posType1 = x,z-only with y-slot marker (`-13000.0`, tracker is
+  posType-aware); direction wire (roll, pitch, yaw) → out (yaw,
+  pitch, roll); dirType1 = roll8+pitch8 (yaw `FLT_MAX`), dirType2
+  = roll8 only. Size fn `0x140E36580` confirms pos{6,3,0} +
+  dir{4,2,1,0} (+1B ID). Remaining static: creation parse (absolute
+  vs base-relative caller context).
 - Item 4 CLOSED (unknown-led harvest, 3 sessions: Oct-01 54338,
   Sep-29 44395, flows3-s2): 1-byte resync inside rests recovers full
   trains where the strict walker stopped at the first unknown ID —
@@ -750,6 +777,12 @@ speak back. Established Sep 20:
   Oct-01 salvage; speak-back still needs a stage-2 window).
 - Battle (CellApp arena) parsing is UNDERWAY (Sep-29 proxy match,
   11,421 datagrams, own channel key from the 790/984 token2-login
+  C>S packer note (Oct-11 IDA): no client bit-packer exists — image holds
+  only unpackers + pack-stubs (CellApp packer is server-side). Own-position
+  goes out as LE floats via BaseAppExt `avatarUpdateImplicit/Explicit`
+  (table order confirms ranks; matches `ParseAvatarUpdate`); S>C owns
+  `avatarUpdateVolatileProperties` (ClientInterface, not C>S as once
+  assumed) alongside the packed 11B records.
   leg — NOT the lobby keys): C>S = one family `[02 8b 58 4a][93
   SUB…]` at ~18 Hz, `ParseAvatarUpdate` (`login/battle.go`, tested)
   decodes the 60B/34B position shape (xyz LE f32 at [20:32];
@@ -842,7 +875,29 @@ speak back. Established Sep 20:
   first-byte matches — per-session unique content, tails start
   249/252/253 stepping +9 throughout. Engine side (Oct-02 IDA):
   `createEntity` wire registration located (thunks `0x140240740`,
-  arginfo `0x1442DCC00` — descriptor format not yet decoded);
+  arginfo `0x1442DCC00` — entry = {handlerVtable, u32,
+  lambdaVtable, u32}, Oct-11: handler = `InputMessageHandlerT`
+  (source check + bound functor), lambda =
+  `std::function<void(ServerConnection&,BinaryIStream&)>`; local
+  create API `0x140F16030`; per-arg stream reads still open).
+   Consumer side mapped Oct-11: `handleEntityPackedVolatileData`
+   (`0x140E3D300`) preloads defaults, looks the entity up, invokes
+   unpack slot +40 (`0x140E37200`), applies via `sub_140E3D070`;
+   init array is 0x50-stride with class-level (not per-method)
+   handler pairs; record-loop callers untraceable statically
+   (virtual dispatch wall) but the callee family is complete Oct-11:
+   packed/detailed/nonvolatile entries (`0x140E3D300/0x140E3CAF0/
+   0x140E3D1F0` → `sub_140E3D070`, last arg = isVolatile) — the
+   loop can only route 13B records into these three; creation takes
+   the absolute unpack branch or the nonvolatile path. Apply step
+   `sub_140E3D070` = `handleEntityMoveWithError` (skips spaceless
+   moves). 0x35 = battle small-ID, NOT a method rank (Avatar 42
+   client methods, Vehicle 11 — index 53 on neither; `[35 00]` is
+   small framing, C++-consumed only). Large-function triage Oct-11: all four
+   still undecompilable on a fresh worker; `EncryptionFilter::send`
+   fully mapped from disasm (no-cipher drop, wastage math exact),
+   `processFilteredPacket` dispatch order confirmed (1302 insns),
+   property parser is `strtok`+Python-API driven (899 insns).
   counter-as-entity-ID tested same-session vs 0x45 tuples → 0/30
   overlap (0x45s are 3 poll-answer classes, not entity-indexed);
   body[0] vs wire-ID tested → 30 distinct in [32,247], excludes
@@ -858,13 +913,17 @@ speak back. Established Sep 20:
   [pos][packedYPR][vehicleID][props]`, whole-message
   `CompressionIStream` (type byte 0–9) — our first bytes spread
   [32,247], ruling stock compression out for the WoT fork;
-  head-vs-tail ID tested 0/30. +9 stride open (cumulative vs
-  ID-stride). Content exclusion (Oct-02): stock
+  head-vs-tail ID tested 0/30. +9 stride CLOSED Oct-11
+  (cumulative: 28/28 flows3 burst datagrams show server seq AND
+  tail counter both stepping +9/datagram with counter = seq − 8
+  exactly — the counter is the server channel clock, not an
+  entity-ID stride; +9/datagram is burst-mode seq consumption). Content exclusion (Oct-02): stock
   `CompressionIStream`/zlib ruled OUT (first bytes spread [32,247],
   no 78xx, zlib linked but never struck; only zlib strings in the
   image, no Oodle/LZ4/Snappy) — the fork packs these bodies
-  differently (server-side packer, not in this image). +9 best
-  remaining read: reliable-slot consumption per burst (untested).
+  differently (server-side packer, not in this image). The +9
+  slope is now PROVEN server-seq consumption (see above), not a
+  hypothesis.
   804B infos CLOSED Oct-02 (flows3-s2, fixed key): server_settings /
   feature-flags small (genuinely custom, NOT a bulk fragment: no
   chunk header, zero pickle docs ≥30B at any offset, 794B cleartext
@@ -1101,7 +1160,14 @@ speak back. Established Sep 20:
    §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,
    XMPPCS token login, disconnects reported to server; 124B list
    proven bosh-only on lobby-#2 wire (per-flow key recovery);
-   distinct layer from the (98,25) BaseApp tails.
+   distinct layer from the (98,25) BaseApp tails. Oct-11: gloox-static
+   stack confirmed (`WGXmppClient` type init mapped); settings contract
+   decoded (`update()` dict + randomized 2-sample iterator); C++ key
+   strings absent — dict comes from pickled smalls, b8→bc/KP walk
+   stays with the binary infos framing. IDA naming pass Oct-11: 52
+   verified functions renamed (`BW_*`, saved to
+   `WorldOfTanks.exe.i64`) — unpacker/Bundle/crypto/replay/XMPP
+   clusters now labeled.
 8. FairPlay surface (observed-data-shapes only — dual-use adjacent) —
    DONE Oct-02: 6 def components (5 empty shells; Account
    `setupArena(config: PYTHON)` opaque cell-side; Avatar
