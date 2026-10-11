@@ -52,6 +52,24 @@ type dfield struct {
 	typ  *dtype
 }
 
+// matchBrace splits a "FixedDict{...}" body at its matching close brace
+// (nesting-aware). ok is false when the dict is unterminated.
+func matchBrace(inner string) (body, rest string, ok bool) {
+	depth := 1
+	for i := 0; i < len(inner); i++ {
+		switch inner[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return inner[:i], inner[i+1:], true
+			}
+		}
+	}
+	return "", "", false
+}
+
 func parseDesc(s string) (*dtype, string, error) {
 	if strings.HasPrefix(s, "Array[") {
 		end := strings.Index(s, "]")
@@ -98,23 +116,10 @@ func parseDesc(s string) (*dtype, string, error) {
 		return &dtype{op: "tuple", n: n, elem: elem}, rest[1:], nil
 	}
 	if strings.HasPrefix(s, "FixedDict{") {
-		inner := s[len("FixedDict{"):]
-		depth := 1
-		i := 0
-		for ; i < len(inner); i++ {
-			switch inner[i] {
-			case '{':
-				depth++
-			case '}':
-				depth--
-				if depth == 0 {
-					goto done
-				}
-			}
+		body, rest, ok := matchBrace(s[len("FixedDict{"):])
+		if !ok {
+			return nil, "", fmt.Errorf("wotreplay: unterminated dict %q", s)
 		}
-		return nil, "", fmt.Errorf("wotreplay: unterminated dict %q", s)
-	done:
-		body, rest := inner[:i], inner[i+1:]
 		d := &dtype{op: "dict"}
 		if strings.HasPrefix(body, "?") {
 			d.optional = true

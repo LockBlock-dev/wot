@@ -25,48 +25,48 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 // Containers (pointer identity matters for memo/BINPUT aliasing).
-type PList struct{ Items []interface{} }
-type PTuple struct{ Items []interface{} }
+type PList struct{ Items []any }
+type PTuple struct{ Items []any }
 type PEntry struct {
-	Key   interface{}
-	Value interface{}
+	Key   any
+	Value any
 }
 type PDict struct{ Entries []PEntry }
-type PSet struct{ Items []interface{} }
+type PSet struct{ Items []any }
 
 // Deque is our stand-in for collections.deque (ordered items).
 type Deque struct {
-	Items []interface{}
+	Items []any
 }
 
 // GenericValue holds an unknown pickled class instance as pure data.
 type GenericValue struct {
 	Module string
 	Name   string
-	Args   []interface{}
-	State  interface{}
-	Attrs  map[string]interface{}
+	Args   []any
+	State  any
+	Attrs  map[string]any
 }
 
 // decoder state.
 type pun struct {
 	data []byte
 	pos  int
-	stk  []interface{}
-	memo map[int]interface{}
+	stk  []any
+	memo map[int]any
 }
 
 type marker struct{}
 
-func (p *pun) push(v interface{}) { p.stk = append(p.stk, v) }
+func (p *pun) push(v any) { p.stk = append(p.stk, v) }
 
-func (p *pun) pop() (interface{}, error) {
+func (p *pun) pop() (any, error) {
 	if len(p.stk) == 0 {
 		return nil, fmt.Errorf("wotlogin: pickle stack underflow")
 	}
@@ -122,8 +122,8 @@ func (p *pun) u32() (uint32, error) {
 }
 
 // popMark pops through the topmost MARK (inclusive), oldest-first.
-func (p *pun) popMark() ([]interface{}, error) {
-	var out []interface{}
+func (p *pun) popMark() ([]any, error) {
+	var out []any
 	for {
 		if len(p.stk) == 0 {
 			return nil, fmt.Errorf("wotlogin: pickle MARK missing")
@@ -133,12 +133,12 @@ func (p *pun) popMark() ([]interface{}, error) {
 		if _, ok := v.(marker); ok {
 			break
 		}
-		out = append([]interface{}{v}, out...)
+		out = append([]any{v}, out...)
 	}
 	return out, nil
 }
 
-func dictSet(obj, key, value interface{}) error {
+func dictSet(obj, key, value any) error {
 	switch d := obj.(type) {
 	case *PDict:
 		d.Entries = append(d.Entries, PEntry{Key: key, Value: value})
@@ -146,7 +146,7 @@ func dictSet(obj, key, value interface{}) error {
 	case *GenericValue:
 		if ks, ok := key.(string); ok {
 			if d.Attrs == nil {
-				d.Attrs = map[string]interface{}{}
+				d.Attrs = map[string]any{}
 			}
 			d.Attrs[ks] = value
 			return nil
@@ -210,7 +210,7 @@ type builtinMarker struct {
 }
 
 // callClass invokes a marker with an arg tuple.
-func callClass(fn interface{}, args []interface{}) (interface{}, error) {
+func callClass(fn any, args []any) (any, error) {
 	switch c := fn.(type) {
 	case *dequeMarker:
 		d := &Deque{}
@@ -229,7 +229,7 @@ func callClass(fn interface{}, args []interface{}) (interface{}, error) {
 		}
 		return nil, fmt.Errorf("wotlogin: deque args not a sequence")
 	case *genericMarker:
-		return &GenericValue{Module: c.module, Name: c.name, Args: args, Attrs: map[string]interface{}{}}, nil
+		return &GenericValue{Module: c.module, Name: c.name, Args: args, Attrs: map[string]any{}}, nil
 	case *builtinMarker:
 		switch c.name {
 		case "list":
@@ -251,14 +251,14 @@ func callClass(fn interface{}, args []interface{}) (interface{}, error) {
 			}
 			return nil, fmt.Errorf("wotlogin: %s args not a sequence", c.name)
 		case "object":
-			return &GenericValue{Module: "builtins", Name: "object", Args: args, Attrs: map[string]interface{}{}}, nil
+			return &GenericValue{Module: "builtins", Name: "object", Args: args, Attrs: map[string]any{}}, nil
 		}
 	}
 	return nil, fmt.Errorf("wotlogin: pickle call of %T", fn)
 }
 
 // resolveGlobal maps pickle globals to SAFE markers (never code).
-func resolveGlobal(module, name string) (interface{}, error) {
+func resolveGlobal(module, name string) (any, error) {
 	if module == "collections" && name == "deque" {
 		return &dequeMarker{}, nil
 	}
@@ -346,7 +346,7 @@ func unescapeUnicode(b []byte) (string, error) {
 	return sb.String(), nil
 }
 
-func decodeTextInt(b []byte) (interface{}, error) {
+func decodeTextInt(b []byte) (any, error) {
 	s := string(b)
 	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 		return i, nil
@@ -358,7 +358,7 @@ func decodeTextInt(b []byte) (interface{}, error) {
 }
 
 // decodeOne runs one pickle document, returning value + consumed bytes.
-func decodeOne(data []byte) (v interface{}, n int, err error) {
+func decodeOne(data []byte) (v any, n int, err error) {
 	v, n, _, err = decodePrefix(data)
 	return v, n, err
 }
@@ -367,29 +367,29 @@ func decodeOne(data []byte) (v interface{}, n int, err error) {
 // first error (or completed value): UDP loss truncates lobby pickles
 // mid-document, but nested containers that CLOSED before the cut are
 // fully recovered.
-func DecodePrefix(data []byte) (stk []interface{}, n int, err error) {
+func DecodePrefix(data []byte) (stk []any, n int, err error) {
 	_, n, stk, err = decodePrefix(data)
 	return stk, n, err
 }
 
-func decodePrefix(data []byte) (v interface{}, n int, stk []interface{}, err error) {
-	p := &pun{data: data, memo: map[int]interface{}{}}
+func decodePrefix(data []byte) (v any, n int, stk []any, err error) {
+	p := &pun{data: data, memo: map[int]any{}}
 	for p.pos < len(p.data) {
 		var op byte
 		if op, err = p.readByte(); err != nil {
-			return nil, p.pos, append([]interface{}(nil), p.stk...), err
+			return nil, p.pos, append([]any(nil), p.stk...), err
 		}
 		if err = stepPickle(p, op); err != nil {
 			if stop, ok := err.(pickleStop); ok {
-				return stop.value, p.pos, append([]interface{}(nil), p.stk...), nil
+				return stop.value, p.pos, append([]any(nil), p.stk...), nil
 			}
-			return nil, p.pos, append([]interface{}(nil), p.stk...), fmt.Errorf("%w (op %02x @%d)", err, op, p.pos)
+			return nil, p.pos, append([]any(nil), p.stk...), fmt.Errorf("%w (op %02x @%d)", err, op, p.pos)
 		}
 	}
-	return nil, p.pos, append([]interface{}(nil), p.stk...), fmt.Errorf("wotlogin: pickle missing STOP")
+	return nil, p.pos, append([]any(nil), p.stk...), fmt.Errorf("wotlogin: pickle missing STOP")
 }
 
-type pickleStop struct{ value interface{} }
+type pickleStop struct{ value any }
 
 func (p pickleStop) Error() string { return "STOP" }
 
@@ -686,7 +686,7 @@ func stepPickle(p *pun, op byte) error {
 		if err != nil {
 			return err
 		}
-		p.push(&PTuple{Items: []interface{}{v}})
+		p.push(&PTuple{Items: []any{v}})
 		return nil
 	case '\x86': // TUPLE2
 		b, err := p.pop()
@@ -698,7 +698,7 @@ func stepPickle(p *pun, op byte) error {
 			p.push(b)
 			return err
 		}
-		p.push(&PTuple{Items: []interface{}{a, b}})
+		p.push(&PTuple{Items: []any{a, b}})
 		return nil
 	case '\x87': // TUPLE3
 		c, err := p.pop()
@@ -716,7 +716,7 @@ func stepPickle(p *pun, op byte) error {
 			p.push(c)
 			return err
 		}
-		p.push(&PTuple{Items: []interface{}{a, b, c}})
+		p.push(&PTuple{Items: []any{a, b, c}})
 		return nil
 	case '\x8a': // LONG1
 		n, err := p.readByte()
@@ -812,7 +812,7 @@ func stepPickle(p *pun, op byte) error {
 						return fmt.Errorf("wotlogin: pickle NEWOBJ_EX kwarg %T", e.Key)
 					}
 					if gv.Attrs == nil {
-						gv.Attrs = map[string]interface{}{}
+						gv.Attrs = map[string]any{}
 					}
 					gv.Attrs[ks] = e.Value
 				}
@@ -877,7 +877,7 @@ func stepPickle(p *pun, op byte) error {
 						return fmt.Errorf("wotlogin: pickle BUILD key %T", e.Key)
 					}
 					if t.Attrs == nil {
-						t.Attrs = map[string]interface{}{}
+						t.Attrs = map[string]any{}
 					}
 					t.Attrs[ks] = e.Value
 				}
@@ -1003,7 +1003,7 @@ func stepPickle(p *pun, op byte) error {
 
 // DecodeLobbyPickle decodes one cPickle protocol 0-5 document
 // (trailing bytes after STOP are ignored).
-func DecodeLobbyPickle(data []byte) (interface{}, error) {
+func DecodeLobbyPickle(data []byte) (any, error) {
 	v, _, err := decodeOne(data)
 	return v, err
 }
@@ -1012,7 +1012,7 @@ func DecodeLobbyPickle(data []byte) (interface{}, error) {
 // (observed 0-6B on 1a bodies): it tries offsets 0..15 and returns
 // the first success consuming >= 8 bytes (kills tiny accidental
 // decodes; real lobby docs are 30B+).
-func DecodeAt(data []byte, maxOff int) (interface{}, int, int, error) {
+func DecodeAt(data []byte, maxOff int) (any, int, int, error) {
 	if maxOff > len(data) {
 		maxOff = len(data)
 	}
@@ -1061,7 +1061,7 @@ func Inventory(app []byte) []DocSeg {
 		}
 		firstErr := err
 		next := -1
-		var nv interface{}
+		var nv any
 		var nn int
 		for i := pos + 1; i+1 < len(app); i++ {
 			if app[i] != 0x80 || app[i+1] > 5 {
@@ -1097,7 +1097,7 @@ type Frag struct {
 // failure, resynchronizes at the next frag start at or past the error.
 // Returns decoded docs in order. Memo state resets per resync (never
 // shared across a hole).
-func DecodeBundle(frags []Frag) []interface{} {
+func DecodeBundle(frags []Frag) []any {
 	var app []byte
 	var starts []int
 	off := 0
@@ -1106,7 +1106,7 @@ func DecodeBundle(frags []Frag) []interface{} {
 		app = append(app, fr.Payload...)
 		off += len(fr.Payload)
 	}
-	var out []interface{}
+	var out []any
 	pos := 0
 	for pos < len(app) {
 		v, n, err := decodeOne(app[pos:])
@@ -1137,16 +1137,16 @@ func DecodeBundle(frags []Frag) []interface{} {
 
 // DecodeOne decodes one document and reports bytes consumed (for
 // concatenated multi-document streams like the lobby bulk bundle).
-func DecodeOne(data []byte) (interface{}, int, error) {
+func DecodeOne(data []byte) (any, int, error) {
 	return decodeOne(data)
 }
 
 // HarvestKeys walks a decoded value collecting string dict-key NAMES
 // (schema only — never values) into counts. Depth-capped; cycles
 // impossible (decoder builds trees).
-func HarvestKeys(v interface{}, counts map[string]int) {
-	var walk func(x interface{}, depth int)
-	walk = func(x interface{}, depth int) {
+func HarvestKeys(v any, counts map[string]int) {
+	var walk func(x any, depth int)
+	walk = func(x any, depth int) {
 		if depth > 8 {
 			return
 		}
@@ -1193,7 +1193,7 @@ func HarvestKeys(v interface{}, counts map[string]int) {
 // values.
 func HarvestStream(app []byte) (counts map[string]int, docs, gaps, valid int) {
 	counts = map[string]int{}
-	p := &pun{data: app, memo: map[int]interface{}{}}
+	p := &pun{data: app, memo: map[int]any{}}
 	inGap := false
 	gapStart := 0
 	gapBytes := 0
@@ -1259,11 +1259,11 @@ func schemaKey(s string) bool {
 
 // PickleSummary sketches a decoded value for logs: container types,
 // string key NAMES (schema, not secrets), lengths — never scalars.
-func PickleSummary(v interface{}) string {
+func PickleSummary(v any) string {
 	return summarize(v, 0)
 }
 
-func summarize(v interface{}, depth int) string {
+func summarize(v any, depth int) string {
 	if depth > 4 {
 		return "…"
 	}
@@ -1277,7 +1277,7 @@ func summarize(v interface{}, depth int) string {
 				keys = append(keys, fmt.Sprintf("<%T>", e.Key))
 			}
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		if len(keys) > 12 {
 			keys = append(keys[:12], fmt.Sprintf("+%d", len(keys)-12))
 		}

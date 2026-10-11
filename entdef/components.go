@@ -28,7 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -112,7 +112,7 @@ func (l *CompLoader) LoadExtensions() error {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	// scripts manifest first, then pkgs alphabetical.
 	ordered := []string{"scripts_components.xml"}
 	for _, n := range names {
@@ -152,7 +152,7 @@ func (l *CompLoader) LoadExtensions() error {
 		}
 		pkgs = append(pkgs, ex.Pkg)
 	}
-	sort.Strings(pkgs)
+	slices.Sort(pkgs)
 	for _, p := range pkgs {
 		l.compDirs = append(l.compDirs, filepath.Join(l.Root, "components", p))
 	}

@@ -148,12 +148,14 @@ func (a BrokerAuth) Username() string {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
+		// json.Marshal of a string is infallible.
 		kb, _ := json.Marshal(k)
 		sb.Write(kb)
 		sb.WriteString(": ")
 		if k == "session" {
 			var blob string
 			if err := json.Unmarshal(raw, &blob); err == nil {
+				// json.Marshal of a string is infallible.
 				mb, _ := json.Marshal(md5hex(cpsaltSession(blob)))
 				sb.Write(mb)
 				continue
@@ -185,12 +187,12 @@ func ParseBrokerParams(raw []byte) (BrokerAuth, error) {
 		return BrokerAuth{}, fmt.Errorf("wotlogin: broker params: order has %d keys, params has %d",
 			len(dump.Order), len(dump.Params))
 	}
-	seen := map[string]bool{}
+	seen := map[string]struct{}{}
 	for _, k := range dump.Order {
-		if seen[k] {
+		if _, dup := seen[k]; dup {
 			return BrokerAuth{}, fmt.Errorf("wotlogin: broker params: duplicate key %q", k)
 		}
-		seen[k] = true
+		seen[k] = struct{}{}
 		v, ok := dump.Params[k]
 		if !ok {
 			return BrokerAuth{}, fmt.Errorf("wotlogin: broker params: order key %q absent from params", k)

@@ -6,27 +6,27 @@ import (
 	"testing"
 )
 
-func offerTree() []interface{} {
-	return []interface{}{
-		map[string]interface{}{
-			"offer:battle_pass:deluxe:paid:213:10": map[string]interface{}{
-				"count": int64(3), "expires": map[string]interface{}{"at": int64(1780000000)},
+func offerTree() []any {
+	return []any{
+		map[string]any{
+			"offer:battle_pass:deluxe:paid:213:10": map[string]any{
+				"count": int64(3), "expires": map[string]any{"at": int64(1780000000)},
 			},
 			"other": int64(1),
 		},
-		[]interface{}{
-			map[string]interface{}{
-				"offer:comp7_6_yearly:guide_gift:paid:213:5": map[string]interface{}{
-					"count": int64(1), "expires": map[string]interface{}{"at": int64(1780000001)}, "limit": int64(0),
+		[]any{
+			map[string]any{
+				"offer:comp7_6_yearly:guide_gift:paid:213:5": map[string]any{
+					"count": int64(1), "expires": map[string]any{"at": int64(1780000001)}, "limit": int64(0),
 				},
 			},
 		},
-		map[string]interface{}{
-			"offer:comp7:deluxe": map[string]interface{}{
-				"count": int64(2), "expires": map[string]interface{}{"at": int64(1780000002)},
+		map[string]any{
+			"offer:comp7:deluxe": map[string]any{
+				"count": int64(2), "expires": map[string]any{"at": int64(1780000002)},
 			},
-			"offer:bad": map[string]interface{}{"count": int64(1)},
-			"offer:battle_pass:x:paid:1:2": map[string]interface{}{
+			"offer:bad": map[string]any{"count": int64(1)},
+			"offer:battle_pass:x:paid:1:2": map[string]any{
 				"expires": int64(9),
 			},
 		},
@@ -64,10 +64,10 @@ func TestParseOffers(t *testing.T) {
 }
 
 func TestAccessors(t *testing.T) {
-	m := map[string]interface{}{
+	m := map[string]any{
 		"s": "v", "n": int64(7),
-		"d": map[string]interface{}{"x": int64(1)},
-		"l": []interface{}{int64(2)},
+		"d": map[string]any{"x": int64(1)},
+		"l": []any{int64(2)},
 		"f": 1.5,
 	}
 	if s, ok := Str(m, "s"); !ok || s != "v" {
@@ -93,19 +93,19 @@ func TestAccessors(t *testing.T) {
 	}
 }
 
-func questTree() []interface{} {
-	return []interface{}{
-		map[string]interface{}{
-			"quests": map[string]interface{}{
-				"dq:6abe9630:QUEST_MEDIUM::c:218__2000::r:ett__1": map[string]interface{}{
+func questTree() []any {
+	return []any{
+		map[string]any{
+			"quests": map[string]any{
+				"dq:6abe9630:QUEST_MEDIUM::c:218__2000::r:ett__1": map[string]any{
 					"expiryTime": int64(1780000000),
-					"progress":   map[string]interface{}{},
+					"progress":   map[string]any{},
 				},
-				"wq::6ABBEA70::1::c:30001": map[string]interface{}{
+				"wq::6ABBEA70::1::c:30001": map[string]any{
 					"expiryTime": int64(1780000001),
 				},
-				"bogus": map[string]interface{}{"expiryTime": int64(1)},
-				"dq:6abe9630:NOPE::c:1__1": map[string]interface{}{
+				"bogus": map[string]any{"expiryTime": int64(1)},
+				"dq:6abe9630:NOPE::c:1__1": map[string]any{
 					"expiryTime": int64(1),
 				},
 			},
@@ -142,23 +142,23 @@ func TestParseQuests(t *testing.T) {
 }
 
 func TestParsePiggyBank(t *testing.T) {
-	items := []interface{}{
-		map[string]interface{}{"piggyBank": map[string]interface{}{"credits": int64(5000)}},
+	items := []any{
+		map[string]any{"piggyBank": map[string]any{"credits": int64(5000)}},
 	}
 	pb, ok := ParsePiggyBank(items)
 	if !ok || pb.Credits != 5000 {
 		t.Fatalf("piggy = %+v ok=%v", pb, ok)
 	}
-	if _, ok := ParsePiggyBank([]interface{}{map[string]interface{}{}}); ok {
+	if _, ok := ParsePiggyBank([]any{map[string]any{}}); ok {
 		t.Fatal("absent piggy must miss")
 	}
 }
 
 func TestParseModeConfigs(t *testing.T) {
-	items := []interface{}{
-		map[string]interface{}{
-			"configs": map[string]interface{}{
-				"squad": map[string]interface{}{
+	items := []any{
+		map[string]any{
+			"configs": map[string]any{
+				"squad": map[string]any{
 					"allowedTankLevels":          int64(8),
 					"isAssemblingEnabled":        true,
 					"tankLevelPreferenceEnabled": false,
@@ -178,13 +178,13 @@ func TestParseModeConfigs(t *testing.T) {
 }
 
 func TestParseSlotCharges(t *testing.T) {
-	items := []interface{}{
-		map[string]interface{}{
-			"vehiclesSlotsConfig": map[string]interface{}{
-				"ussr:R46_KV-13_SH": map[string]interface{}{
+	items := []any{
+		map[string]any{
+			"vehiclesSlotsConfig": map[string]any{
+				"ussr:R46_KV-13_SH": map[string]any{
 					"charge1": int64(1), "charge2": int64(2), "charge3": int64(3), "charge4": int64(4),
 				},
-				"broken": map[string]interface{}{"charge1": int64(1)},
+				"broken": map[string]any{"charge1": int64(1)},
 			},
 		},
 	}

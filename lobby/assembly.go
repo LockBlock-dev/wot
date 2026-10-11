@@ -15,7 +15,7 @@ import "strings"
 // `{count, expires[, limit]}` values.
 
 // Str reads a string field (presence boolean, never a zero default).
-func Str(m map[string]interface{}, key string) (string, bool) {
+func Str(m map[string]any, key string) (string, bool) {
 	v, ok := m[key]
 	if !ok {
 		return "", false
@@ -26,7 +26,7 @@ func Str(m map[string]interface{}, key string) (string, bool) {
 
 // Int reads an int64 field (JSON ints decode as int64; float64 from
 // other producers is rejected — never silently truncated).
-func Int(m map[string]interface{}, key string) (int64, bool) {
+func Int(m map[string]any, key string) (int64, bool) {
 	v, ok := m[key]
 	if !ok {
 		return 0, false
@@ -36,22 +36,22 @@ func Int(m map[string]interface{}, key string) (int64, bool) {
 }
 
 // Dict reads a nested map field.
-func Dict(m map[string]interface{}, key string) (map[string]interface{}, bool) {
+func Dict(m map[string]any, key string) (map[string]any, bool) {
 	v, ok := m[key]
 	if !ok {
 		return nil, false
 	}
-	d, ok := v.(map[string]interface{})
+	d, ok := v.(map[string]any)
 	return d, ok
 }
 
 // List reads a nested slice field.
-func List(m map[string]interface{}, key string) ([]interface{}, bool) {
+func List(m map[string]any, key string) ([]any, bool) {
 	v, ok := m[key]
 	if !ok {
 		return nil, false
 	}
-	l, ok := v.([]interface{})
+	l, ok := v.([]any)
 	return l, ok
 }
 
@@ -75,21 +75,21 @@ type Offer struct {
 // ParseOffers collects offer entries from salvaged items (walks maps
 // and slices recursively; non-offer content is skipped, never an
 // error — partial sessions parse partially).
-func ParseOffers(items []interface{}) []Offer {
+func ParseOffers(items []any) []Offer {
 	var out []Offer
-	var walk func(v interface{})
-	walk = func(v interface{}) {
+	var walk func(v any)
+	walk = func(v any) {
 		switch t := v.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			for k, e := range t {
-				if sub, ok := e.(map[string]interface{}); ok && strings.HasPrefix(k, "offer:") {
+				if sub, ok := e.(map[string]any); ok && strings.HasPrefix(k, "offer:") {
 					if o, ok := parseOffer(k, sub); ok {
 						out = append(out, o)
 					}
 				}
 				walk(e)
 			}
-		case []interface{}:
+		case []any:
 			for _, e := range t {
 				walk(e)
 			}
@@ -105,7 +105,7 @@ func ParseOffers(items []interface{}) []Offer {
 // reads the counters. Two key shapes live (comp7 short without the
 // paid legs, battle_pass long with them). Malformed keys or missing
 // count/expires fail (the caller skips — schema drift, not data).
-func parseOffer(key string, sub map[string]interface{}) (Offer, bool) {
+func parseOffer(key string, sub map[string]any) (Offer, bool) {
 	var o Offer
 	parts := strings.Split(key, ":")
 	o.Key = key
@@ -166,22 +166,22 @@ type Quest struct {
 	Conds    []QuestLeg
 	Rewards  []QuestLeg
 	Expiry   int64
-	Progress map[string]interface{}
+	Progress map[string]any
 }
 
 // ParseQuests collects quest entries from salvaged items (quest dicts
 // keyed by quest ID inside a `quests` map, one level down from the
 // top doc — matched structurally, never by position).
-func ParseQuests(items []interface{}) []Quest {
+func ParseQuests(items []any) []Quest {
 	var out []Quest
-	var walk func(v interface{})
-	walk = func(v interface{}) {
+	var walk func(v any)
+	walk = func(v any) {
 		switch t := v.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			if qm, ok := t["quests"]; ok {
-				if qd, ok := qm.(map[string]interface{}); ok {
+				if qd, ok := qm.(map[string]any); ok {
 					for k, e := range qd {
-						if sub, ok := e.(map[string]interface{}); ok {
+						if sub, ok := e.(map[string]any); ok {
 							if q, ok := parseQuest(k, sub); ok {
 								out = append(out, q)
 							}
@@ -192,7 +192,7 @@ func ParseQuests(items []interface{}) []Quest {
 			for _, e := range t {
 				walk(e)
 			}
-		case []interface{}:
+		case []any:
 			for _, e := range t {
 				walk(e)
 			}
@@ -205,7 +205,7 @@ func ParseQuests(items []interface{}) []Quest {
 }
 
 // parseQuest splits the quest key and reads expiry/progress.
-func parseQuest(key string, sub map[string]interface{}) (Quest, bool) {
+func parseQuest(key string, sub map[string]any) (Quest, bool) {
 	var q Quest
 	parts := strings.Split(key, ":")
 	if len(parts) < 3 || (parts[0] != "dq" && parts[0] != "wq") {
@@ -282,15 +282,15 @@ type PiggyBank struct {
 
 // ParsePiggyBank reads the piggyBank block (absent → miss, never zero
 // — a zero reserve is real data).
-func ParsePiggyBank(items []interface{}) (PiggyBank, bool) {
+func ParsePiggyBank(items []any) (PiggyBank, bool) {
 	var out PiggyBank
 	found := false
-	var walk func(v interface{})
-	walk = func(v interface{}) {
+	var walk func(v any)
+	walk = func(v any) {
 		switch t := v.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			if pb, ok := t["piggyBank"]; ok {
-				if pm, ok := pb.(map[string]interface{}); ok {
+				if pm, ok := pb.(map[string]any); ok {
 					if c, ok := Int(pm, "credits"); ok {
 						out, found = PiggyBank{Credits: c}, true
 					}
@@ -299,7 +299,7 @@ func ParsePiggyBank(items []interface{}) (PiggyBank, bool) {
 			for _, e := range t {
 				walk(e)
 			}
-		case []interface{}:
+		case []any:
 			for _, e := range t {
 				walk(e)
 			}
@@ -325,16 +325,16 @@ type ModeConfig struct {
 }
 
 // ParseModeConfigs collects `configs/<mode>` blocks.
-func ParseModeConfigs(items []interface{}) []ModeConfig {
+func ParseModeConfigs(items []any) []ModeConfig {
 	var out []ModeConfig
-	var walk func(v interface{})
-	walk = func(v interface{}) {
+	var walk func(v any)
+	walk = func(v any) {
 		switch t := v.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			if cm, ok := t["configs"]; ok {
-				if cd, ok := cm.(map[string]interface{}); ok {
+				if cd, ok := cm.(map[string]any); ok {
 					for mode, e := range cd {
-						if em, ok := e.(map[string]interface{}); ok {
+						if em, ok := e.(map[string]any); ok {
 							out = append(out, parseModeConfig(mode, em))
 						}
 					}
@@ -343,7 +343,7 @@ func ParseModeConfigs(items []interface{}) []ModeConfig {
 			for _, e := range t {
 				walk(e)
 			}
-		case []interface{}:
+		case []any:
 			for _, e := range t {
 				walk(e)
 			}
@@ -355,7 +355,7 @@ func ParseModeConfigs(items []interface{}) []ModeConfig {
 	return out
 }
 
-func parseModeConfig(mode string, m map[string]interface{}) ModeConfig {
+func parseModeConfig(mode string, m map[string]any) ModeConfig {
 	c := ModeConfig{Mode: mode}
 	if v, ok := Int(m, "allowedTankLevels"); ok {
 		c.AllowedTankLevels = v
@@ -383,16 +383,16 @@ type SlotCharges struct {
 }
 
 // ParseSlotCharges collects vehiclesSlotsConfig entries.
-func ParseSlotCharges(items []interface{}) []SlotCharges {
+func ParseSlotCharges(items []any) []SlotCharges {
 	var out []SlotCharges
-	var walk func(v interface{})
-	walk = func(v interface{}) {
+	var walk func(v any)
+	walk = func(v any) {
 		switch t := v.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			if sm, ok := t["vehiclesSlotsConfig"]; ok {
-				if sd, ok := sm.(map[string]interface{}); ok {
+				if sd, ok := sm.(map[string]any); ok {
 					for veh, e := range sd {
-						if em, ok := e.(map[string]interface{}); ok {
+						if em, ok := e.(map[string]any); ok {
 							var sc SlotCharges
 							sc.Vehicle = veh
 							okAll := true
@@ -414,7 +414,7 @@ func ParseSlotCharges(items []interface{}) []SlotCharges {
 			for _, e := range t {
 				walk(e)
 			}
-		case []interface{}:
+		case []any:
 			for _, e := range t {
 				walk(e)
 			}

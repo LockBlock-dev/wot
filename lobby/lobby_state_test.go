@@ -13,28 +13,28 @@ func TestPlainValue(t *testing.T) {
 	}
 	var dropped int
 	p := PlainValue(v, &dropped)
-	m, ok := p.(map[string]interface{})
+	m, ok := p.(map[string]any)
 	if !ok || dropped != 0 {
 		t.Fatalf("plain=%T dropped=%d", p, dropped)
 	}
 	if m["a"] != int64(1) {
 		t.Fatalf("a=%v", m["a"])
 	}
-	l, ok := m["b"].([]interface{})
+	l, ok := m["b"].([]any)
 	if !ok || len(l) != 2 || l[0] != int64(2) || l[1] != int64(3) {
 		t.Fatalf("b=%v", m["b"])
 	}
 	// Non-string keys drop (counted, never logged).
 	mixed := &PDict{Entries: []PEntry{{Key: 7, Value: int64(1)}, {Key: "x", Value: nil}}}
 	var d2 int
-	p2 := PlainValue(mixed, &d2).(map[string]interface{})
+	p2 := PlainValue(mixed, &d2).(map[string]any)
 	if d2 != 1 || len(p2) != 1 || p2["x"] != nil {
 		t.Fatalf("mixed=%v dropped=%d", p2, d2)
 	}
 	// Depth cap terminates adversarial nesting.
-	deep := interface{}(int64(0))
+	deep := any(int64(0))
 	for i := 0; i < 20; i++ {
-		deep = &PList{Items: []interface{}{deep}}
+		deep = &PList{Items: []any{deep}}
 	}
 	if PlainValue(deep, nil) == nil {
 		t.Fatal("top must survive")
@@ -51,7 +51,7 @@ func TestSalvageChunk(t *testing.T) {
 	if len(b.Items) != 1 {
 		t.Fatalf("items=%d", len(b.Items))
 	}
-	m, ok := b.Items[0].(map[string]interface{})
+	m, ok := b.Items[0].(map[string]any)
 	if !ok || m["a"] != int64(1) {
 		t.Fatalf("item=%v", b.Items[0])
 	}

@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -101,7 +101,7 @@ func usernameOrder(params map[string]string) []string {
 		for k := range params {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		return keys
 	}
 }

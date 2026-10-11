@@ -651,6 +651,137 @@ var StageOneBudget = 25 * time.Second
 // it to cover the extended budget (game resends unbounded).
 var StageOneResends = 9
 
+// stageOneDriver runs the negotiation-channel script step by step:
+// ack0 (bare aux, no app), the reliable authenticate (~10 ms later),
+// a pure ack per later server message, until the [44] redirect ends
+// the stage. Counters mirror genuine: reliable seq 0 (auth1, resent
+// in place while silent), unreliable seq from 2, cumul = acked server
+// seq + 1, aux = (reliableSent-1) per exe ch+0x158 (all-bits before
+// auth1, 0 after). Sizes only in errors.
+type stageOneDriver struct {
+	ctx      context.Context
+	sendConn Transport
+	readConn Transport
+	peer     *net.UDPAddr
+	newKey   uint32
+	blockKey string
+
+	// unrel is the unreliable seq, continuing from 2 (flows3
+	// pure-acks 2,2 3,3 4,4).
+	unrel uint32
+	// lastSeq is the last acked server seq (the rotation reply
+	// was server seq 0).
+	lastSeq uint32
+	// relSent counts reliable sends: auth1 went out (seq 0), so
+	// later aux words are 0 (exe ch+0x158 = reliableSent-1).
+	relSent uint32
+	// resends counts reliable-auth1 retransmits (same seq 0)
+	// after the first send.
+	resends int
+	got     []string
+	buf     []byte
+	end     time.Time
+}
+
+func (d *stageOneDriver) send(tag string, pkt []byte) error {
+	select {
+	case <-d.ctx.Done():
+		return d.ctx.Err()
+	default:
+	}
+	_, err := d.sendConn.WriteToUDP(pkt, d.peer)
+	if err == nil {
+		d.got = append(d.got, tag)
+	}
+	return err
+}
+
+// sendOpening emits ack0 then the reliable authenticate, mirroring
+// the game's ~10 ms Python/dispatcher lag (1:1 MIRROR: flows3
+// 532→544, Oct-01 20:08:01.181→.192). Decrypt-proven shape (flows3 +
+// proxy-20261001, both successful lobbies): auth1 is RELIABLE
+// [02][key] WITH 0x0b (flags 5804, reliable seq 0, cumul 1) — the
+// 52B answer follows only with the 0b trailer present (bare-auth
+// runs get heartbeats but never infos).
+func (d *stageOneDriver) sendOpening() error {
+	prefix, err := randomPrefix()
+	if err != nil {
+		return err
+	}
+	ack0enc, err := encryptBlowfish(d.blockKey, ack0Clear)
+	if err != nil {
+		return err
+	}
+	if err := d.send("→ack0", append(append([]byte{}, prefix[:]...), ack0enc...)); err != nil {
+		return err
+	}
+	auth1, err := buildChannelPacket(d.blockKey, flagsRel, authApp(d.newKey), nil, 0, 1)
+	if err != nil {
+		return err
+	}
+	time.Sleep(10 * time.Millisecond)
+	return d.send("→auth1", auth1)
+}
+
+// resendAuth retransmits the reliable auth1 in place (same seq 0,
+// latest cumul — exe timer wheel keeps reliable in flight via
+// sendNextRequest), or reports the terminal silence.
+func (d *stageOneDriver) resendAuth() error {
+	if !time.Now().Before(d.end) {
+		return fmt.Errorf("wotlogin: stage-1 no redirect (%v)", d.got)
+	}
+	if d.resends >= StageOneResends {
+		return fmt.Errorf("wotlogin: stage-1 auth unacked (%v)", d.got)
+	}
+	retry, err := buildChannelPacket(d.blockKey, flagsRel, authApp(d.newKey), nil, 0, d.lastSeq+1)
+	if err != nil {
+		return err
+	}
+	if err := d.send(fmt.Sprintf("→auth1r%d(c%d)", d.resends+1, d.lastSeq+1), retry); err != nil {
+		return err
+	}
+	d.resends++
+	return nil
+}
+
+// answer handles one server datagram: it logs the shape, follows the
+// [44] redirect (re-auth synchronizes BOTH footer longs to lastSeq+1
+// — decrypt-proven: flows3 (5,5) after a seq-4 redirect,
+// logins.pcapng (6,6) after a seq-5 redirect — not the unreliable
+// counter, which would say 5 in the latter), and otherwise sends a
+// pure ack. It returns the redirect target once followed.
+func (d *stageOneDriver) answer(data []byte) (*net.UDPAddr, error) {
+	clear, err := decryptBlowfish(d.blockKey, data[4:])
+	if err != nil {
+		d.got = append(d.got, fmt.Sprintf("%dB undecryptable", len(data)))
+		return nil, nil
+	}
+	entry := fmt.Sprintf("%dB", len(data))
+	if sq, cu, ok := channelSeqs(clear); ok {
+		d.lastSeq = sq
+		entry += fmt.Sprintf(" seq=%d cumul=%d", sq, cu)
+	}
+	entry += structSig(clear, 0)
+	d.got = append(d.got, entry)
+	if target, ok := parseRedirect(clear); ok {
+		auth2, err := buildChannelPacket(d.blockKey, flagsUnrel, buildAuthenticate(d.newKey), auxFor(d.relSent), d.lastSeq+1, d.lastSeq+1)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.send(fmt.Sprintf("→auth2(s%d,c%d)", d.lastSeq+1, d.lastSeq+1), auth2); err != nil {
+			return nil, err
+		}
+		return target, nil
+	}
+	ack, err := buildChannelPacket(d.blockKey, flagsUnrel, nil, auxFor(d.relSent), d.unrel, d.lastSeq+1)
+	if err != nil {
+		return nil, err
+	}
+	tag := fmt.Sprintf("→ack(s%d,c%d)", d.unrel, d.lastSeq+1)
+	d.unrel++
+	return nil, d.send(tag, ack)
+}
+
 // stageOneScript runs the negotiation-channel script on the LOGIN
 // socket: ack0 (bare aux, no app) then the reliable authenticate
 // (~10 ms later, mirroring the game's Python/dispatcher lag), every
@@ -667,117 +798,445 @@ var StageOneResends = 9
 // seq + 1, aux = (reliableSent-1) per exe ch+0x158 (all-bits before
 // auth1, 0 after). Sizes only in errors.
 func stageOneScript(ctx context.Context, sendConn, readConn Transport, peer *net.UDPAddr, newKey uint32, blockKey string, outcomes []string) (*net.UDPAddr, error) {
-	got := append([]string{}, outcomes...)
-	send := func(tag string, pkt []byte) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		_, err := sendConn.WriteToUDP(pkt, peer)
-		if err == nil {
-			got = append(got, tag)
-		}
-		return err
+	d := &stageOneDriver{
+		ctx:      ctx,
+		sendConn: sendConn,
+		readConn: readConn,
+		peer:     peer,
+		newKey:   newKey,
+		blockKey: blockKey,
+		unrel:    2,
+		relSent:  1,
+		got:      append([]string{}, outcomes...),
+		buf:      make([]byte, 2048),
+		end:      time.Now().Add(StageOneBudget),
 	}
-	prefix, err := randomPrefix()
-	if err != nil {
+	if err := d.sendOpening(); err != nil {
 		return nil, err
 	}
-	ack0enc, err := encryptBlowfish(blockKey, ack0Clear)
-	if err != nil {
-		return nil, err
-	}
-	if err := send("→ack0", append(append([]byte{}, prefix[:]...), ack0enc...)); err != nil {
-		return nil, err
-	}
-	// Decrypt-proven shape (flows3 + proxy-20261001, both successful
-	// lobbies): auth1 is RELIABLE [02][key] WITH 0x0b (flags 5804,
-	// reliable seq 0, cumul 1) ~10 ms after ack0 — the 52B answer
-	// follows only with the 0b trailer present (bare-auth runs get
-	// heartbeats but never infos).
-	auth1, err := buildChannelPacket(blockKey, flagsRel, authApp(newKey), nil, 0, 1)
-	if err != nil {
-		return nil, err
-	}
-	// 1:1 MIRROR: the genuine client authenticates ~10ms after the
-	// rotation (flows3 532→544, Oct-01 20:08:01.181→.192 —
-	// Python/dispatcher lag).
-	time.Sleep(10 * time.Millisecond)
-	if err := send("→auth1", auth1); err != nil {
-		return nil, err
-	}
-	var relSent uint32 = 1 // reliable auth1 went out (seq 0): later
-	// aux words are 0 (exe ch+0x158 = reliableSent-1); unreliable seq
-	// continues from 2 (flows3 pure-acks 2,2 3,3 4,4).
-	var unrel uint32 = 2
-	var lastSeq uint32 // rotation reply was server seq 0
-	buf := make([]byte, 2048)
-	end := time.Now().Add(StageOneBudget)
-	resends := 0 // reliable-auth1 retransmits (same seq 0) after the first send
 	for {
 		wait := time.Now().Add(1 * time.Second)
-		if wait.After(end) {
-			wait = end
+		if wait.After(d.end) {
+			wait = d.end
 		}
-		data := stageRead([]Transport{sendConn, readConn}, wait, buf)
+		data := stageRead([]Transport{d.sendConn, d.readConn}, wait, d.buf)
 		if data == nil {
-			if !time.Now().Before(end) {
-				return nil, fmt.Errorf("wotlogin: stage-1 no redirect (%v)", got)
-			}
-			if resends >= StageOneResends {
-				return nil, fmt.Errorf("wotlogin: stage-1 auth unacked (%v)", got)
-			}
-			// Resend the reliable auth1 in place (same seq 0, latest
-			// cumul — exe timer wheel keeps reliable in flight via
-			// sendNextRequest).
-			retry, err := buildChannelPacket(blockKey, flagsRel, authApp(newKey), nil, 0, lastSeq+1)
-			if err != nil {
+			if err := d.resendAuth(); err != nil {
 				return nil, err
 			}
-			if err := send(fmt.Sprintf("→auth1r%d(c%d)", resends+1, lastSeq+1), retry); err != nil {
-				return nil, err
-			}
-			resends++
 			continue
 		}
 		if len(data) < 6 {
 			continue
 		}
-		clear, err := decryptBlowfish(blockKey, data[4:])
+		target, err := d.answer(data)
 		if err != nil {
-			got = append(got, fmt.Sprintf("%dB undecryptable", len(data)))
-			continue
+			return nil, err
 		}
-		entry := fmt.Sprintf("%dB", len(data))
-		if sq, cu, ok := channelSeqs(clear); ok {
-			lastSeq = sq
-			entry += fmt.Sprintf(" seq=%d cumul=%d", sq, cu)
-		}
-		entry += structSig(clear, 0)
-		got = append(got, entry)
-		if target, ok := parseRedirect(clear); ok {
-			// Re-auth synchronizes BOTH footer longs to lastSeq+1
-			// (decrypt-proven: flows3 (5,5) after a seq-4 redirect,
-			// logins.pcapng (6,6) after a seq-5 redirect) — not the
-			// unreliable counter (which would say 5 in the latter).
-			auth2, err := buildChannelPacket(blockKey, flagsUnrel, buildAuthenticate(newKey), auxFor(relSent), lastSeq+1, lastSeq+1)
-			if err != nil {
-				return nil, err
-			}
-			if err := send(fmt.Sprintf("→auth2(s%d,c%d)", lastSeq+1, lastSeq+1), auth2); err != nil {
-				return nil, err
-			}
+		if target != nil {
 			return target, nil
 		}
-		ack, err := buildChannelPacket(blockKey, flagsUnrel, nil, auxFor(relSent), unrel, lastSeq+1)
-		if err != nil {
-			return nil, err
+	}
+}
+
+// stageTwoDriver holds the stage-2 + lobby event-loop state: channel
+// counters, opener progress, answer census and the flood recorder.
+// Each loop iteration reads one datagram and runs the pipeline:
+// flood watch → recorder → census → lobby-offer note → double-auth →
+// pure ack → opener step.
+type stageTwoDriver struct {
+	ctx      context.Context
+	conn     Transport
+	target   *net.UDPAddr
+	key1     uint32
+	blockKey string
+	mtu      int
+
+	got      []string
+	unrel    uint32 // unreliable seq; genuine stage-2 acks run 2,2 3,3...
+	relSent  uint32 // reliable-send counter (s2auth 0, sync1 1, token 2...)
+	lastSeq  uint32
+	progress bool
+	rotated  bool
+	// stageKey is the rotation-2 key (primeBundle auth for lobby sends).
+	stageKey uint32
+	rid2     uint32
+	att      uint8
+
+	baseIDs  *lobby.RequestSequence
+	tokenIDs *lobby.RequestSequence
+	chatIDs  *lobby.RequestSequence
+
+	firstData time.Time
+	openStep  int
+	openAt    time.Time
+	lastPoll  time.Time
+
+	// census counts post-flood S>C small sizes; pollsSent/pollAnswers
+	// watch the live success signals for speak-back.
+	census       map[int]int
+	lastPollSent time.Time
+	pollAnswers  int
+	pollsSent    int
+
+	recFile   *os.File
+	recStart  time.Time
+	floodDump bool
+
+	floodSeen   bool
+	floodSeenAt time.Time
+	end         time.Time
+	buf         []byte
+}
+
+func (d *stageTwoDriver) send(pkt []byte) error {
+	select {
+	case <-d.ctx.Done():
+		return d.ctx.Err()
+	default:
+	}
+	_, err := d.conn.WriteToUDP(pkt, d.target)
+	return err
+}
+
+func (d *stageTwoDriver) sendLogged(pkt []byte) error {
+	if d.recFile != nil {
+		fmt.Fprintf(d.recFile, "%.3f C>S %d %x\n", time.Since(d.recStart).Seconds(), len(pkt), pkt)
+	}
+	return d.send(pkt)
+}
+
+func (d *stageTwoDriver) build22(rid uint32, att uint8) []byte {
+	prefix, err := randomPrefix()
+	if err != nil {
+		return nil
+	}
+	p := append([]byte{}, prefix[:]...)
+	p = append(p, 0x01, 0x00)
+	p = append(p, buildBaseAppLoginMsg(rid, d.key1, att, d.mtu)...)
+	return append(p, requestFooter(2)...)
+}
+
+// sendLobby frames one primeBundled reliable app bundle (game shape:
+// flags 0458, [02][newkey], concatenated base calls, no aux) and
+// reports its size only. Reliable seq is the reliable-send counter
+// (genuine Oct-01: s2auth 0, sync1 1, token 2, sync2 3, poll 4 ... —
+// one counter, incremented per reliable send, NOT the unreliable
+// counter): relSent tracks it (1 after the double-auth above).
+func (d *stageTwoDriver) sendLobby(tag string, calls ...[]byte) error {
+	pkt, err := buildChannelPacket(d.blockKey, flagsRel, lobby.BuildLobbyBundle(d.stageKey, calls...), nil, d.relSent, d.lastSeq+1)
+	if err != nil {
+		return err
+	}
+	d.relSent++
+	if tag == "poll" {
+		d.lastPollSent = time.Now()
+	}
+	if err := d.sendLogged(pkt); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[wotlogin] lobby %s %dB\n", tag, len(pkt))
+	return nil
+}
+
+// checkExit runs the lobby clock: 45 s past the flood the census is
+// reported and the stage ends; past the budget the stage stalls —
+// silently when the full window was recorded for offline analysis.
+func (d *stageTwoDriver) checkExit() (bool, error) {
+	if !d.floodSeenAt.IsZero() {
+		if want := d.floodSeenAt.Add(60 * time.Second); d.end.Before(want) {
+			d.end = want
 		}
-		tag := fmt.Sprintf("→ack(s%d,c%d)", unrel, lastSeq+1)
-		unrel++
-		if err := send(tag, ack); err != nil {
-			return nil, err
+		if time.Since(d.floodSeenAt) > 45*time.Second {
+			fmt.Fprintf(os.Stderr, "[wotlogin] lobby done polls=%d answers~%d smalls=%v\n",
+				d.pollsSent, d.pollAnswers, d.census)
+			if d.recFile != nil {
+				d.recFile.Close()
+			}
+			return true, nil
+		}
+	}
+	if time.Now().After(d.end) {
+		if d.recFile != nil {
+			d.recFile.Close()
+			return true, nil // recorded full window
+		}
+		return true, fmt.Errorf("wotlogin: stage-2 stalled (%v)", d.got)
+	}
+	return false, nil
+}
+
+// resendHandshake re-emits the 22B (fresh rid AND att++, like the
+// game) while the server never spoke.
+func (d *stageTwoDriver) resendHandshake() error {
+	if d.progress {
+		return nil
+	}
+	d.att++
+	d.rid2++
+	return d.send(d.build22(d.rid2, d.att))
+}
+
+// observeFlood watches for the lobby flood and opens the dump
+// recorder on 1000B+ datagrams when asked. Size alone is not proof
+// (unconnected socket): the flood must decrypt under our channel
+// key. The bulk is 1252B exactly in every capture (327–489
+// datagrams; smalls trains top out at 1244B and only ever answer
+// our syncs, which we haven't sent) — so a decrypt-verified 1252B
+// IS the lobby flood.
+//
+// NOTE: floodSeen is 1252-only. Other decrypt-verified 1000B+
+// trains (1244/1220 smalls answers) still open the dump recorder
+// when asked, but must not start the lobby-exit clock or the
+// answer census.
+func (d *stageTwoDriver) observeFlood(data []byte) {
+	if len(data) < 1000 {
+		return
+	}
+	if _, err := decryptBlowfish(d.blockKey, data[4:]); err != nil {
+		return
+	}
+	if len(data) == 1252 && !d.floodSeen {
+		d.floodSeen = true
+		d.floodSeenAt = time.Now()
+		fmt.Fprintf(os.Stderr, "[wotlogin] stage2 FLOOD 1252B (decrypt-verified)\n")
+	}
+	// Stay on the channel into the lobby phase below
+	// (dump mode records the window alongside).
+	if d.floodDump && d.recFile == nil {
+		d.recFile, _ = os.Create("/tmp/opencode/flood.hex")
+		d.recStart = time.Now()
+		// Per-run channel key alongside (RAW bytes,
+		// ephemeral session — dead in minutes).
+		os.WriteFile("/tmp/opencode/stage2.key", []byte(d.blockKey), 0600)
+	}
+}
+
+// recordSC appends one S>C datagram to the flood recording. It
+// reports whether the window is complete.
+func (d *stageTwoDriver) recordSC(data []byte) bool {
+	if d.recFile == nil {
+		return false
+	}
+	fmt.Fprintf(d.recFile, "%.3f S>C %d %x\n", time.Since(d.recStart).Seconds(), len(data), data)
+	if time.Now().After(d.end) {
+		d.recFile.Close()
+		return true
+	}
+	return false
+}
+
+// observeCensus runs the post-flood census + poll-answer watch
+// (genuine: every 60B poll draws a 36B answer in ~100 ms — the live
+// signal that a sync was heard). A 324 body is the dossier answer
+// the sweep hunts: logged loudly with its position.
+func (d *stageTwoDriver) observeCensus(size int) {
+	if !d.floodSeen {
+		return
+	}
+	d.census[size]++
+	if size == 36 && !d.lastPollSent.IsZero() && time.Since(d.lastPollSent) < time.Second {
+		d.pollAnswers++
+	}
+	if size == 324 {
+		fmt.Fprintf(os.Stderr, "[wotlogin] lobby 324 DOSSIER[channel-seq]\n")
+	}
+}
+
+// noteLobbyOffer logs 1a79 lobby offers and stays: the game NEVER
+// follows these (Oct-01 genuine session: 4 offers, client stayed
+// put) — only the stage-1 [44] redirect moves us, and that already
+// happened (stageTwo starts at its target). Re-hopping here
+// abandons a possibly-primed channel and resets the handshake,
+// which is the prime suspect for the post-redirect stall. So: log
+// and stay, like the game.
+func (d *stageTwoDriver) noteLobbyOffer(clear []byte) {
+	host, port, ok := parseLobbyRedirect(clear)
+	if !ok {
+		return
+	}
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+	if err == nil && (d.target == nil || addr.String() != d.target.String()) {
+		fmt.Fprintf(os.Stderr, "[wotlogin] stage2 lobby offer (staying) → %s\n", addr.String())
+	}
+}
+
+// maybeDoubleAuth answers the second rotation with the double
+// authenticate ([02][key2] unreliable + [02][key2][0b] reliable) and
+// reports whether it acted.
+func (d *stageTwoDriver) maybeDoubleAuth(data []byte) (bool, error) {
+	if d.rotated {
+		return false, nil
+	}
+	key2, ok := stageKeyOf(data, d.rid2, d.blockKey)
+	if !ok {
+		return false, nil
+	}
+	d.rotated = true
+	d.stageKey = key2
+	fmt.Fprintf(os.Stderr, "[wotlogin] stage2 rotation-2 ok\n")
+	if d.floodDump {
+		// Persist the rotation key for offline
+		// second-layer probing (undecryptable
+		// answers, bulk chunks 2+): RAW LE bytes
+		// hex, ephemeral session, 0600. Lengths
+		// only in logs, never values.
+		var kb [4]byte
+		binary.LittleEndian.PutUint32(kb[:], key2)
+		os.WriteFile("/tmp/opencode/stage2-rot.key", []byte(hex.EncodeToString(kb[:])), 0600)
+	}
+	first, err := buildChannelPacket(d.blockKey, flagsUnrel, buildAuthenticate(key2), auxFor(d.relSent), 1, d.lastSeq+1)
+	if err != nil {
+		return false, err
+	}
+	if err := d.send(first); err != nil {
+		return false, err
+	}
+	auth, err := buildChannelPacket(d.blockKey, flagsRel, authApp(key2), nil, 0, d.lastSeq+1)
+	if err != nil {
+		return false, err
+	}
+	if err := d.send(auth); err != nil {
+		return false, err
+	}
+	d.relSent = 1 // s2auth went out (reliable seq 0)
+	fmt.Fprintf(os.Stderr, "[wotlogin] stage2 double-auth out\n")
+	return true, nil
+}
+
+// sendAck emits one pure ack for the latest server message.
+func (d *stageTwoDriver) sendAck() error {
+	ack, err := buildChannelPacket(d.blockKey, flagsUnrel, nil, auxFor(d.relSent), d.unrel, d.lastSeq+1)
+	if err != nil {
+		return err
+	}
+	d.unrel++
+	return d.sendLogged(ack)
+}
+
+// runOpener plays the lobby opener (genuine Oct-01 script: 148B sync
+// bundle ~1 s after first infos, requestToken +150 ms, 84a second
+// sync +4 s, 68B poll+token +4 s, 84b +6 s, server-stats polls q5 s
+// after. Command IDs are protocol constants (lobby.Cmd*);
+// request IDs allocate in call order (baseIDs/tokenIDs/
+// chatIDs); the per-call i64 args below are account-state
+// data exhumed from the Oct-01 capture for this account
+// (zeros drew 852-class answers; the full arg sets are the
+// next knob — see the 84b note). Sizes only on stderr.
+func (d *stageTwoDriver) runOpener() error {
+	if !(d.rotated && d.stageKey != 0 && !d.firstData.IsZero()) {
+		return nil
+	}
+	switch {
+	case d.openStep == 0 && time.Since(d.firstData) > time.Second:
+		if err := d.sendLobby("sync1",
+			lobby.DoCmdInt3(d.baseIDs.NextBaseID(), lobby.CmdSyncData, 0, 0x0ed33d39, 0),
+			lobby.DoCmdInt3(d.baseIDs.NextBaseID(), lobby.CmdSyncShop, 0, 0x323077c, -1949787292),
+			lobby.DoCmdInt3(d.baseIDs.NextBaseID(), lobby.CmdSyncDossiers, 24, 0x6abc08ed, 0),
+			lobby.BuildChatCommandFromClient(d.chatIDs.NextChatID(), lobby.ChatCmdRequestLastSysMessages, 0, 0, 0, nil, nil)); err != nil {
+			return err
+		}
+		d.openStep = 1
+		d.openAt = time.Now()
+	case d.openStep == 1 && time.Since(d.openAt) > 150*time.Millisecond:
+		if err := d.sendLobby("token", lobby.BuildRequestToken(d.tokenIDs.NextTokenID(), lobby.TokenTypeXMPPCS)); err != nil {
+			return err
+		}
+		d.openStep = 2
+	case d.openStep == 2 && time.Since(d.openAt) > 4*time.Second:
+		// 224-a is 80 genuine (not 0), same sync ref.
+		if err := d.sendLobby("sync2a",
+			lobby.DoCmdInt3(d.baseIDs.NextBaseID(), lobby.CmdSyncData, 80, 0x0ed33d39, 0),
+			lobby.BuildChatCommandFromClient(d.chatIDs.NextChatID(), lobby.ChatCmdInitAck, 0, 2, 0, nil, nil)); err != nil {
+			return err
+		}
+		d.openStep = 3
+	case d.openStep == 3 && time.Since(d.openAt) > 8*time.Second:
+		if err := d.sendLobby("poll68",
+			lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0),
+			lobby.BuildRequestToken(d.tokenIDs.NextTokenID(), lobby.TokenTypeWGNIJWT)); err != nil {
+			return err
+		}
+		d.openStep = 4
+	case d.openStep == 4 && time.Since(d.openAt) > 14*time.Second:
+		// Paired 84b (genuine shape): zero-state args are
+		// the neutral baseline — live invIDs (286),
+		// Oct-01 values (1746/0x6abe9ee), and pre-select
+		// + ask all draw the same "No such vehicle" text
+		// with no 324, so account-specific guessing is
+		// retired until a live battle-ref source exists
+		// (record a play-a-battle session).
+		if err := d.sendLobby("sync2b",
+			lobby.DoCmdInt2(d.baseIDs.NextBaseID(), lobby.CmdSetActiveVehSeason, 0, 0),
+			lobby.DoCmdInt3(d.baseIDs.NextBaseID(), lobby.CmdSyncDossiers, 0, 0, 0)); err != nil {
+			return err
+		}
+		d.openStep = 5
+	}
+	if d.openStep >= 1 && time.Since(d.openAt) > 15*time.Second && time.Since(d.lastPoll) > 5*time.Second {
+		if err := d.sendLobby("poll", lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0)); err != nil {
+			return err
+		}
+		d.pollsSent++
+		d.lastPoll = time.Now()
+	}
+	return nil
+}
+
+func (d *stageTwoDriver) run() error {
+	if err := d.send(d.build22(d.rid2, d.att)); err != nil {
+		return err
+	}
+	for {
+		// The lobby phase runs 45 s past the flood (opener + polls +
+		// answers), then reports the census: the flood is the
+		// entry, the answers are the proof of speak-back. This is
+		// the default -baseapp behavior (hangar-ward, no extra
+		// flags): single-shot victory at the flood is gone.
+		if done, err := d.checkExit(); done || err != nil {
+			return err
+		}
+		data := stageRead([]Transport{d.conn}, time.Now().Add(500*time.Millisecond), d.buf)
+		if data == nil {
+			if err := d.resendHandshake(); err != nil {
+				return err
+			}
+			continue
+		}
+		if len(data) < 6 {
+			continue
+		}
+		d.progress = true
+		d.got = append(d.got, fmt.Sprintf("%dB", len(data)))
+		d.observeFlood(data)
+		if d.recordSC(data) {
+			return nil
+		}
+		if len(data) >= 1000 {
+			continue
+		}
+		clear, err := decryptBlowfish(d.blockKey, data[4:])
+		if err != nil {
+			continue
+		}
+		if sq, _, ok := channelSeqs(clear); ok {
+			d.lastSeq = sq
+		}
+		if d.firstData.IsZero() {
+			d.firstData = time.Now()
+		}
+		d.observeCensus(len(data))
+		d.noteLobbyOffer(clear)
+		if acted, err := d.maybeDoubleAuth(data); err != nil {
+			return err
+		} else if acted {
+			continue
+		}
+		if err := d.sendAck(); err != nil {
+			return err
+		}
+		if err := d.runOpener(); err != nil {
+			return err
 		}
 	}
 }
@@ -793,324 +1252,35 @@ func stageTwo(ctx context.Context, conn Transport, target *net.UDPAddr, key1 uin
 	// never resends (burst loss is real: 175 frags vs ~150). 4 MiB
 	// keeps the burst in-kernel.
 	_ = conn.SetReadBuffer(4 << 20)
-	rid2 := smallRID()
-	build22 := func(rid uint32, att uint8) []byte {
-		prefix, err := randomPrefix()
-		if err != nil {
-			return nil
-		}
-		p := append([]byte{}, prefix[:]...)
-		p = append(p, 0x01, 0x00)
-		p = append(p, buildBaseAppLoginMsg(rid, key1, att, mtu)...)
-		return append(p, requestFooter(2)...)
+	d := &stageTwoDriver{
+		ctx: ctx, conn: conn, target: target, key1: key1, blockKey: blockKey, mtu: mtu,
+		unrel: 2,
+		rid2:  smallRID(),
+		att:   1,
+		// Lobby opener state (genuine script, game vectors Sep 27 +
+		// Oct-01). Request IDs are NOT constants: base/token/chat each
+		// allocate from their own fresh sequence (lobby.RequestSequence),
+		// and the genuine IDs fall out of the fixed call order (base
+		// 221,222,223,224,225,226; token 1,2; chat 1,2).
+		baseIDs:  lobby.NewBaseRequestIDs(),
+		tokenIDs: lobby.NewTokenRequestIDs(),
+		chatIDs:  lobby.NewChatRequestIDs(),
+		// Lobby answer census (post-flood S>C small sizes + poll-answer
+		// watch): the live success signals for speak-back.
+		census: map[int]int{},
+		// Flood recorder (offline-analysis harness): when WOT_FLOOD_DUMP is
+		// set, dump stage-2 traffic to /tmp/opencode/flood.hex (<ts> <dir>
+		// <len> <hex>) with the per-run channel key alongside (stage2.key,
+		// RAW bytes, ephemeral session — dead in minutes). Off by default:
+		// the library otherwise writes nothing to disk.
+		floodDump: os.Getenv("WOT_FLOOD_DUMP") != "",
+		end:       time.Now().Add(90 * time.Second),
+		buf:       make([]byte, 2048),
 	}
-	send := func(pkt []byte) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		_, err := conn.WriteToUDP(pkt, target)
-		return err
-	}
-	var got []string
-	var unrel uint32 = 2
-	var relSent uint32 // fresh channel: no reliable sent yet
-	var lastSeq uint32
-	var rotated, progress bool
-	var stageKey uint32 // rotation key (primeBundle auth for lobby sends)
-	// Lobby opener state (genuine script, game vectors Sep 27 +
-	// Oct-01). Request IDs are NOT constants: base/token/chat each
-	// allocate from their own fresh sequence (lobby.RequestSequence),
-	// and the genuine IDs fall out of the fixed call order (base
-	// 221,222,223,224,225,226; token 1,2; chat 1,2).
-	baseIDs := lobby.NewBaseRequestIDs()
-	tokenIDs := lobby.NewTokenRequestIDs()
-	chatIDs := lobby.NewChatRequestIDs()
-	var firstData time.Time
-	var openStep int
-	var openAt, lastPoll time.Time
-	// Lobby answer census (post-flood S>C small sizes + poll-answer
-	// watch): the live success signals for speak-back.
-	var census = map[int]int{}
-	var lastPollSent time.Time
-	var pollAnswers int
-	var pollsSent int
-	// Flood recorder (offline-analysis harness): when WOT_FLOOD_DUMP is
-	// set, dump stage-2 traffic to /tmp/opencode/flood.hex (<ts> <dir>
-	// <len> <hex>) with the per-run channel key alongside (stage2.key,
-	// RAW bytes, ephemeral session — dead in minutes). Off by default:
-	// the library otherwise writes nothing to disk.
-	var recFile *os.File
-	var recStart time.Time
-	floodDump := os.Getenv("WOT_FLOOD_DUMP") != ""
 	// clientToServerHeartbeat note (BaseAppExt wire ID 14 = 0x0e, FIXED-0,
 	// sub_140240640): fired during the pre-lobby experiments (accepted, no
 	// kick, no observable effect — keepalive only). The lobby phase
 	// supersedes it: syncs + polls + ack traffic keep the channel alive,
 	// so no heartbeat is sent anymore.
-	var floodSeen bool
-	var floodSeenAt time.Time
-	sendLogged := func(pkt []byte) error {
-		if recFile != nil {
-			fmt.Fprintf(recFile, "%.3f C>S %d %x\n", time.Since(recStart).Seconds(), len(pkt), pkt)
-		}
-		return send(pkt)
-	}
-	buf := make([]byte, 2048)
-	end := time.Now().Add(90 * time.Second)
-	// sendLobby frames one primeBundled reliable app bundle (game shape:
-	// flags 0458, [02][newkey], concatenated base calls, no aux) and
-	// reports its size only. Reliable seq is the reliable-send counter
-	// (genuine Oct-01: s2auth 0, sync1 1, token 2, sync2 3, poll 4 ... —
-	// one counter, incremented per reliable send, NOT the unreliable
-	// counter): relSent tracks it (1 after the double-auth above).
-	sendLobby := func(tag string, calls ...[]byte) error {
-		pkt, err := buildChannelPacket(blockKey, flagsRel, lobby.BuildLobbyBundle(stageKey, calls...), nil, relSent, lastSeq+1)
-		if err != nil {
-			return err
-		}
-		relSent++
-		if tag == "poll" {
-			lastPollSent = time.Now()
-		}
-		if err := sendLogged(pkt); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "[wotlogin] lobby %s %dB\n", tag, len(pkt))
-		return nil
-	}
-	att := uint8(1)
-	if err := send(build22(rid2, att)); err != nil {
-		return err
-	}
-	for {
-		// The lobby phase runs 45 s past the flood (opener + polls +
-		// answers), then reports the census: the flood is the
-		// entry, the answers are the proof of speak-back. This is
-		// the default -baseapp behavior (hangar-ward, no extra
-		// flags): single-shot victory at the flood is gone.
-		if !floodSeenAt.IsZero() {
-			if want := floodSeenAt.Add(60 * time.Second); end.Before(want) {
-				end = want
-			}
-			if time.Since(floodSeenAt) > 45*time.Second {
-				fmt.Fprintf(os.Stderr, "[wotlogin] lobby done polls=%d answers~%d smalls=%v\n",
-					pollsSent, pollAnswers, census)
-				if recFile != nil {
-					recFile.Close()
-				}
-				return nil
-			}
-		}
-		if time.Now().After(end) {
-			if recFile != nil {
-				recFile.Close()
-				return nil // recorded full window
-			}
-			return fmt.Errorf("wotlogin: stage-2 stalled (%v)", got)
-		}
-		data := stageRead([]Transport{conn}, time.Now().Add(500*time.Millisecond), buf)
-		if data == nil {
-			// Resend the handshake (fresh rid AND att++, like the game)
-			// only while the server never spoke.
-			if !progress {
-				att++
-				rid2++
-				if err := send(build22(rid2, att)); err != nil {
-					return err
-				}
-				continue
-			}
-			continue
-		}
-		if len(data) < 6 {
-			continue
-		}
-		progress = true
-		got = append(got, fmt.Sprintf("%dB", len(data)))
-		if len(data) >= 1000 {
-			// Size alone is not proof (unconnected socket): the
-			// flood must decrypt under our channel key. The bulk
-			// is 1252B exactly in every capture (327–489
-			// datagrams; smalls trains top out at 1244B and only
-			// ever answer our syncs, which we haven't sent) — so
-			// a decrypt-verified 1252B IS the lobby flood.
-			if _, err := decryptBlowfish(blockKey, data[4:]); err != nil {
-				continue
-			}
-			if len(data) == 1252 {
-				if !floodSeen {
-					floodSeen = true
-					floodSeenAt = time.Now()
-					fmt.Fprintf(os.Stderr, "[wotlogin] stage2 FLOOD 1252B (decrypt-verified)\n")
-				}
-				// Stay on the channel into the lobby phase below
-				// (dump mode records the window alongside).
-			}
-			// NOTE: floodSeen is 1252-only. Other decrypt-verified
-			// 1000B+ trains (1244/1220 smalls answers) still open
-			// the dump recorder below when asked, but must not
-			// start the lobby-exit clock or the answer census.
-			if floodDump && recFile == nil {
-				recFile, _ = os.Create("/tmp/opencode/flood.hex")
-				recStart = time.Now()
-				// Per-run channel key alongside (RAW bytes,
-				// ephemeral session — dead in minutes).
-				os.WriteFile("/tmp/opencode/stage2.key", []byte(blockKey), 0600)
-			}
-		}
-		if recFile != nil {
-			fmt.Fprintf(recFile, "%.3f S>C %d %x\n", time.Since(recStart).Seconds(), len(data), data)
-			if time.Now().After(end) {
-				recFile.Close()
-				return nil // recorded full window
-			}
-		}
-		if len(data) >= 1000 {
-			continue
-		}
-		clear, err := decryptBlowfish(blockKey, data[4:])
-		if err != nil {
-			continue
-		}
-		if sq, _, ok := channelSeqs(clear); ok {
-			lastSeq = sq
-		}
-		if firstData.IsZero() {
-			firstData = time.Now()
-		}
-		// Post-flood census + poll-answer watch (genuine: every 60B
-		// poll draws a 36B answer in ~100 ms — the live signal that
-		// a sync was heard). A 324 body is the dossier answer the
-		// sweep hunts: logged loudly with its position.
-		if floodSeen {
-			census[len(data)]++
-			if len(data) == 36 && !lastPollSent.IsZero() && time.Since(lastPollSent) < time.Second {
-				pollAnswers++
-			}
-			if len(data) == 324 {
-				fmt.Fprintf(os.Stderr, "[wotlogin] lobby 324 DOSSIER[channel-seq]\n")
-			}
-		}
-		// Lobby offers (1a79): the game NEVER follows these (Oct-01
-		// genuine session: 4 offers, client stayed put) — only the
-		// stage-1 [44] redirect moves us, and that already happened
-		// (stageTwo starts at its target). Re-hopping here abandons a
-		// possibly-primed channel and resets the handshake, which is
-		// the prime suspect for the post-redirect stall. So: log and
-		// stay, like the game.
-		if host, port, ok := parseLobbyRedirect(clear); ok {
-			addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
-			if err == nil && (target == nil || addr.String() != target.String()) {
-				fmt.Fprintf(os.Stderr, "[wotlogin] stage2 lobby offer (staying) → %s\n", addr.String())
-			}
-		}
-		if !rotated {
-			if key2, ok := stageKeyOf(data, rid2, blockKey); ok {
-				rotated = true
-				stageKey = key2
-				fmt.Fprintf(os.Stderr, "[wotlogin] stage2 rotation-2 ok\n")
-				if floodDump {
-					// Persist the rotation key for offline
-					// second-layer probing (undecryptable
-					// answers, bulk chunks 2+): RAW LE bytes
-					// hex, ephemeral session, 0600. Lengths
-					// only in logs, never values.
-					var kb [4]byte
-					binary.LittleEndian.PutUint32(kb[:], key2)
-					os.WriteFile("/tmp/opencode/stage2-rot.key", []byte(hex.EncodeToString(kb[:])), 0600)
-				}
-				first, err := buildChannelPacket(blockKey, flagsUnrel, buildAuthenticate(key2), auxFor(relSent), 1, lastSeq+1)
-				if err != nil {
-					return err
-				}
-				if err := send(first); err != nil {
-					return err
-				}
-				auth, err := buildChannelPacket(blockKey, flagsRel, authApp(key2), nil, 0, lastSeq+1)
-				if err != nil {
-					return err
-				}
-				if err := send(auth); err != nil {
-					return err
-				}
-				relSent = 1 // s2auth went out (reliable seq 0)
-				fmt.Fprintf(os.Stderr, "[wotlogin] stage2 double-auth out\n")
-				continue
-			}
-		}
-		ack, err := buildChannelPacket(blockKey, flagsUnrel, nil, auxFor(relSent), unrel, lastSeq+1)
-		if err != nil {
-			return err
-		}
-		unrel++
-		if err := sendLogged(ack); err != nil {
-			return err
-		}
-		// Lobby opener (genuine Oct-01 script: 148B sync bundle ~1 s
-		// after first infos, requestToken +150 ms, 84a second sync
-		// +4 s, 68B poll+token +4 s, 84b +6 s, server-stats polls q5 s
-		// after. Command IDs are protocol constants (lobby.Cmd*);
-		// request IDs allocate in call order (baseIDs/tokenIDs/
-		// chatIDs); the per-call i64 args below are account-state
-		// data exhumed from the Oct-01 capture for this account
-		// (zeros drew 852-class answers; the full arg sets are the
-		// next knob — see the 84b note). Sizes only on stderr.
-		if rotated && stageKey != 0 && !firstData.IsZero() {
-			switch {
-			case openStep == 0 && time.Since(firstData) > time.Second:
-				if err := sendLobby("sync1",
-					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncData, 0, 0x0ed33d39, 0),
-					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncShop, 0, 0x323077c, -1949787292),
-					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncDossiers, 24, 0x6abc08ed, 0),
-					lobby.BuildChatCommandFromClient(chatIDs.NextChatID(), lobby.ChatCmdRequestLastSysMessages, 0, 0, 0, nil, nil)); err != nil {
-					return err
-				}
-				openStep = 1
-				openAt = time.Now()
-			case openStep == 1 && time.Since(openAt) > 150*time.Millisecond:
-				if err := sendLobby("token", lobby.BuildRequestToken(tokenIDs.NextTokenID(), lobby.TokenTypeXMPPCS)); err != nil {
-					return err
-				}
-				openStep = 2
-			case openStep == 2 && time.Since(openAt) > 4*time.Second:
-				// 224-a is 80 genuine (not 0), same sync ref.
-				if err := sendLobby("sync2a",
-					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncData, 80, 0x0ed33d39, 0),
-					lobby.BuildChatCommandFromClient(chatIDs.NextChatID(), lobby.ChatCmdInitAck, 0, 2, 0, nil, nil)); err != nil {
-					return err
-				}
-				openStep = 3
-			case openStep == 3 && time.Since(openAt) > 8*time.Second:
-				if err := sendLobby("poll68",
-					lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0),
-					lobby.BuildRequestToken(tokenIDs.NextTokenID(), lobby.TokenTypeWGNIJWT)); err != nil {
-					return err
-				}
-				openStep = 4
-			case openStep == 4 && time.Since(openAt) > 14*time.Second:
-				// Paired 84b (genuine shape): zero-state args are
-				// the neutral baseline — live invIDs (286),
-				// Oct-01 values (1746/0x6abe9ee), and pre-select
-				// + ask all draw the same "No such vehicle" text
-				// with no 324, so account-specific guessing is
-				// retired until a live battle-ref source exists
-				// (record a play-a-battle session).
-				if err := sendLobby("sync2b",
-					lobby.DoCmdInt2(baseIDs.NextBaseID(), lobby.CmdSetActiveVehSeason, 0, 0),
-					lobby.DoCmdInt3(baseIDs.NextBaseID(), lobby.CmdSyncDossiers, 0, 0, 0)); err != nil {
-					return err
-				}
-				openStep = 5
-			}
-			if openStep >= 1 && time.Since(openAt) > 15*time.Second && time.Since(lastPoll) > 5*time.Second {
-				if err := sendLobby("poll", lobby.DoCmdInt3(lobby.RequestIDNoResponse, lobby.CmdReqServerStats, 0, 0, 0)); err != nil {
-					return err
-				}
-				pollsSent++
-				lastPoll = time.Now()
-			}
-		}
-	}
+	return d.run()
 }

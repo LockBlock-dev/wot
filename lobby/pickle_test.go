@@ -18,7 +18,7 @@ func dictFixture() []byte {
 		"X\x01\x00\x00\x00bq\x07eX\x03\x00\x00\x00tupq\x08K\x01K\x02\x86q\x09u.")
 }
 
-func dictLookup(t *testing.T, d *PDict, key string) interface{} {
+func dictLookup(t *testing.T, d *PDict, key string) any {
 	t.Helper()
 	for _, e := range d.Entries {
 		if e.Key == key {
@@ -131,7 +131,7 @@ func TestHarvestStream(t *testing.T) {
 		t.Fatalf("counts=%v valid=%d", counts2, valid2)
 	}
 	// HarvestKeys depth-caps and skips non-string keys silently.
-	deep := &PDict{Entries: []PEntry{{Key: 42, Value: &PList{Items: []interface{}{&PDict{Entries: []PEntry{{Key: "x", Value: nil}}}}}}}}
+	deep := &PDict{Entries: []PEntry{{Key: 42, Value: &PList{Items: []any{&PDict{Entries: []PEntry{{Key: "x", Value: nil}}}}}}}}
 	c2 := map[string]int{}
 	HarvestKeys(deep, c2)
 	if len(c2) != 1 || c2["x"] != 1 {

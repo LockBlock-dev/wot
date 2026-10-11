@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -204,7 +204,7 @@ func main() {
 			for k := range m {
 				keys = append(keys, k)
 			}
-			sort.Strings(keys)
+			slices.Sort(keys)
 			fmt.Fprintf(os.Stderr, "[wotlogin] servermsg keys=%v\n", keys)
 			fmt.Fprintf(os.Stderr, "[wotlogin] servermsg security_msg=%s isDemoAccount=%s\n",
 				string(m["security_msg"]), string(m["isDemoAccount"]))

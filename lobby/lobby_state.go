@@ -17,21 +17,21 @@ package lobby
 // counts, sizes) only — never values.
 
 // PlainValue converts a decoded pickle tree to plain Go values:
-// *PDict with all-string keys -> map[string]interface{}, *PList /
-// *PTuple / *PSet / *Deque -> []interface{}, scalars pass through.
+// *PDict with all-string keys -> map[string]any, *PList /
+// *PTuple / *PSet / *Deque -> []any, scalars pass through.
 // Non-string dict keys are dropped (counted in dropped). Depth is
 // capped; deeper subtrees become nil.
-func PlainValue(v interface{}, dropped *int) interface{} {
+func PlainValue(v any, dropped *int) any {
 	return plain(v, 0, dropped)
 }
 
-func plain(v interface{}, depth int, dropped *int) interface{} {
+func plain(v any, depth int, dropped *int) any {
 	if depth > 10 {
 		return nil
 	}
 	switch t := v.(type) {
 	case *PDict:
-		m := make(map[string]interface{}, len(t.Entries))
+		m := make(map[string]any, len(t.Entries))
 		for _, e := range t.Entries {
 			ks, ok := e.Key.(string)
 			if !ok {
@@ -44,31 +44,31 @@ func plain(v interface{}, depth int, dropped *int) interface{} {
 		}
 		return m
 	case *PList:
-		out := make([]interface{}, 0, len(t.Items))
+		out := make([]any, 0, len(t.Items))
 		for _, e := range t.Items {
 			out = append(out, plain(e, depth+1, dropped))
 		}
 		return out
 	case *PTuple:
-		out := make([]interface{}, 0, len(t.Items))
+		out := make([]any, 0, len(t.Items))
 		for _, e := range t.Items {
 			out = append(out, plain(e, depth+1, dropped))
 		}
 		return out
 	case *PSet:
-		out := make([]interface{}, 0, len(t.Items))
+		out := make([]any, 0, len(t.Items))
 		for _, e := range t.Items {
 			out = append(out, plain(e, depth+1, dropped))
 		}
 		return out
 	case *Deque:
-		out := make([]interface{}, 0, len(t.Items))
+		out := make([]any, 0, len(t.Items))
 		for _, e := range t.Items {
 			out = append(out, plain(e, depth+1, dropped))
 		}
 		return out
 	case *GenericValue:
-		m := make(map[string]interface{}, len(t.Attrs)+2)
+		m := make(map[string]any, len(t.Attrs)+2)
 		m[".class"] = t.Module + "." + t.Name
 		for k, e := range t.Attrs {
 			m[k] = plain(e, depth+1, dropped)
@@ -83,7 +83,7 @@ func plain(v interface{}, depth int, dropped *int) interface{} {
 // containers as plain values plus the valid-prefix size. Schema
 // (key names) comes from HarvestKeys; values stay in-memory.
 type LobbyBundle struct {
-	Items  []interface{}
+	Items  []any
 	Prefix int
 }
 

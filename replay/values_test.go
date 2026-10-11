@@ -62,3 +62,15 @@ func TestDecodeUnits(t *testing.T) {
 		t.Fatalf("present=%v n=%d", m, n)
 	}
 }
+
+func TestMatchBrace(t *testing.T) {
+	body, rest, ok := matchBrace("a:{b},c},tail")
+	if !ok || body != "a:{b},c" || rest != ",tail" {
+		t.Fatalf("body=%q rest=%q ok=%v", body, rest, ok)
+	}
+	for _, s := range []string{"", "a:{b},c", "noparen"} {
+		if _, _, ok := matchBrace(s); ok {
+			t.Fatalf("unterminated %q accepted", s)
+		}
+	}
+}

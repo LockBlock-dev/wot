@@ -2,7 +2,7 @@ package replay
 
 import (
 	"bytes"
-	"sort"
+	"slices"
 	"testing"
 )
 
@@ -54,7 +54,7 @@ func TestPacketCensus(t *testing.T) {
 	for ty := range counts {
 		types = append(types, ty)
 	}
-	sort.Slice(types, func(i, j int) bool { return types[i] < types[j] })
+	slices.Sort(types)
 	for _, ty := range types {
 		t.Logf("type=%#x n=%d", ty, counts[ty])
 	}

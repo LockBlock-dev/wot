@@ -5,10 +5,11 @@
 package entdef
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -614,16 +615,19 @@ func argsEqual(a, b []DataType) bool {
 // full indexes, mirroring allocateClientServerFullIndexes.
 func (e *Entity) finish() {
 	order := append([]int(nil), e.CSProps...)
-	sort.SliceStable(order, func(i, j int) bool {
-		a := e.Props[order[i]].StreamSize()
-		b := e.Props[order[j]].StreamSize()
-		if a < 0 && b < 0 {
-			return -a < -b
+	slices.SortStableFunc(order, func(x, y int) int {
+		a := e.Props[x].StreamSize()
+		b := e.Props[y].StreamSize()
+		switch {
+		case a < 0 && b < 0:
+			return cmp.Compare(-a, -b)
+		case a >= 0 && b >= 0:
+			return cmp.Compare(a, b)
+		case a >= 0:
+			return -1
+		default:
+			return 1
 		}
-		if a >= 0 && b >= 0 {
-			return a < b
-		}
-		return a > b
 	})
 	for i, pi := range order {
 		e.Props[pi].FullIndex = i
