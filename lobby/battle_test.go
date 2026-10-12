@@ -271,3 +271,40 @@ func TestScanBattleTracersGhost(t *testing.T) {
 		t.Fatal("denormal ghost accepted")
 	}
 }
+
+func TestParseBattleVehicles(t *testing.T) {
+	var bulk []byte
+	block := func(ent uint32, name string, tag byte, ref ...byte) {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], ent)
+		bulk = append(bulk, tmp[:]...)
+		bulk = append(bulk, 0x01, 0x04, 0x04, 0x10, 0x81, 0x01)
+		bulk = append(bulk, tag)
+		bulk = append(bulk, ref...)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, []byte(fmt.Sprint(ent))...)
+		bulk = append(bulk, 0x00, 0x00)
+	}
+	// ussr/9 = SU-152 shape: IntCD u16le 0x0901 (type 1, nation 0, id 9)
+	block(542282516, "ExampleUser", 0x0f, 0x01, 0x09)
+	// germany/265 EXT shape: head 0x13 (type 1 + ext), id 265
+	block(542264089, "BravoTank", 0x10, 0x13, 0x09, 0x01)
+	got := ParseBattleVehicles(bulk)
+	if len(got) != 2 {
+		t.Fatalf("map=%v, want 2 entries", got)
+	}
+	if got[542282516] != (VehicleRef{0, 9}) {
+		t.Fatalf("516=%+v, want {0 9}", got[542282516])
+	}
+	if got[542264089] != (VehicleRef{1, 265}) {
+		t.Fatalf("089=%+v, want {1 265}", got[542264089])
+	}
+	// names still resolve on the same bulk (shared heads)
+	names := ParseBattleRoster(bulk)
+	if names[542282516] != "ExampleUser" || names[542264089] != "BravoTank" {
+		t.Fatalf("names=%v", names)
+	}
+}

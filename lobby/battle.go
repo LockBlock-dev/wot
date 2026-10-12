@@ -296,78 +296,41 @@ func isDenormal(f float32) bool {
 	return b&0x7f800000 == 0 && b&0x007fffff != 0
 }
 
-// ParseBattleRoster pairs battle entities to player names from the
-// concatenated battle-start creation bulk (S>C, decrypted, arrival
-// order — e.g. the Sep-29 Sweden 1223B-run). The run must be
-// concatenated VERBATIM (contiguous fragments; size-filtered subsets
-// can split a vehicle block and lose its pair — seen live with a 90B
-// gap). Per-vehicle blocks carry
-// the entity ID twice: binary LE near the block head, then the player
-// name (packed-string, always doubled back-to-back) and the same ID
-// in ASCII digits within ~160B. Only triples matching all three
-// survive; component blobs, config pickles, single clan tags and
-// dotted section keys (bw.default etc.) are ignored by the doubling
-// rule. Tank identity lives in the creation compDescr (open) — this
-// returns names only.
-func ParseBattleRoster(bulk []byte) map[uint32]string {
-	out := map[uint32]string{}
-	isName := func(b byte) bool {
-		return b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' ||
-			b == '_' || b == '-' || b == '[' || b == ']' || b == '|'
-	}
-	allDigits := func(s []byte) bool {
-		for _, b := range s {
-			if b < '0' || b > '9' {
-				return false
-			}
-		}
-		return len(s) > 0
-	}
-	for o := 0; o+4 <= len(bulk); o++ {
+// VehicleRef is one battle entity's vehicle identity: nation index
+// (compactNations order, see NationName) + per-nation type ID from
+// that nation's vehicles/list.xml. Resolved to display names through
+// a ComponentTable (Vehicle method).
+type VehicleRef struct {
+	Nation uint8
+	TypeID uint16
+}
+
+// battleHead is one per-vehicle block opening in a creation bulk:
+// the entity ID, its byte offset (block spans to the next head) and
+// the paired player name. Only full triples (head framing +
+// doubled name + ASCII ID) qualify, so component/state u32 echoes
+// never become heads.
+type battleHead struct {
+	v    uint32
+	o    int
+	name string
+}
+
+// scanHeads lists per-vehicle block heads in a battle-start creation
+// bulk: entity-LE openings whose block carries the doubled player
+// name (see ParseBattleRoster). Shared by the roster and vehicle
+// passes so both agree on block boundaries.
+func scanHeads(bulk []byte) []battleHead {
+	var out []battleHead
+	for o := 0; o+6 <= len(bulk); o++ {
 		v := binary.LittleEndian.Uint32(bulk[o:])
-		if v < 100000 || v > 3000000000 {
+		if v < 100000 || v > 3000000000 || bulk[o+4] != 0x01 || bulk[o+5] > 32 {
 			continue
 		}
-		// doubled player name within the next 160B
-		name := ""
-		for s := o + 4; s < o+160 && s < len(bulk); s++ {
-			if !isName(bulk[s]) {
-				continue
-			}
-			e := s
-			for e < len(bulk) && e-s < 34 && isName(bulk[e]) {
-				e++
-			}
-			cand := bulk[s:e]
-			if len(cand) < 3 || allDigits(cand) {
-				s = e
-				continue
-			}
-			// same run again within 40B (packed-string doubling)
-			again := false
-			for t := e; t+len(cand) <= e+40 && t+len(cand) <= len(bulk); t++ {
-				match := true
-				for k, d := range cand {
-					if bulk[t+k] != d {
-						match = false
-						break
-					}
-				}
-				if match {
-					again = true
-					break
-				}
-			}
-			if again {
-				name = string(cand)
-				break
-			}
-			s = e
-		}
+		name := headName(bulk, o)
 		if name == "" {
 			continue
 		}
-		// same ID in ASCII digits within 320B
 		digits := []byte(fmt.Sprint(v))
 		found := false
 		for s := o + 4; s+len(digits) <= o+320 && s+len(digits) <= len(bulk); s++ {
@@ -386,8 +349,139 @@ func ParseBattleRoster(bulk []byte) map[uint32]string {
 		if !found {
 			continue
 		}
-		if _, dup := out[v]; !dup {
-			out[v] = name
+		dup := false
+		for _, h := range out {
+			if h.v == v {
+				dup = true
+			}
+		}
+		if !dup {
+			out = append(out, battleHead{v, o, name})
+		}
+	}
+	return out
+}
+
+// ParseBattleRoster pairs battle entities to player names from the
+// concatenated battle-start creation bulk (S>C, decrypted, arrival
+// order — e.g. the Sep-29 Sweden 1223B-run). The run must be
+// concatenated VERBATIM (contiguous fragments; size-filtered subsets
+// can split a vehicle block and lose its pair — seen live with a 90B
+// gap). Per-vehicle blocks carry
+// the entity ID twice: binary LE near the block head, then the player
+// name (packed-string, always doubled back-to-back) and the same ID
+// in ASCII digits within ~160B. Only triples matching all three
+// survive; component blobs, config pickles, single clan tags and
+// dotted section keys (bw.default etc.) are ignored by the doubling
+// rule. Tank identity lives in the creation compDescr (open) — this
+// returns names only.
+func ParseBattleRoster(bulk []byte) map[uint32]string {
+	out := map[uint32]string{}
+	for _, h := range scanHeads(bulk) {
+		if _, dup := out[h.v]; !dup {
+			out[h.v] = h.name
+		}
+	}
+	return out
+}
+
+// headName returns the doubled player name following a block head
+// ("" when absent): the first 3–33B name-char run within 160B that
+// repeats within 40B (packed-string doubling). Single clan tags,
+// dotted section keys and digit runs never qualify.
+func headName(bulk []byte, o int) string {
+	isName := func(b byte) bool {
+		return b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' ||
+			b == '_' || b == '-' || b == '[' || b == ']' || b == '|'
+	}
+	for s := o + 4; s < o+160 && s < len(bulk); s++ {
+		if !isName(bulk[s]) {
+			continue
+		}
+		e := s
+		for e < len(bulk) && e-s < 34 && isName(bulk[e]) {
+			e++
+		}
+		cand := bulk[s:e]
+		if len(cand) < 3 {
+			continue
+		}
+		digits := true
+		for _, b := range cand {
+			if b < '0' || b > '9' {
+				digits = false
+			}
+		}
+		if digits {
+			continue
+		}
+		for t := e; t+len(cand) <= e+40 && t+len(cand) <= len(bulk); t++ {
+			match := true
+			for k, d := range cand {
+				if bulk[t+k] != d {
+					match = false
+					break
+				}
+			}
+			if match {
+				return string(cand)
+			}
+		}
+	}
+	return ""
+}
+
+// ParseBattleVehicles resolves each block head's vehicle identity to
+// a (nation, typeID) ref for lookup in the per-nation vehicles
+// list.xml tables (ComponentTable.Vehicle). Layout (Sep-29 Sweden,
+// 30/30 heads): head `[ent-LE][01][lenA][A...]` then a tag byte —
+// 0x0f carries the 2-byte vehicle IntCD
+// (`[type+nation<<4][id]`, BigWorld items rules), 0x10 the 3-byte
+// extended form (`[type+ext+nation<<4][id-lo][id-hi]`, ids > 255:
+// Sep-29 germany/265 Chi-Go). Only refs whose item type is vehicle
+// (1, ext bit masked) and whose nation resolves are returned;
+// anything else (component blobs, counters) is skipped, never
+// guessed.
+func ParseBattleVehicles(bulk []byte) map[uint32]VehicleRef {
+	out := map[uint32]VehicleRef{}
+	for _, h := range scanHeads(bulk) {
+		if h.o+8 > len(bulk) {
+			continue
+		}
+		ln := int(bulk[h.o+5])
+		rend := h.o + 4 + 2 + ln
+		if rend >= len(bulk) {
+			continue
+		}
+		var nation uint8
+		var id uint16
+		switch bulk[rend] {
+		case 0x0f:
+			if rend+3 > len(bulk) {
+				continue
+			}
+			cd := binary.LittleEndian.Uint16(bulk[rend+1:])
+			if cd&15 != 1 {
+				continue
+			}
+			nation, id = uint8(cd>>4&15), cd>>8
+		case 0x10:
+			if rend+4 > len(bulk) {
+				continue
+			}
+			b0 := bulk[rend+1]
+			if lo := b0 & 15; lo != 1 && lo != 3 {
+				continue
+			}
+			nation, id = uint8(b0>>4&15), uint16(bulk[rend+2])|uint16(bulk[rend+3])<<8
+		default:
+			continue
+		}
+		if NationName(nation) == "" {
+			continue
+		}
+		if _, dup := out[h.v]; !dup {
+			out[h.v] = VehicleRef{nation, id}
 		}
 	}
 	return out

@@ -886,11 +886,10 @@ speak back. Established Sep 20:
   → `[mm:ss] [name] [tank] SHOT` (`wotevents -shots`; Prohorovka:
   128 rows, 11 own pinned); live pieces in `lobby`
   (`ScanBattleTracers` incl. denormal-ghost rejection,
-  `ParseBattleRoster` entity→name — Sweden: 30 pairs, 132/132 shots
-  attributed, ghost-free); live tank names need the creation
-  compDescr decode (open — mapped Oct-12: bulk located, block spans
-  mapped, 1252-vehicle tables load+resolve, tag-hunt negative; the
-  sectioner needs wire lengths, blind scan drowns in chance hits).
+  `ParseBattleRoster` entity→name + `ParseBattleVehicles`
+  entity→(nation,typeID) — Sweden: 30 pairs, 132/132 shots
+  attributed, ghost-free, all 30 tanks resolved via list.xml
+  vehicle IntCDs);
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +
