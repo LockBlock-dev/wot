@@ -664,6 +664,74 @@ func ParseBattleMounts(bulk []byte, tab ComponentTable) map[uint32]MountedModule
 	return out
 }
 
+// ExplodeHit is one S>C battle explode (acknowledged shell impact):
+// the shot ID it answers, its caliber, and the impact point. Live
+// bodies are exactly 44B with a single Pos V3 (the replay-form End V3
+// does not exist live); the caliber lives at the A2 slot. Verified
+// against 30 shape-matching windows, 8 of which are chance
+// `1a 91 29 00` hits inside snapshot trains, separated cleanly by the
+// caliber rule below.
+type ExplodeHit struct {
+	Shot  uint32
+	Range float64
+	Pos   [3]float64
+}
+
+// ExplodeLen is the exact live explode app length: [1a][91][len8]
+// + 41B body ([00][shotID u32][A1 f32][Range f32][yaw f32][pitch f32]
+// [X f32][Pos V3][A8 f32] = 1+4+20+4+12+4).
+const ExplodeLen = 44
+
+// ScanBattleExplodes slides the 44B explode template over one
+// decrypted S>C battle app body: `[1a][91][len8=41][00][shotID][A1]
+// [Range][yaw][pitch][X][Pos V3][A8]`. Range must be a known shell
+// caliber (same set as tracers — the 8 chance windows all carry
+// garbage here and match no tracer); Pos must be in-map. Callers join
+// Shot to tracer shot IDs; battle time comes from transport
+// timestamps.
+func ScanBattleExplodes(app []byte) []ExplodeHit {
+	allow := func(r float64) bool {
+		for _, v := range TracerRanges {
+			if math.Round(r) == v {
+				return true
+			}
+		}
+		return false
+	}
+	var out []ExplodeHit
+	for o := 0; o+ExplodeLen <= len(app); o++ {
+		if app[o] != 0x1a || app[o+1] != 0x91 || app[o+2] != 0x29 || app[o+3] != 0x00 {
+			continue
+		}
+		rng := float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+12:])))
+		if !allow(rng) {
+			continue
+		}
+		var p [3]float64
+		ok := true
+		for i := 0; i < 3; i++ {
+			f := math.Float32frombits(binary.LittleEndian.Uint32(app[o+28+i*4:]))
+			if math.IsNaN(float64(f)) || isDenormal(f) {
+				ok = false
+				break
+			}
+			p[i] = float64(f)
+		}
+		if !ok {
+			continue
+		}
+		if p[0] < -1500 || p[0] > 1500 || p[2] < -1500 || p[2] > 1500 {
+			continue
+		}
+		out = append(out, ExplodeHit{
+			Shot:  binary.LittleEndian.Uint32(app[o+4:]),
+			Range: rng,
+			Pos:   p,
+		})
+	}
+	return out
+}
+
 // BuildShootTrigger emits the standalone C>S shoot-trigger bundle
 // (41B app): `[02 8b 58 4a][93][10][0400][00000000]` + the 29B position
 // trailer. Wire truth (Sep-29 Sweden: 9/9 own shots carry this record

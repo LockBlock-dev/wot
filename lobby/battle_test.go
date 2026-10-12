@@ -387,3 +387,37 @@ func TestParseBattleMounts(t *testing.T) {
 		t.Fatalf("516=%+v, want turret 16 gun 32 chassis 19", m)
 	}
 }
+
+func TestScanBattleExplodes(t *testing.T) {
+	mk := func(shot uint32, rng float32) []byte {
+		app := []byte{0x1a, 0x91, 0x29, 0x00}
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], shot)
+		app = append(app, tmp[:]...)
+		app = append(app, 0, 0, 0, 0)
+		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(rng))
+		app = append(app, tmp[:]...)
+		app = append(app, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+		for _, f := range []float32{100, 2, 250} {
+			binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(f))
+			app = append(app, tmp[:]...)
+		}
+		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(1.5))
+		app = append(app, tmp[:]...)
+		if len(app) != ExplodeLen {
+			t.Fatalf("vector len=%d, want %d", len(app), ExplodeLen)
+		}
+		return app
+	}
+	app := append(mk(27261408, 75), mk(999, 62)...)
+	got := ScanBattleExplodes(app)
+	if len(got) != 1 {
+		t.Fatalf("got %d, want 1 (62mm must reject)", len(got))
+	}
+	if got[0].Shot != 27261408 || got[0].Range != 75 {
+		t.Fatalf("got %+v", got[0])
+	}
+	if math.Abs(got[0].Pos[0]-100) > 1e-6 || math.Abs(got[0].Pos[2]-250) > 1e-6 {
+		t.Fatalf("pos=%v", got[0].Pos)
+	}
+}
