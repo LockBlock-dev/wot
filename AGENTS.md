@@ -820,6 +820,10 @@ speak back. Established Sep 20:
   candidates); replay-anchored arg layouts (showTracer fixed-37 50B,
   showShooting 3B, explode, shotResults) documented in protocol §14;
   decisive next = firing capture with recorded shot times.
+  Tracer CLOSED live Oct-12 late: replays are S>C-only (128 tracers +
+  81 shootings + 105 explodes, zero inputs); live S>C carries 114
+  tracers as [13 tick][1a 0x73][50B] ahead of the snapshot train —
+  same 50B serialization as replay; own 0x1b still unsampled.
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +
