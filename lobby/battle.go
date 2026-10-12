@@ -794,23 +794,28 @@ func ParseBattleMounts(bulk []byte, tab ComponentTable) map[uint32]MountedModule
 }
 
 // ExplodeHit is one S>C battle explode (acknowledged shell impact):
-// the shot ID it answers, its caliber, and the impact point. Live
-// bodies are exactly 44B with a single Pos V3 (the replay-form End V3
-// does not exist live); the caliber lives at the A2 slot. Verified
-// against 30 shape-matching windows, 8 of which are chance
-// `1a 91 29 00` hits inside snapshot trains, separated cleanly by the
-// caliber rule below.
+// the shot ID it answers, its caliber, the impact point, and the
+// second triple. Live bodies are exactly 44B with TWO V3s after Range
+// (same homology as replay explodeProjectile's Pos+End): the first is
+// the map-scale impact (own-shot ground truth s2 (-133,0,284) and s5
+// (426,53,-238); Glacier replay |pos-start|=17m at close range), the
+// second a small near-origin triple (tens of units, semantics open —
+// replay End looks identical). The old single-Pos reading took the
+// SECOND triple (always near origin); corrected Oct-12. The caliber
+// lives at the A2 slot. Verified against shape-matching windows, 8 of
+// which are chance `1a 91 29 00` hits inside snapshot trains,
+// separated cleanly by the caliber rule below.
 type ExplodeHit struct {
 	Shot  uint32
 	Range float64
 	Pos   [3]float64
+	End   [3]float64
 }
 
 // ExplodeLen is the standard live explode app length: [1a][91][len8]
-// + 41B body ([00][shotID u32][A1 f32][Range f32][yaw f32][pitch f32]
-// [X f32][Pos V3][A8 f32] = 1+4+20+4+12+4). One live sample carries a
-// 4B tail (len8 = 45, total 48); both forms parse identically, tail
-// bytes ignored.
+// + 41B body ([00][shotID u32][A1 f32][Range f32][Pos V3][End V3]
+// [A8 f32] = 1+4+8+12+12+4). One live sample carries a 4B tail (len8
+// = 45, total 48); both forms parse identically, tail bytes ignored.
 const ExplodeLen = 44
 
 // ExplodeLenTailed is the tailed live explode length (len8 = 45:
@@ -819,11 +824,11 @@ const ExplodeLenTailed = 48
 
 // ScanBattleExplodes slides the 44/48B explode template over one
 // decrypted S>C battle app body: `[1a][91][len8=41|45][00][shotID]
-// [A1][Range][yaw][pitch][X][Pos V3][A8][tail?]`. Range must be a
-// known shell caliber (same set as tracers — chance `1a 91 29`
-// windows inside snapshot trains carry garbage here and match no
-// tracer); Pos must be in-map. Callers join Shot to tracer shot IDs;
-// battle time comes from transport timestamps.
+// [A1][Range][Pos V3][End V3][A8][tail?]`. Range must be a known shell
+// caliber (same set as tracers — chance `1a 91 29` windows inside
+// snapshot trains carry garbage here and match no tracer); Pos must
+// be in-map. Callers join Shot to tracer shot IDs; battle time comes
+// from transport timestamps.
 func ScanBattleExplodes(app []byte) []ExplodeHit {
 	allow := func(r float64) bool {
 		for _, v := range TracerRanges {
@@ -845,15 +850,16 @@ func ScanBattleExplodes(app []byte) []ExplodeHit {
 		if !allow(rng) {
 			continue
 		}
-		var p [3]float64
+		var p, e [3]float64
 		ok := true
 		for i := 0; i < 3; i++ {
-			f := math.Float32frombits(binary.LittleEndian.Uint32(app[o+28+i*4:]))
+			f := math.Float32frombits(binary.LittleEndian.Uint32(app[o+16+i*4:]))
 			if math.IsNaN(float64(f)) || isDenormal(f) {
 				ok = false
 				break
 			}
 			p[i] = float64(f)
+			e[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+28+i*4:])))
 		}
 		if !ok {
 			continue
@@ -865,6 +871,7 @@ func ScanBattleExplodes(app []byte) []ExplodeHit {
 			Shot:  binary.LittleEndian.Uint32(app[o+4:]),
 			Range: rng,
 			Pos:   p,
+			End:   e,
 		})
 	}
 	return out
@@ -1046,6 +1053,114 @@ func ScanSnapshots(app []byte) []SnapshotRecord {
 		}
 	}
 	return out
+}
+
+// MarkerPair is one type-0x75 subtype-0x2a link record: two battle
+// entities (Sweden: 5/5 enemy+ally, duel/spot-adjacent — members shoot
+// each other ±11s or die ≤64s later). Semantics OPEN (spotting-link
+// vs team target-ping; decisive test: operator ping + C>S
+// correlation, or a second battle capture).
+type MarkerPair struct {
+	A, B uint32
+}
+
+// MarkerSpot is one type-0x75 subtype-0x1d single-entity record: a
+// battle counter, the entity, and its map position (Sweden: 11×,
+// allies Danil_380×8 + _KissMyTralala_×3). Positions are gameplay
+// data — consumers log names/counts, never coordinates. Semantics
+// OPEN (same hypotheses + test as MarkerPair).
+type MarkerSpot struct {
+	Counter uint32
+	Ent     uint32
+	Pos     [3]float64
+}
+
+// MarkerSmall is the type byte of the battle marker family.
+const MarkerSmall = 0x75
+
+// ScanBattleMarkers extracts type-0x75 marker records from one
+// decrypted S>C battle app body (`[1a][75][len8][payload]`, records
+// chain: validated live by back-to-back `[1a 75]` boundaries and
+// `[13 xx]` tick boundaries). Accepted shapes only (chance `1a 75`
+// bytes inside float blobs are dense):
+//   - len 27, sub 0x2a: `[2a][000000][A u32][B u32][15×00]` — both
+//     entities in battle range, 15 trailing zeros exact.
+//   - len 39, sub 0x1d: `[1d][000000][counter u32][ent][12×00]`
+//     `[00 0c][pos V3][00]` — entity in range.
+//
+// Other 0x75 subtypes (map-script text blobs at battle start) are
+// skipped, never guessed.
+func ScanBattleMarkers(app []byte) ([]MarkerPair, []MarkerSpot) {
+	var pairs []MarkerPair
+	var spots []MarkerSpot
+	inEnt := func(v uint32) bool { return v >= 100000 && v <= 3000000000 }
+	for o := 0; o+3 <= len(app); o++ {
+		if app[o] != 0x1a || app[o+1] != MarkerSmall {
+			continue
+		}
+		ln := int(app[o+2])
+		if o+3+ln > len(app) {
+			continue
+		}
+		pay := app[o+3 : o+3+ln]
+		switch {
+		case ln == 27 && pay[0] == 0x2a:
+			if pay[1] != 0 || pay[2] != 0 || pay[3] != 0 {
+				continue
+			}
+			a := binary.LittleEndian.Uint32(pay[4:])
+			b := binary.LittleEndian.Uint32(pay[8:])
+			if !inEnt(a) || !inEnt(b) {
+				continue
+			}
+			zero := true
+			for _, c := range pay[12:] {
+				if c != 0 {
+					zero = false
+				}
+			}
+			if !zero {
+				continue
+			}
+			pairs = append(pairs, MarkerPair{a, b})
+		case ln == 39 && pay[0] == 0x1d:
+			if pay[1] != 0 || pay[2] != 0 || pay[3] != 0 {
+				continue
+			}
+			ent := binary.LittleEndian.Uint32(pay[8:])
+			if !inEnt(ent) {
+				continue
+			}
+			zero := true
+			for _, c := range pay[12:24] {
+				if c != 0 {
+					zero = false
+				}
+			}
+			if !zero || pay[24] != 0 || pay[25] != 0x0c || pay[38] != 0 {
+				continue
+			}
+			var p [3]float64
+			ok := true
+			for i := 0; i < 3; i++ {
+				f := math.Float32frombits(binary.LittleEndian.Uint32(pay[26+i*4:]))
+				if math.IsNaN(float64(f)) || isDenormal(f) {
+					ok = false
+					break
+				}
+				p[i] = float64(f)
+			}
+			if !ok {
+				continue
+			}
+			spots = append(spots, MarkerSpot{
+				Counter: binary.LittleEndian.Uint32(pay[4:]),
+				Ent:     ent,
+				Pos:     p,
+			})
+		}
+	}
+	return pairs, spots
 }
 
 // BuildShootTrigger emits the standalone C>S shoot-trigger bundle

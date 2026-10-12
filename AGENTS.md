@@ -199,12 +199,16 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   filter SHOT rows): creation bulk → `lobby.NewObserver` (roster/
   teams/vehicles/mounts via the generated table, no XML), then
   time-ordered SHOT (+READY merge) / HIT / INCOMING (`-margin` over
-  shell blast, displaced-track pad) / KILL / presence sections.
+  shell blast, displaced-track pad) / KILL / markers / presence sections.
   Engine in `lobby/feed.go` (running buff calibration, drum/twin/
-  dual/AR mag sim, caliber-unique tracerless marks), synthetic tests
+  dual/AR mag sim, caliber-unique tracerless marks, muzzle-history
+  victims: two-sided offline `ObserveExplodeFull`, past-only live
+  `ObserveExplode`), synthetic tests
   in `lobby/feed_test.go`. Validated on Sep-29 Sweden: 132/132
-  shots, 30/30 roster+guns, 31 hits, 24/24 kills, 0 incoming
-  (correct), 5458/19 presence — deltas vs the /tmp reference driver
+  shots, 30/30 roster+guns, 31 hits (13 victims: 8 HIGH), 24/24 kills,
+  0 incoming
+  (correct), 4 LINK + 11 SPOT markers, 5458/19 presence — deltas vs
+  the /tmp reference driver
   are live-honest only (running past-evidence calibration, no
   future-evidence backfill).
 
@@ -903,7 +907,11 @@ speak back. Established Sep 20:
   same 50B serialization as replay; trigger CLOSED (0x10 record,
   see above).
   Explode CLOSED too (35× 1a/0x91: len8=41, shotID-linked to tracers);
-  showShooting/damage/results still open (hide in 0xba tails).
+  showShooting/damage/results still open (NOT in 1a/ba tails —
+  re-rejected Oct-12: flat length distribution under boundary
+  validation, same misparse as before; NOT in 0x75 markers or 0b a8 02
+  bundles either — needs CellApp S>C dispatch-table work or a live
+  known-content session).
   Shot feed (Oct-12): `replay.ShotFeed` joins tracers × setup roster
   → `[mm:ss] [name] [tank] SHOT` (`wotevents -shots`; Prohorovka:
   128 rows, 11 own pinned); live pieces in `lobby`
@@ -911,21 +919,33 @@ speak back. Established Sep 20:
   `ParseBattleRoster` entity→name + `ParseBattleVehicles`
   entity→(nation,typeID) + `ParseBattleTeams` entity→team +
   `ParseBattleMounts` entity→mounted (turret,gun) +
-  `ScanBattleExplodes` (22/30 join tracers; 8 tracerless loss-class,
-  2× 130mm → SU100Y) — Sweden:
+  `ScanBattleExplodes` (23/31 join tracers; 8 tracerless loss-class,
+  2× 130mm → SU100Y; Oct-12 field-order fix: impact V3 FIRST at
+  +16/+20/+24, replay-homologous End V3 second — the old reading took
+  the near-origin triple; tracer end = trajectory endpoint, not
+  impact) — Sweden:
   30 pairs, 132/132 shots attributed, ghost-free, all 30 tanks
   resolved via list.xml vehicle IntCDs, 15/15 teams, 26/26 exact
   single-gun reloads (inline mounted-only 12B descr, name-anchored),
   drum+dual live mag counts, Italian autoreloader chain model mapped
   (ammo_ctrl.pyc + WG article, needs wire validation),
-  30-row HIT feed (misses suppressed: explodes = non-fatal spotted
-  hits — all 4 observed fatal blows carry no explode), 24-kill feed
-  via ParseBattleDeaths (deathOrder victim/killer, counters 1–24),
+  31-row HIT feed with muzzle-history victims (misses suppressed:
+  explodes = non-fatal spotted hits — all 4 observed fatal blows carry
+  no explode; two-sided offline 13/23 joined with HIGH/MED grading,
+  past-only live core), 24-kill feed
+  via ParseBattleDeaths (deathOrder victim/killer, counters 1–24;
+  6-record `0b a8 02` death bundle closed: 03/1a-fixed/10 all 24/24),
   per-shot shell kind (tracer flag byte 3: HEAT/HE/AP/APCR),
   shell blast fields + ballistics (MatchShell/FlightTime/IncomingShot;
   Sweden: 132 evaluated, 0 warnings — correct, nearest Hummel impact
   217 m), snapshot decoder (ScanSnapshots: 5458 records, 19 tokens —
-  token→entity map open);
+  token→entity map OPEN with completed negative survey: global affine
+  rejected at chance, own never in snapshots (structural), C>S track
+  chaos, yaw≠movement; needs denser anchors or in-process scale),
+  type-0x75 markers (`ScanBattleMarkers`: 5 ENEMY+ALLY links + 11 ally
+  SPOT reports with positions, framing closed, semantics open),
+  HP per-hit numbers BLOCKED (absent from all surveyed families —
+  same wall as live showShooting);
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +

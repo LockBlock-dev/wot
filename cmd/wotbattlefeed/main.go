@@ -257,7 +257,30 @@ func main() {
 		fmt.Println(r)
 	}
 
+	// Kills collected BEFORE hits (death times exclude dead
+	// candidates from victim attribution); printed after incoming.
+	type killEv struct {
+		t time.Time
+		d lobby.DeathHit
+	}
+	var kills []killEv
+	for _, p := range pkts {
+		if p.dir != "S>C" {
+			continue
+		}
+		for _, d := range lobby.ParseBattleDeaths(p.app) {
+			kills = append(kills, killEv{p.ts, d})
+		}
+	}
+	sort.Slice(kills, func(i, j int) bool { return kills[i].t.Before(kills[j].t) })
+	var killRows []string
+	for _, k := range kills {
+		killRows = append(killRows, obs.ObserveDeath(k.t, k.d))
+	}
+
 	// Acknowledged hits (explodes joined to shots by shot ID).
+	// Offline two-sided victims (post-hit muzzles count — campers hold
+	// still; live callers use past-only ObserveExplode).
 	type hitEv struct {
 		t time.Time
 		e lobby.ExplodeHit
@@ -274,7 +297,7 @@ func main() {
 	sort.Slice(hits, func(i, j int) bool { return hits[i].t.Before(hits[j].t) })
 	fmt.Printf("hits=%d\n", len(hits))
 	for _, h := range hits {
-		fmt.Println(obs.ObserveExplode(h.t, h.e))
+		fmt.Println(obs.ObserveExplodeFull(h.t, h.e))
 	}
 
 	// Incoming warnings need the own C>S position track (nearest in
@@ -343,24 +366,80 @@ func main() {
 		fmt.Println(r.line)
 	}
 
-	// Kills (deathOrder counters stay authoritative).
-	type killEv struct {
-		t time.Time
-		d lobby.DeathHit
+	// Kills (deathOrder counters stay authoritative; recorded above
+	// so victim attribution excludes the dead).
+	fmt.Printf("kills=%d\n", len(killRows))
+	for _, r := range killRows {
+		fmt.Println(r)
 	}
-	var kills []killEv
+
+	// Markers (type-0x75 links + position reports; semantics open —
+	// spotting-link vs team-ping — so names/counts only, no coordinates).
+	type markPair struct {
+		t    time.Time
+		a, b uint32
+	}
+	type markSpot struct {
+		t   time.Time
+		ctr uint32
+		ent uint32
+	}
+	var mpairs []markPair
+	var mspots []markSpot
+	seenPair := map[[2]uint32]bool{}
+	seenSpot := map[[2]uint32]bool{}
 	for _, p := range pkts {
 		if p.dir != "S>C" {
 			continue
 		}
-		for _, d := range lobby.ParseBattleDeaths(p.app) {
-			kills = append(kills, killEv{p.ts, d})
+		prs, sps := lobby.ScanBattleMarkers(p.app)
+		for _, m := range prs {
+			k := [2]uint32{m.A, m.B}
+			if seenPair[k] {
+				continue
+			}
+			seenPair[k] = true
+			mpairs = append(mpairs, markPair{p.ts, m.A, m.B})
+		}
+		for _, m := range sps {
+			k := [2]uint32{m.Ent, m.Counter}
+			if seenSpot[k] {
+				continue
+			}
+			seenSpot[k] = true
+			mspots = append(mspots, markSpot{p.ts, m.Counter, m.Ent})
 		}
 	}
-	sort.Slice(kills, func(i, j int) bool { return kills[i].t.Before(kills[j].t) })
-	fmt.Printf("kills=%d\n", len(kills))
-	for _, k := range kills {
-		fmt.Println(obs.ObserveDeath(k.t, k.d))
+	sort.Slice(mpairs, func(i, j int) bool { return mpairs[i].t.Before(mpairs[j].t) })
+	sort.Slice(mspots, func(i, j int) bool { return mspots[i].t.Before(mspots[j].t) })
+	mname := func(ent uint32) (string, string, string) {
+		side, nm, tank := "?", "?", "?"
+		if d, ok := obs.Ents[ent]; ok {
+			nm, tank = d.Name, d.Tank
+		}
+		if obs.HasOwn {
+			if d, ok := obs.Ents[ent]; ok && d.Team != 0 {
+				side = "ENEMY"
+				if d.Team == obs.OwnTeam {
+					side = "ALLY"
+				}
+			}
+		}
+		return side, nm, tank
+	}
+	fmt.Printf("markers pairs=%d spots=%d\n", len(mpairs), len(mspots))
+	for _, m := range mpairs {
+		sa, na, ta := mname(m.a)
+		sb, nb, tb := mname(m.b)
+		el := int(m.t.Sub(pkts[0].ts).Seconds())
+		fmt.Printf("[%s] [%02d:%02d] LINK %s %s [%s] <-> %s %s [%s]\n",
+			m.t.Format("15:04:05.000"), el/60, el%60, sa, na, ta, sb, nb, tb)
+	}
+	for _, m := range mspots {
+		s, nm, tank := mname(m.ent)
+		el := int(m.t.Sub(pkts[0].ts).Seconds())
+		fmt.Printf("[%s] [%02d:%02d] SPOT #%d %s %s [%s]\n",
+			m.t.Format("15:04:05.000"), el/60, el%60, m.ctr, s, nm, tank)
 	}
 
 	// Presence per snapshot token (counts/times only — names open).

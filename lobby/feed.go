@@ -16,6 +16,7 @@ package lobby
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -98,6 +99,7 @@ func isDrum(g GenGun) bool { return g.ClipCount > 1 }
 
 // shotSnap freezes a fired shot's display state for the HIT join.
 type shotSnap struct {
+	a0     uint32
 	side   string
 	name   string
 	tank   string // "tank|kind"
@@ -106,6 +108,12 @@ type shotSnap struct {
 	buff   string
 	reload string
 	shell  uint8
+}
+
+// muzzlePt is one exact firing position (tracer start, S>C-sourced).
+type muzzlePt struct {
+	t    time.Time
+	x, z float64
 }
 
 // Observer holds battle feed state: roster from the creation bulk
@@ -124,6 +132,8 @@ type Observer struct {
 	calFull   map[uint32]float64
 	calIntra  map[uint32]float64
 	byShot    map[uint32]shotSnap
+	muzzles   map[uint32][]muzzlePt
+	deaths    map[uint32]time.Time
 	pending   []readyEv
 }
 
@@ -145,6 +155,8 @@ func NewObserver(bulk []byte, ownName string) *Observer {
 		calFull:   map[uint32]float64{},
 		calIntra:  map[uint32]float64{},
 		byShot:    map[uint32]shotSnap{},
+		muzzles:   map[uint32][]muzzlePt{},
+		deaths:    map[uint32]time.Time{},
 	}
 	tab := GeneratedTable()
 	names := ParseBattleRoster(bulk)
@@ -438,7 +450,8 @@ func (o *Observer) ObserveShot(at time.Time, h TracerHit) (shot string, readies 
 	nxt, buff := o.nextWait(h.A0, magAfter, twinAfter)
 	shot = fmt.Sprintf("[%s] [%02d:%02d] %s %s [%s|%s] SHOT -> %s | next_in=%s%s reload=%s",
 		rt, el/60, el%60, side, nm, tank, kind, state, nxt, buff, rl)
-	o.byShot[h.Shot] = shotSnap{side, nm, tank + "|" + kind, state, nxt, buff, rl, h.Kind}
+	o.byShot[h.Shot] = shotSnap{h.A0, side, nm, tank + "|" + kind, state, nxt, buff, rl, h.Kind}
+	o.muzzles[h.A0] = append(o.muzzles[h.A0], muzzlePt{at, h.Start[0], h.Start[2]})
 	if state == "RELOAD" {
 		if w := o.nominalFull(h.A0); w > 0 {
 			if c, ok := o.calFull[h.A0]; ok {
@@ -481,14 +494,28 @@ func (o *Observer) popDue(now time.Time) []string {
 func (o *Observer) FlushReady(now time.Time) []string { return o.popDue(now) }
 
 // ObserveExplode joins an explode to its tracer shot: joined HIT rows
-// reuse the shot's frozen state, tracerless ones print caliber-only
+// reuse the shot's frozen state plus a muzzle-history victim guess
+// (live past-only core), tracerless ones print caliber-only
 // (single-candidate calibers earn a marked attribution, never a
 // guess).
 func (o *Observer) ObserveExplode(at time.Time, e ExplodeHit) string {
+	return o.explodeRow(at, e, false)
+}
+
+// ObserveExplodeFull is the offline two-sided refinement: victim
+// muzzles after the hit count too (campers hold still — Sweden s5
+// pins 542264097 at 7m/+16s where past-only picks a 25m neighbor).
+// Live callers use ObserveExplode (no future evidence by construction).
+func (o *Observer) ObserveExplodeFull(at time.Time, e ExplodeHit) string {
+	return o.explodeRow(at, e, true)
+}
+
+func (o *Observer) explodeRow(at time.Time, e ExplodeHit, twoSided bool) string {
 	el, rt := o.elapsed(at)
 	if s, ok := o.byShot[e.Shot]; ok {
-		return fmt.Sprintf("[%s] [%02d:%02d] %s %s [%s] HIT -> %s | next_in=%s%s reload=%s",
-			rt, el/60, el%60, s.side, s.name, s.tank, s.state, s.next, s.buff, s.reload)
+		return fmt.Sprintf("[%s] [%02d:%02d] %s %s [%s] HIT -> %s | next_in=%s%s reload=%s%s",
+			rt, el/60, el%60, s.side, s.name, s.tank, s.state, s.next, s.buff, s.reload,
+			o.victimStr(at, s.a0, e, twoSided))
 	}
 	if ent, single := o.caliberUnique(e.Range); single {
 		d := o.Ents[ent]
@@ -497,11 +524,74 @@ func (o *Observer) ObserveExplode(at time.Time, e ExplodeHit) string {
 		if full > 0 {
 			ws = fmt.Sprintf("%.1fs", full)
 		}
-		return fmt.Sprintf("[%s] [%02d:%02d] %s %s [%s] HIT -> RELOAD | next_in=? reload=%s (%.0fmm-unique, tracer lost)",
-			rt, el/60, el%60, o.side(ent), d.Name, d.Tank, ws, e.Range)
+		return fmt.Sprintf("[%s] [%02d:%02d] %s %s [%s] HIT -> RELOAD | next_in=? reload=%s (%.0fmm-unique, tracer lost)%s",
+			rt, el/60, el%60, o.side(ent), d.Name, d.Tank, ws, e.Range,
+			o.victimStr(at, ent, e, twoSided))
 	}
-	return fmt.Sprintf("[%s] [%02d:%02d] ? ? [? %.0fmm] HIT (tracer lost)",
-		rt, el/60, el%60, e.Range)
+	return fmt.Sprintf("[%s] [%02d:%02d] ? ? [? %.0fmm] HIT (tracer lost)%s",
+		rt, el/60, el%60, e.Range, o.victimStr(at, 0, e, twoSided))
+}
+
+// victimFreshness caps muzzle staleness (either side, seconds): past
+// it, tanks have redeployed and the guess is worthless.
+const victimFreshness = 120
+
+// victimOf attributes an explode's impact to the nearest alive
+// non-shooter muzzle (map-free camper-grade guess): explodes mark
+// spotted hits, so the victim was camping near the impact. shooter=0
+// skips the exclusion (tracerless, shooter unknown). twoSided admits
+// post-hit muzzles (offline only — live callers pass false).
+// Returns ent=0 when nothing qualifies (dist>30m or all stale).
+func (o *Observer) victimOf(at time.Time, shooter uint32, e ExplodeHit, twoSided bool) (ent uint32, dist, stale float64, conf string) {
+	best, bestStale := 1e18, 0.0
+	for cand, mus := range o.muzzles {
+		if cand == shooter && shooter != 0 {
+			continue
+		}
+		if dt, dead := o.deaths[cand]; dead && !at.Before(dt) {
+			continue
+		}
+		for _, m := range mus {
+			var st float64
+			if !m.t.After(at) {
+				st = at.Sub(m.t).Seconds()
+			} else {
+				if !twoSided {
+					continue
+				}
+				st = m.t.Sub(at).Seconds()
+			}
+			if st > victimFreshness {
+				continue
+			}
+			dx := m.x - e.Pos[0]
+			dz := m.z - e.Pos[2]
+			if d := math.Sqrt(dx*dx + dz*dz); d < best {
+				best, bestStale, ent = d, st, cand
+			}
+		}
+	}
+	if best > 30 {
+		return 0, 0, 0, ""
+	}
+	if best <= 15 && bestStale <= 30 {
+		return ent, best, bestStale, "HIGH"
+	}
+	return ent, best, bestStale, "MED"
+}
+
+// victimStr formats the victim suffix (" victim=? " when unattributed).
+func (o *Observer) victimStr(at time.Time, shooter uint32, e ExplodeHit, twoSided bool) string {
+	ent, _, _, conf := o.victimOf(at, shooter, e, twoSided)
+	if ent == 0 {
+		return " victim=?"
+	}
+	d := o.Ents[ent]
+	nm, tank := "?", "?"
+	if d != nil {
+		nm, tank = d.Name, d.Tank
+	}
+	return fmt.Sprintf(" victim=%s %s [%s] %s", o.side(ent), nm, tank, conf)
 }
 
 // caliberUnique reports the single observed shooter whose gun carries
@@ -534,6 +624,9 @@ func (o *Observer) ObserveDeath(at time.Time, d DeathHit) string {
 	}
 	if e, ok := o.Ents[d.Killer]; ok {
 		kn, kt = e.Name, e.Tank
+	}
+	if _, known := o.deaths[d.Victim]; !known {
+		o.deaths[d.Victim] = at
 	}
 	return fmt.Sprintf("[%s] [%02d:%02d] #%d %s %s [%s] KILLED by %s %s [%s]",
 		rt, el/60, el%60, d.Counter, o.side(d.Victim), vn, vt, o.side(d.Killer), kn, kt)

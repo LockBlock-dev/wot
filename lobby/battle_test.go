@@ -392,6 +392,8 @@ func TestParseBattleMounts(t *testing.T) {
 }
 
 func TestScanBattleExplodes(t *testing.T) {
+	// wire truth (Sweden s2/s5 own-shot explodes): impact V3 at
+	// +16/+20/+24, small second triple at +28/+32/+36.
 	mk := func(shot uint32, rng float32) []byte {
 		app := []byte{0x1a, 0x91, 0x29, 0x00}
 		var tmp [4]byte
@@ -400,8 +402,7 @@ func TestScanBattleExplodes(t *testing.T) {
 		app = append(app, 0, 0, 0, 0)
 		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(rng))
 		app = append(app, tmp[:]...)
-		app = append(app, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-		for _, f := range []float32{100, 2, 250} {
+		for _, f := range []float32{100, 2, 250, -23, -1.5, 16} {
 			binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(f))
 			app = append(app, tmp[:]...)
 		}
@@ -421,7 +422,10 @@ func TestScanBattleExplodes(t *testing.T) {
 		t.Fatalf("got %+v", got[0])
 	}
 	if math.Abs(got[0].Pos[0]-100) > 1e-6 || math.Abs(got[0].Pos[2]-250) > 1e-6 {
-		t.Fatalf("pos=%v", got[0].Pos)
+		t.Fatalf("pos=%v, want impact triple", got[0].Pos)
+	}
+	if math.Abs(got[0].End[0]+23) > 1e-6 || math.Abs(got[0].End[2]-16) > 1e-6 {
+		t.Fatalf("end=%v, want second triple", got[0].End)
 	}
 }
 
@@ -434,7 +438,7 @@ func TestScanBattleExplodesTailed(t *testing.T) {
 	app = append(app, tmp[:]...)
 	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(150))
 	app = append(app, tmp[:]...)
-	for _, f := range []float32{0, 0, 0, 100, 2, 250, 1.5, 7} {
+	for _, f := range []float32{100, 2, 250, 0, 0, 0, 1.5, 7} {
 		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(f))
 		app = append(app, tmp[:]...)
 	}
@@ -444,6 +448,9 @@ func TestScanBattleExplodesTailed(t *testing.T) {
 	got := ScanBattleExplodes(app)
 	if len(got) != 1 || got[0].Shot != 27742688 || got[0].Range != 150 {
 		t.Fatalf("got %+v", got)
+	}
+	if math.Abs(got[0].Pos[0]-100) > 1e-6 {
+		t.Fatalf("pos=%v, want impact triple", got[0].Pos)
 	}
 }
 
@@ -564,5 +571,47 @@ func TestParseSnapshotRecord(t *testing.T) {
 	// short payload refuses
 	if _, ok := ParseSnapshotRecord([]byte{1, 2, 3}); ok {
 		t.Fatal("short payload accepted")
+	}
+}
+
+func TestScanBattleMarkers(t *testing.T) {
+	var tmp [4]byte
+	put32 := func(app []byte, v uint32) []byte {
+		binary.LittleEndian.PutUint32(tmp[:], v)
+		return append(app, tmp[:]...)
+	}
+	putF := func(app []byte, f float32) []byte {
+		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(f))
+		return append(app, tmp[:]...)
+	}
+	// pair: [1a][75][27][2a][000000][A][B][15x00]
+	app := []byte{0x1a, 0x75, 27, 0x2a, 0, 0, 0}
+	app = put32(app, 542264110)
+	app = put32(app, 542264106)
+	app = append(app, make([]byte, 15)...)
+	// single: [1a][75][39][1d][000000][ctr][ent][12x00][00 0c][pos][00]
+	app = append(app, 0x1a, 0x75, 39, 0x1d, 0, 0, 0)
+	app = put32(app, 21)
+	app = put32(app, 542282512)
+	app = append(app, make([]byte, 12)...)
+	app = append(app, 0x00, 0x0c)
+	for _, f := range []float32{452, 41.6, -13.4} {
+		app = putF(app, f)
+	}
+	app = append(app, 0x00)
+	// chance 1a 75 with bad length + bad entity must not parse
+	app = append(app, 0x1a, 0x75, 27, 0x2a, 0, 0, 0)
+	app = put32(app, 7)
+	app = put32(app, 9)
+	app = append(app, make([]byte, 15)...)
+	pairs, spots := ScanBattleMarkers(app)
+	if len(pairs) != 1 || pairs[0].A != 542264110 || pairs[0].B != 542264106 {
+		t.Fatalf("pairs=%v, want one (110,106)", pairs)
+	}
+	if len(spots) != 1 || spots[0].Ent != 542282512 || spots[0].Counter != 21 {
+		t.Fatalf("spots=%v, want one ent 512 ctr 21", spots)
+	}
+	if math.Abs(spots[0].Pos[0]-452) > 1e-3 || math.Abs(spots[0].Pos[2]+13.4) > 1e-3 {
+		t.Fatalf("pos=%v", spots[0].Pos)
 	}
 }

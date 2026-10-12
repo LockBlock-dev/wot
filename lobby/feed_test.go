@@ -18,6 +18,8 @@ func testObserver() *Observer {
 		calFull:   map[uint32]float64{},
 		calIntra:  map[uint32]float64{},
 		byShot:    map[uint32]shotSnap{},
+		muzzles:   map[uint32][]muzzlePt{},
+		deaths:    map[uint32]time.Time{},
 	}
 	o.Ents[1] = &EntityDesc{Name: "AllyOne", Team: 2, Tank: "SU-152",
 		Gun: GenGun{Name: "g", Reload: 9.4}, HasGun: true}
@@ -148,6 +150,37 @@ func TestObserverExplodeJoin(t *testing.T) {
 	lost := o.ObserveExplode(at.Add(2*time.Second), ExplodeHit{Shot: 4242, Range: 130})
 	if !strings.Contains(lost, "tracer lost") {
 		t.Fatalf("lost=%q", lost)
+	}
+}
+
+func TestObserverVictim(t *testing.T) {
+	o := testObserver()
+	t0 := time.Date(2026, 9, 29, 20, 46, 0, 0, time.UTC)
+	o.ObserveShot(t0.Add(-100*time.Second), TracerHit{A0: 1, Shot: 1, Range: 152, Kind: ShellHEAT,
+		Start: [3]float64{0, 0, 0}, End: [3]float64{100, 0, 0}})
+	o.muzzles[2] = []muzzlePt{{t0.Add(-10 * time.Second), 5, 0}}
+	o.muzzles[3] = []muzzlePt{{t0.Add(-10 * time.Second), 500, 500}}
+	hit := o.ObserveExplode(t0, ExplodeHit{Shot: 1, Range: 152, Pos: [3]float64{6, 0, 0}})
+	if !strings.Contains(hit, "victim=ENEMY DrumTwo [AMX] HIGH") {
+		t.Fatalf("hit=%q, want HIGH victim ent 2", hit)
+	}
+	// dead candidates excluded
+	o.ObserveDeath(t0.Add(-5*time.Second), DeathHit{Victim: 2, Killer: 1, Counter: 1})
+	hit = o.ObserveExplode(t0, ExplodeHit{Shot: 1, Range: 152, Pos: [3]float64{6, 0, 0}})
+	if !strings.Contains(hit, "victim=?") {
+		t.Fatalf("hit=%q, want no victim (ent 2 dead, ent 3 far)", hit)
+	}
+	// two-sided offline: nearer future muzzle wins (camper holds still)
+	delete(o.deaths, 2)
+	o.Ents[4] = &EntityDesc{Name: "CampFour", Team: 1, Tank: "TANK"}
+	o.muzzles[4] = []muzzlePt{{t0.Add(16 * time.Second), 6.5, 0}}
+	hit = o.ObserveExplode(t0, ExplodeHit{Shot: 1, Range: 152, Pos: [3]float64{6, 0, 0}})
+	if strings.Contains(hit, "CampFour") {
+		t.Fatalf("hit=%q, past-only must not see future muzzles", hit)
+	}
+	hit = o.ObserveExplodeFull(t0, ExplodeHit{Shot: 1, Range: 152, Pos: [3]float64{6, 0, 0}})
+	if !strings.Contains(hit, "victim=ENEMY CampFour [TANK] HIGH") {
+		t.Fatalf("hit=%q, want two-sided victim ent 4", hit)
 	}
 }
 
