@@ -800,13 +800,17 @@ speak back. Established Sep 20:
   `avatarUpdateVolatileProperties` (ClientInterface, not C>S as once
   assumed) alongside the packed 11B records.
   leg — NOT the lobby keys): C>S = one family `[02 8b 58 4a][93
-  SUB…]` at ~18 Hz, `ParseAvatarUpdate` (`login/battle.go`, tested)
-  decodes the 60B/34B position shape (xyz LE f32 at [20:32];
-  2535/2538 live packets parse; 60/60 sane + 59/59 smooth steps
-  verified); other SUBs open with census (1a 2535×34B, 07 3019× mixed 44B-dominant,
-  18 1443, 12 198, 06 62, 1c 23, 1d 11, 14 6, 01 5, 10 4, 13 2, 0b 1;
-  07/44B sample embeds a position block + speed-like f32 7.14, separate
-  9B `0x23` family). S>C = tick + opaque entity blobs (the apparent
+  SUB…]` at ~18 Hz, `ParseMoveWith` (`lobby/battle.go`, tested)
+  decodes the 60B/34B moveWith shape (entity + F1 + speed 7.14 + xyz
+  LE f32 at [20:32]; 2535/2538 live packets parse; 60/60 sane + 59/59
+  smooth steps verified); SUB = Avatar own-cell index (0x1a=26 moveWith
+  CLOSED; 0x18=24 reportClientStats, 0x07=7 discloseEntities,
+  0x1c/0x1d=28/29 trackGun, rest weak — Oct-12 census 7214/7214 decrypt:
+  07 ×2994 var-len, 18 ×1405, 12 ×165+, 06 ×49+, 1c ×21, 1d ×10,
+  10 ×2, 07/15 ×116 keepalive-shaped; zero 0x1b = zero shots);
+  every position-carrying call ends with the `[1a][1a00][entity]
+  [payload][tail]` trailer (standalone 0x1a = trailer only).
+  S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +
   float tail, packed formats need engine tables); fragmented
