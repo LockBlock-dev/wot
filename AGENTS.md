@@ -888,7 +888,9 @@ speak back. Established Sep 20:
   (`ScanBattleTracers` incl. denormal-ghost rejection,
   `ParseBattleRoster` entity→name — Sweden: 30 pairs, 132/132 shots
   attributed, ghost-free); live tank names need the creation
-  compDescr decode (open).
+  compDescr decode (open — mapped Oct-12: bulk located, block spans
+  mapped, 1252-vehicle tables load+resolve, tag-hunt negative; the
+  sectioner needs wire lengths, blind scan drowns in chance hits).
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +
