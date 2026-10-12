@@ -421,3 +421,55 @@ func TestScanBattleExplodes(t *testing.T) {
 		t.Fatalf("pos=%v", got[0].Pos)
 	}
 }
+
+func TestScanBattleExplodesTailed(t *testing.T) {
+	app := []byte{0x1a, 0x91, 0x2d, 0x00}
+	var tmp [4]byte
+	binary.LittleEndian.PutUint32(tmp[:], 27742688)
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], 0)
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(150))
+	app = append(app, tmp[:]...)
+	for _, f := range []float32{0, 0, 0, 100, 2, 250, 1.5, 7} {
+		binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(f))
+		app = append(app, tmp[:]...)
+	}
+	if len(app) != ExplodeLenTailed {
+		t.Fatalf("vector len=%d, want %d", len(app), ExplodeLenTailed)
+	}
+	got := ScanBattleExplodes(app)
+	if len(got) != 1 || got[0].Shot != 27742688 || got[0].Range != 150 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestParseBattleDeaths(t *testing.T) {
+	mk := func(ctr byte, v, k uint32) []byte {
+		app := []byte{0x55, 0x0a}
+		app = append(app, []byte("deathOrder")...)
+		app = append(app, 0x71, 0x02, 0x4b, ctr, 0x73, 0x2e, 0x0b, 0xa8, 0x02, 0x10, 0xe4, 0x78, 0x01)
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], v)
+		app = append(app, tmp[:]...)
+		binary.LittleEndian.PutUint32(tmp[:], k)
+		app = append(app, tmp[:]...)
+		return append(app, 0, 0, 0, 0, 0)
+	}
+	app := append(mk(9, 542264097, 542282516), mk(24, 542282516, 542264105)...)
+	got := ParseBattleDeaths(app)
+	if len(got) != 2 {
+		t.Fatalf("got %d, want 2", len(got))
+	}
+	if got[0].Victim != 542264097 || got[0].Killer != 542282516 || got[0].Counter != 9 {
+		t.Fatalf("first=%+v", got[0])
+	}
+	if got[1].Victim != 542282516 || got[1].Killer != 542264105 || got[1].Counter != 24 {
+		t.Fatalf("second=%+v", got[1])
+	}
+	// broken framing must not parse
+	bad := []byte{0x55, 0x0a, 'd', 'e', 'a', 't', 'h', 'O', 'r', 'd', 'e', 'r'}
+	if len(ParseBattleDeaths(bad)) != 0 {
+		t.Fatal("broken key parsed")
+	}
+}

@@ -677,18 +677,24 @@ type ExplodeHit struct {
 	Pos   [3]float64
 }
 
-// ExplodeLen is the exact live explode app length: [1a][91][len8]
+// ExplodeLen is the standard live explode app length: [1a][91][len8]
 // + 41B body ([00][shotID u32][A1 f32][Range f32][yaw f32][pitch f32]
-// [X f32][Pos V3][A8 f32] = 1+4+20+4+12+4).
+// [X f32][Pos V3][A8 f32] = 1+4+20+4+12+4). One live sample carries a
+// 4B tail (len8 = 45, total 48); both forms parse identically, tail
+// bytes ignored.
 const ExplodeLen = 44
 
-// ScanBattleExplodes slides the 44B explode template over one
-// decrypted S>C battle app body: `[1a][91][len8=41][00][shotID][A1]
-// [Range][yaw][pitch][X][Pos V3][A8]`. Range must be a known shell
-// caliber (same set as tracers — the 8 chance windows all carry
-// garbage here and match no tracer); Pos must be in-map. Callers join
-// Shot to tracer shot IDs; battle time comes from transport
-// timestamps.
+// ExplodeLenTailed is the tailed live explode length (len8 = 45:
+// standard body + one u32 tail).
+const ExplodeLenTailed = 48
+
+// ScanBattleExplodes slides the 44/48B explode template over one
+// decrypted S>C battle app body: `[1a][91][len8=41|45][00][shotID]
+// [A1][Range][yaw][pitch][X][Pos V3][A8][tail?]`. Range must be a
+// known shell caliber (same set as tracers — chance `1a 91 29`
+// windows inside snapshot trains carry garbage here and match no
+// tracer); Pos must be in-map. Callers join Shot to tracer shot IDs;
+// battle time comes from transport timestamps.
 func ScanBattleExplodes(app []byte) []ExplodeHit {
 	allow := func(r float64) bool {
 		for _, v := range TracerRanges {
@@ -700,7 +706,10 @@ func ScanBattleExplodes(app []byte) []ExplodeHit {
 	}
 	var out []ExplodeHit
 	for o := 0; o+ExplodeLen <= len(app); o++ {
-		if app[o] != 0x1a || app[o+1] != 0x91 || app[o+2] != 0x29 || app[o+3] != 0x00 {
+		if app[o] != 0x1a || app[o+1] != 0x91 || (app[o+2] != 0x29 && app[o+2] != 0x2d) || app[o+3] != 0x00 {
+			continue
+		}
+		if app[o+2] == 0x2d && o+ExplodeLenTailed > len(app) {
 			continue
 		}
 		rng := float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+12:])))
@@ -728,6 +737,61 @@ func ScanBattleExplodes(app []byte) []ExplodeHit {
 			Range: rng,
 			Pos:   p,
 		})
+	}
+	return out
+}
+
+// DeathHit is one battle kill: victim and killer battle entities plus
+// the battle-wide death counter (1-based, gapless — Sep-29 runs
+// #1–#24). Read off the `deathOrder` key framing below; names/teams
+// join through the roster like tracers.
+type DeathHit struct {
+	Victim  uint32
+	Killer  uint32
+	Counter byte
+}
+
+// deathOrderKey is the ASCII key opening each server death broadcast.
+var deathOrderKey = []byte("deathOrder")
+
+// ParseBattleDeaths extracts kill events from one decrypted S>C
+// battle app body. Wire framing (Sep-29 Sweden, 24/24 identical):
+// `[55][0a]deathOrder[71 02][4b ctr][73 2e][0b a8 02 10][XX 78 01]
+// [victim u32 LE][killer u32 LE]` — victim first (a body naming a
+// survivor second never occurs; the counter runs 1,2,3… per death).
+// XX varies per event (damage or timing, open — only the constant
+// `78 01` tail is checked). Victim and killer must both be nonzero;
+// otherwise the window is skipped, never guessed. Self-kills name the
+// same entity twice (server records suicides that way).
+func ParseBattleDeaths(app []byte) []DeathHit {
+	var out []DeathHit
+	for o := 0; o+10 <= len(app); o++ {
+		match := true
+		for k, b := range deathOrderKey {
+			if app[o+k] != b {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		if o < 2 || o+31 > len(app) {
+			continue
+		}
+		if app[o-2] != 0x55 || app[o-1] != 0x0a ||
+			app[o+10] != 0x71 || app[o+11] != 0x02 ||
+			app[o+12] != 0x4b || app[o+14] != 0x73 || app[o+15] != 0x2e ||
+			app[o+16] != 0x0b || app[o+17] != 0xa8 || app[o+18] != 0x02 || app[o+19] != 0x10 ||
+			app[o+21] != 0x78 || app[o+22] != 0x01 {
+			continue
+		}
+		v := binary.LittleEndian.Uint32(app[o+23:])
+		k := binary.LittleEndian.Uint32(app[o+27:])
+		if v == 0 || k == 0 {
+			continue
+		}
+		out = append(out, DeathHit{v, k, app[o+13]})
 	}
 	return out
 }
