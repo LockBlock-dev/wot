@@ -190,6 +190,9 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `../docs/REPLAY.md` §verify); exit 0/1.
 - `cmd/wotevents/main.go` — thin CLI (`file.wotreplay`, `-pretty`):
   prints the battle timeline JSON.
+- `cmd/wotgendata/main.go` — codegen CLI (`-item-defs DIR -out
+  lobby/vehicle_data_gen.go`): static vehicle/gun/shell tables from
+  unpacked item_defs; rerun + `gofmt -w` after client updates.
 
 ## Standards (enforced, not optional)
 
