@@ -193,6 +193,20 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `cmd/wotgendata/main.go` — codegen CLI (`-item-defs DIR -out
   lobby/vehicle_data_gen.go`): static vehicle/gun/shell tables from
   unpacked item_defs; rerun + `gofmt -w` after client updates.
+- `cmd/wotbattlefeed/main.go` — offline battle-feed CLI over a
+  wotproxy dump (`-dump FILE -flow SUB -keyfile F | -recover-key …`,
+  `-own NAME` sets ALLY side, `-side all|ally|enemy` + `-watch SUB`
+  filter SHOT rows): creation bulk → `lobby.NewObserver` (roster/
+  teams/vehicles/mounts via the generated table, no XML), then
+  time-ordered SHOT (+READY merge) / HIT / INCOMING (`-margin` over
+  shell blast, displaced-track pad) / KILL / presence sections.
+  Engine in `lobby/feed.go` (running buff calibration, drum/twin/
+  dual/AR mag sim, caliber-unique tracerless marks), synthetic tests
+  in `lobby/feed_test.go`. Validated on Sep-29 Sweden: 132/132
+  shots, 30/30 roster+guns, 31 hits, 24/24 kills, 0 incoming
+  (correct), 5458/19 presence — deltas vs the /tmp reference driver
+  are live-honest only (running past-evidence calibration, no
+  future-evidence backfill).
 
 ## Standards (enforced, not optional)
 
