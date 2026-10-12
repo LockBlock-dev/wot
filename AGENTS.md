@@ -898,7 +898,8 @@ speak back. Established Sep 20:
   (ammo_ctrl.pyc + WG article, needs wire validation),
   30-row HIT feed (misses suppressed: explodes = non-fatal spotted
   hits — all 4 observed fatal blows carry no explode), 24-kill feed
-  via ParseBattleDeaths (deathOrder victim/killer, counters 1–24);
+  via ParseBattleDeaths (deathOrder victim/killer, counters 1–24),
+  per-shot shell kind (tracer flag byte 3: HEAT/HE/AP/APCR);
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +

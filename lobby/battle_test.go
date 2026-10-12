@@ -204,6 +204,9 @@ func TestScanBattleTracers(t *testing.T) {
 	if h.A0 != 542282516 || h.Shot != 27271648 || h.Range != 152.0 {
 		t.Fatalf("hit=%+v", h)
 	}
+	if h.Kind != ShellAP || ShellKindName(h.Kind) != "AP" {
+		t.Fatalf("kind=%d (%s), want AP", h.Kind, ShellKindName(h.Kind))
+	}
 	if h.Start != [3]float64{275.0, 23.0, -2.0} {
 		t.Fatalf("start=%v", h.Start)
 	}

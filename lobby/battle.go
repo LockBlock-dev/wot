@@ -218,24 +218,56 @@ func ParseAvatarUpdate(app []byte) (AvatarUpdate, bool) {
 // mm, fixed per gun): the Sweden live set plus an earlier replay
 // extras (100/110/120/127/130). Template validated clean on lobby
 // traffic (0/533 S>C bodies, Oct-01 session) — hits need the full
-// 50B shape below, never Range alone.
+// 50B shape below, never Range alone. Caliber and shell kind ride
+// fixed slots (Range @+12, kind byte @+11); the kind decodes via
+// ShellKindName.
 var TracerRanges = []float64{57, 75, 76, 85, 88, 90, 100, 105, 110, 120, 122, 127, 128, 130, 150, 152, 155}
 
 // TracerHit is one S>C showTracer candidate: shooter entity, shot ID,
-// caliber, endpoints. Tail bytes must be 0000 (validated shape;
+// caliber, shell kind, endpoints. Tail bytes must be 0000 (validated shape;
 // non-0000 windows exist live and stay open, uncounted).
 type TracerHit struct {
 	A0    uint32
 	Shot  uint32
 	Range float64
+	Kind  uint8
 	Start [3]float64
 	End   [3]float64
+}
+
+// Shell kind values (tracer flag byte 3): pinned by triple dissociation
+// across replay showShooting X plus defs shell <kind> (Prohorovka:
+// X=1/2/4 ↔ Flags[3]=1/2/4; Sweden T34_100 gun holds exactly AP +
+// HEAT + HE and its 7 tracers read exactly {2,0,1}).
+const (
+	ShellHEAT = 0
+	ShellHE   = 1
+	ShellAP   = 2
+	ShellAPCR = 4
+)
+
+// ShellKindName maps a tracer kind byte to its display tag ("?" for
+// unobserved values — never guess).
+func ShellKindName(k uint8) string {
+	switch k {
+	case ShellHEAT:
+		return "HEAT"
+	case ShellHE:
+		return "HE"
+	case ShellAP:
+		return "AP"
+	case ShellAPCR:
+		return "APCR"
+	}
+	return "?"
 }
 
 // ScanBattleTracers slides the 50B showTracer template over one
 // decrypted S>C battle app body (channel flags/trailer already
 // stripped by the caller): `[I32 a0][shotID][flags×4][Range][start
-// V3][end V3][A9][A10][00 00]`. Same serialization as replays
+// V3][end V3][A9][A10][00 00]`. Flag byte 3 is the shell kind
+// (ShellKindName: 0 HEAT, 1 HE, 2 AP, 4 APCR — same values as replay
+// showShooting arg 2). Same serialization as replays
 // (Avatar.client[17], mid 37). Windows holding denormal V3 components
 // are rejected (1B-slide ghosts of neighboring real tracers: Sep-29
 // Sweden yields 4, all reusing a real shotID with denormal dregs;
@@ -279,6 +311,7 @@ func ScanBattleTracers(app []byte) []TracerHit {
 		h.A0 = binary.LittleEndian.Uint32(app[o:])
 		h.Shot = binary.LittleEndian.Uint32(app[o+4:])
 		h.Range = rng
+		h.Kind = app[o+11]
 		for i := 0; i < 3; i++ {
 			h.Start[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+16+i*4:])))
 			h.End[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+28+i*4:])))
