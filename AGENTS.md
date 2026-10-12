@@ -813,6 +813,12 @@ speak back. Established Sep 20:
   `[1a][1a00][entity][nonce][speed][xyz][tail]` trailer (standalone 0x1a
   = trailer only; `ParseTrailer`; nonce verdict: per-packet
   uniform-random freshness).
+  Caliber finding Oct-12 late: tracer Range = shell caliber in mm
+  (57/75/76/85/88/90/105/122/128/150/152/155 battle-wide, fixed per
+  shooter like a0) — zero 122/150/152-shell tracers start near own
+  (all big-gun fire comes from two far duelists 100–750 m out), so an
+  SU-152 (122/152 mm only) fired zero shells here; template validated
+  clean (0/533 lobby bodies).
   Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits):
   bundle = `[02 8b 58 4a]([93][SUB][len16le][args] |
   [1a][len16le][26B])*` — SUB and len coexist (0x1a/34 =
