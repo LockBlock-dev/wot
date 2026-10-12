@@ -813,6 +813,13 @@ speak back. Established Sep 20:
   `[1a][1a00][entity][nonce][speed][xyz][tail]` trailer (standalone 0x1a
   = trailer only; `ParseTrailer`; nonce verdict: per-packet
   uniform-random freshness).
+  Shots hunt Oct-12 (interim): own 0x1b (vehicle_shoot) 0/7313 — player
+  never fired, shape predictable but unsampled; others' shots in S>C
+  1a/ba tails (07-echo = confirmed ack by seq tracking; routine 71/74B
+  call carries an unidentified V3 pair; ~20 rare long tails are event
+  candidates); replay-anchored arg layouts (showTracer fixed-37 50B,
+  showShooting 3B, explode, shotResults) documented in protocol §14;
+  decisive next = firing capture with recorded shot times.
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +
