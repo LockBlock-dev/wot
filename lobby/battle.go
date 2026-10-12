@@ -10,19 +10,22 @@ import (
 // shapes below verified against it; tests stay synthetic).
 //
 // Wire why: every C>S battle packet opens `[02][8b 58 4a]` then
-// `[93][SUB]` selecting the Avatar cell method (SUB = own-cell index
-// into Avatar.def order: 0x1a=26 vehicle_moveWith, 0x18=24
-// reportClientStats, 0x07=7 discloseEntities(var-length array),
-// 0x12=18 grantRagePoints, 0x06=6 forbidUnbindingFromVehicle,
-// 0x10=16 setEquipmentApplicationPoint, 0x1c=28
-// vehicle_trackWorldPointWithGun, 0x1d=29
-// vehicle_trackRelativePointWithGun — 7214/7214 battle packets
-// decrypt with the token2-login key and frame this way; method names
-// are hypothesis-graded in ParseMoveWith docs, only 0x1a is CLOSED).
-// Every position-carrying call ends with the trailer `[1a][1a00]
-// [entity u32, battle-constant 0x20529314 here][payload][2B tail]`:
-// standalone 0x1a carries only the trailer; other SUBs prepend their
-// method args (e.g. 0x07/44 = 10B disclose head + 28B trailer).
+// Mercury messages, each length-prefixed: `[0x93][SUB][len16le]
+// [args]` (base-routed Avatar cell call; SUB = Avatar own-cell doc
+// index, interfaces excluded — 0x1a=26 moveWith (position smooth-track
+// proven), 0x1d=29 trackRelative (relative-scale V3 proven), rest by
+// shape/count: 0x18=24 reportClientStats, 0x07=7 discloseEntities,
+// 0x12=18 grantRagePoints, 0x06=6 forbidUnbindingFromVehicle, 0x10=16
+// setEquipmentApplicationPoint, 0x1c=28 trackWorldPointWithGun; IDA
+// tables confirm the messaging layer beneath)
+// and `[0x1a][len16le][26B position block]` (len always 26: entity +
+// nonce + speed + xyz + tail; 3357/3357 exact). A standalone 0x1a
+// bundle is one [93][1a][len 26][26B] message; other SUBs prepend
+// their method args and usually append the position message (e.g.
+// 0x07/44 = [93][07][len 7][7B] + [1a][len 26][29B]). Longer bundles
+// (63B+) carry extra implicitly-framed records between args and
+// trailer (per-SUB sizes open). vehicle_shoot is statically 0x1b
+// (own[27]) and never appears in 7313 bundles.
 // S>C battle traffic is tick + opaque entity blobs (NOT lobby smalls:
 // the apparent `1a ba` is a misparse — neither body- nor
 // total-length framing fits; snapshots are 276/292B alternating with

@@ -813,6 +813,12 @@ speak back. Established Sep 20:
   `[1a][1a00][entity][nonce][speed][xyz][tail]` trailer (standalone 0x1a
   = trailer only; `ParseTrailer`; nonce verdict: per-packet
   uniform-random freshness).
+  Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits):
+  bundle = `[02 8b 58 4a]([93][SUB][len16le][args] |
+  [1a][len16le][26B])*` — SUB and len coexist (0x1a/34 =
+  [93][1a][len 26][26B]); SUB = own-cell doc index statically (0x1b =
+  vehicle_shoot, never sent); long bundles chain implicitly-framed
+  records (per-SUB sizes open). T2 stands (a0 shooter proof).
   Shots hunt Oct-12 (interim): own 0x1b (vehicle_shoot) 0/7313 — player
   never fired, shape predictable but unsampled; others' shots in S>C
   1a/ba tails (07-echo = confirmed ack by seq tracking; routine 71/74B
