@@ -836,9 +836,13 @@ speak back. Established Sep 20:
   Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits):
   bundle = `[02 8b 58 4a]([93][SUB][len16le][args] |
   [1a][len16le][26B])*` — SUB and len coexist (0x1a/34 =
-  [93][1a][len 26][26B]); SUB = own-cell doc index statically (0x1b =
-  vehicle_shoot, never sent); long bundles chain implicitly-framed
+  [93][1a][len 26][26B]); SUB = own-cell doc index statically except
+  the trigger (wire 0x10 = vehicle_shoot behaviorally; doc-order 0x1b
+  never sent over 7323 C>S despite 9 confirmed shots); long bundles chain implicitly-framed
   records (per-SUB sizes open). T2 stands (a0 shooter proof).
+  TRIGGER CLOSED Oct-12 late (this battle is the firing capture):
+  C>S shoot = SUB 0x10 record `[93][10][0400][00000000]`, standalone
+  or chained-inner — 9/9 own shots 60–140 ms pre-tracer, zero baseline.
   OWN SHOTS CLOSED Oct-12 late (9 confirmed, recorder=542282516):
   s1 20:46:59 (275,23,-2) → 846 m; s2 20:47:16 (275,23,-1) → 841 m
   + explode (−133,0,284); s3 20:47:57 (261,23,1) → 856 m;
@@ -856,8 +860,16 @@ speak back. Established Sep 20:
   live (s2/s5 explodes = the 2–3 acknowledged), unspotted/ground hits
   withhold everything until battle results (7/9 silent; this capture
   holds no 1500-request/852 — results never pulled in-window).
-  Shots hunt Oct-12 (interim): own 0x1b (vehicle_shoot) 0/7313 — shape
-  predictable but unsampled; others' shots in S>C
+  Trigger CLOSED Oct-12 late: C>S shoot = SUB 0x10 record
+  `[93][10][0400][00000000]` (standalone-outer ×4, chained-inner ×5),
+  one per shot 60–140 ms before its S>C tracer (9/9 both directions,
+  zero baseline over 7323 C>S); builder + recognizer in
+  `lobby/battle.go` (`BuildShootTrigger` reproduces a captured trigger
+  byte-identically, synthetic tests green). Behaviorally
+  vehicle_shoot() (sole cell call in decompiled Avatar.shoot; no other
+  client caller; equipment path excluded); wire index ≠ doc order (0x1b
+  never sent) and the 4 zero bytes vs 0-arg defs stay open statically.
+  Shots hunt remainder: others' shots in S>C
   1a/ba tails (07-echo = confirmed ack by seq tracking; routine 71/74B
   call carries an unidentified V3 pair; ~20 rare long tails are event
   candidates); replay-anchored arg layouts (showTracer fixed-37 50B,
@@ -866,9 +878,8 @@ speak back. Established Sep 20:
   Tracer CLOSED live Oct-12 late: replays are S>C-only (128 tracers +
   81 shootings + 105 explodes, zero inputs); live S>C carries 114
   tracers as [13 tick][1a 0x73][50B] ahead of the snapshot train —
-  same 50B serialization as replay; C>S shoot input still unsampled
-  (this battle IS the firing capture now — 9 true times; trigger hunt
-  well-posed, see above).
+  same 50B serialization as replay; trigger CLOSED (0x10 record,
+  see above).
   Explode CLOSED too (35× 1a/0x91: len8=41, shotID-linked to tracers);
   showShooting/damage/results still open (hide in 0xba tails).
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).

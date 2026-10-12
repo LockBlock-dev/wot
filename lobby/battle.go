@@ -12,11 +12,13 @@ import (
 // Wire why: every C>S battle packet opens `[02][8b 58 4a]` then
 // Mercury messages, each length-prefixed: `[0x93][SUB][len16le]
 // [args]` (base-routed Avatar cell call; SUB = Avatar own-cell doc
-// index, interfaces excluded — 0x1a=26 moveWith (position smooth-track
+// index for the mapped methods (interfaces excluded), except the shoot
+// trigger (wire 0x10 ≠ doc 0x1b — see BattleSubShoot); 0x1a=26 moveWith (position smooth-track
 // proven), 0x1d=29 trackRelative (relative-scale V3 proven), rest by
 // shape/count: 0x18=24 reportClientStats, 0x07=7 discloseEntities,
 // 0x12=18 grantRagePoints, 0x06=6 forbidUnbindingFromVehicle, 0x10=16
-// setEquipmentApplicationPoint, 0x1c=28 trackWorldPointWithGun; IDA
+// shoot trigger (CLOSED, see BattleSubShoot — not doc-order 0x1b),
+// 0x1c=28 trackWorldPointWithGun; IDA
 // tables confirm the messaging layer beneath)
 // and `[0x1a][len16le][26B position block]` (len always 26: entity +
 // nonce + speed + xyz + tail; 3357/3357 exact). A standalone 0x1a
@@ -24,8 +26,11 @@ import (
 // their method args and usually append the position message (e.g.
 // 0x07/44 = [93][07][len 7][7B] + [1a][len 26][29B]). Longer bundles
 // (63B+) carry extra implicitly-framed records between args and
-// trailer (per-SUB sizes open). vehicle_shoot is statically 0x1b
-// (own[27]) and never appears in 7313 bundles.
+// trailer (per-SUB sizes open). The shoot trigger is wire SUB 0x10
+// ([93][10][len 4][00000000], standalone or chained inner — 9/9 own
+// shots 60–140 ms pre-tracer, zero baseline; behaviorally
+// vehicle_shoot(), the only cell call in the decompiled Avatar.shoot
+// path; the doc index (own[27]) and 0x1b never appear on wire).
 // S>C battle traffic is tick + opaque entity blobs (NOT lobby smalls:
 // the apparent `1a ba` is a misparse — neither body- nor
 // total-length framing fits; snapshots are 276/292B alternating with
@@ -45,9 +50,28 @@ const (
 	BattleSubDisclose      = 0x07 // 7 discloseEntities(Array): medium
 	BattleSubRagePoints    = 0x12 // 18 grantRagePoints(U8,F32): weak
 	BattleSubForbidUnbind  = 0x06 // 6 forbidUnbindingFromVehicle(I8): weak
-	BattleSubEquipPoint    = 0x10 // 16 setEquipmentApplicationPoint: weak
 	BattleSubTrackWorld    = 0x1c // 28 trackWorldPointWithGun(V3): medium
 	BattleSubTrackRelative = 0x1d // 29 trackRelativePointWithGun(V3): medium
+	// BattleSubShoot is the C>S shoot trigger SUB. It is NOT the doc
+	// index (own[27] vehicle_shoot; 0x1b never appears on wire over
+	// 7323 C>S despite 9 confirmed shots). Wire truth (Sep-29 Sweden,
+	// 9/9 own tracers paired 60–140 ms later, zero occurrences
+	// elsewhere in the battle): a [10][len 4][00000000] record, either
+	// standalone-outer (0x10-led bundles) or chained-inner (inside
+	// 07/18-led bundles). Behaviorally vehicle_shoot(): the decompiled
+	// Avatar.shoot (Avatar.pyc) calls self.cell.vehicle_shoot() with no
+	// args and no accompanying cell call, and no other client code
+	// references vehicle_shoot; the only other 0x10 candidate
+	// (setEquipmentApplicationPoint, whose callers live in
+	// CombatEquipmentManager/MapCaseMode, single-use consumables with
+	// varying args) cannot produce 9 identical zero-arg records at
+	// exact pre-shot latency. The 4 zero bytes vs the defs' 0-arg
+	// signature is recorded as build-specific framing, not smoothed
+	// over; the index mismatch (16 vs 27) is open statically.
+	BattleSubShoot = 0x10
+	// BattleShootArgsLen is the trigger record's fixed arg length: 4
+	// zero bytes (9/9 identical on wire).
+	BattleShootArgsLen = 4
 	// BattleTrailerTag opens the position trailer ending every
 	// position-carrying call.
 	BattleTrailerTag = 0x1a
@@ -87,8 +111,8 @@ type AvatarUpdate struct {
 // MoveWith is a decoded 0x1a vehicle_moveWith call (34B app):
 // `[02 8b 58 4a][93][1a][1a00][entity u32][nonce u32][speed f32]
 // [xyz 3×f32][tail 2B]`. Entity is battle-constant (0x20529314 in
-// the Sep-29 session — own-avatar marker, not yet proven to be the
-// BW entity ID); Nonce is per-packet uniform-random (distinct=n,
+// the Sep-29 session — the recorder's own entity: battle-start head,
+// S>C tracer a0 and this field all agree on 542282516); Nonce is per-packet uniform-random (distinct=n,
 // halves uniform, lag-1 ≈ −0.17, zero correlation with turn rate —
 // freshness, since the head is constant); Speed reads 7.15 at cruise;
 // Tail is 1900 modally but varies. Column-stability over 2535 samples:
@@ -187,4 +211,71 @@ func ParseAvatarUpdate(app []byte) (AvatarUpdate, bool) {
 		return AvatarUpdate{}, false
 	}
 	return u, true
+}
+
+// BuildShootTrigger emits the standalone C>S shoot-trigger bundle
+// (41B app): `[02 8b 58 4a][93][10][0400][00000000]` + the 29B position
+// trailer. Wire truth (Sep-29 Sweden: 9/9 own shots carry this record
+// 60–140 ms before the server's S>C tracer — 4 standalone-outer like
+// this, 5 chained-inner inside 07/18-led bundles; the 4 arg bytes are
+// zero on all 9). Trailer fields mirror ParseTrailer (nonce/speed/xyz
+// are the caller's live values; the server answers with a tracer, not
+// an ack — unspotted/ground hits stay silent until battle results).
+func BuildShootTrigger(entity, nonce uint32, speed, x, y, z float32, tail [2]byte) []byte {
+	app := make([]byte, 0, 41)
+	app = append(app, BattleC2SHead0, BattleC2SHead1, BattleC2SHead2, BattleC2SHead3)
+	app = append(app, BattleFamily, BattleSubShoot, BattleShootArgsLen, 0x00)
+	app = append(app, 0x00, 0x00, 0x00, 0x00)
+	app = append(app, BattleTrailerTag, 0x1a, 0x00)
+	var tmp [4]byte
+	binary.LittleEndian.PutUint32(tmp[:], entity)
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], nonce)
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(speed))
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(x))
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(y))
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(z))
+	app = append(app, tmp[:]...)
+	app = append(app, tail[0], tail[1])
+	return app
+}
+
+// FindShootTrigger reports whether app carries the shoot-trigger
+// record ([10][0400][00000000]) either standalone-outer or chained
+// inside a longer bundle. Shape-only (args must be the 4 zero bytes);
+// positions/trailer are not validated here.
+func FindShootTrigger(app []byte) bool {
+	if len(app) < 8 || app[0] != BattleC2SHead0 || app[4] != BattleFamily {
+		return false
+	}
+	if app[5] == BattleSubShoot &&
+		binary.LittleEndian.Uint16(app[6:8]) == BattleShootArgsLen &&
+		len(app) >= 8+BattleShootArgsLen &&
+		app[8] == 0 && app[9] == 0 && app[10] == 0 && app[11] == 0 {
+		return true
+	}
+	ln := int(binary.LittleEndian.Uint16(app[6:8]))
+	if 8+ln > len(app) {
+		return false
+	}
+	rest := app[8+ln:]
+	if len(rest) >= BattleTrailerLen && rest[0] == BattleTrailerTag {
+		rest = rest[:len(rest)-BattleTrailerLen]
+	}
+	for len(rest) >= 3 {
+		iln := int(binary.LittleEndian.Uint16(rest[1:3]))
+		if 3+iln > len(rest) {
+			return false
+		}
+		if rest[0] == BattleSubShoot && iln == BattleShootArgsLen &&
+			rest[3] == 0 && rest[4] == 0 && rest[5] == 0 && rest[6] == 0 {
+			return true
+		}
+		rest = rest[3+iln:]
+	}
+	return false
 }
