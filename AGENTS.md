@@ -804,12 +804,15 @@ speak back. Established Sep 20:
   decodes the 60B/34B moveWith shape (entity + F1 + speed 7.14 + xyz
   LE f32 at [20:32]; 2535/2538 live packets parse; 60/60 sane + 59/59
   smooth steps verified); SUB = Avatar own-cell index (0x1a=26 moveWith
-  CLOSED; 0x18=24 reportClientStats, 0x07=7 discloseEntities,
-  0x1c/0x1d=28/29 trackGun, rest weak — Oct-12 census 7214/7214 decrypt:
-  07 ×2994 var-len, 18 ×1405, 12 ×165+, 06 ×49+, 1c ×21, 1d ×10,
-  10 ×2, 07/15 ×116 keepalive-shaped; zero 0x1b = zero shots);
-  every position-carrying call ends with the `[1a][1a00][entity]
-  [payload][tail]` trailer (standalone 0x1a = trailer only).
+  CLOSED; 0x07 = sequenced ack-like records (u8 seq, near-constant —
+  NOT disclose, stride refuted) riding standalone + inside 18/12/06-led
+  bundles; 0x18 ≠ plain stats; 0x1c/0x1d trackGun medium — Oct-12 census
+  7214/7214 decrypt: 07 ×2994 var-len, 18 ×1405, 12 ×165+, 06 ×49+,
+  1c ×21, 1d ×10, 10 ×2, 07/15 ×116 bare; zero 0x1b = zero shots);
+  every position-carrying call ends with the uniform 29B
+  `[1a][1a00][entity][nonce][speed][xyz][tail]` trailer (standalone 0x1a
+  = trailer only; `ParseTrailer`; nonce verdict: per-packet
+  uniform-random freshness).
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +

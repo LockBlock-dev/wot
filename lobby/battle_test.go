@@ -59,8 +59,8 @@ func TestParseMoveWith(t *testing.T) {
 	if !ok {
 		t.Fatal("valid shape rejected")
 	}
-	if m.Entity != 0x20529314 || m.F1 != 0x3db2f5c8 {
-		t.Fatalf("entity/f1=%x/%x", m.Entity, m.F1)
+	if m.Entity != 0x20529314 || m.Nonce != 0x3db2f5c8 {
+		t.Fatalf("entity/nonce=%x/%x", m.Entity, m.Nonce)
 	}
 	if m.Speed < 7.13 || m.Speed > 7.15 {
 		t.Fatalf("speed=%v", m.Speed)
@@ -80,5 +80,41 @@ func TestParseMoveWith(t *testing.T) {
 	}
 	if _, ok := ParseMoveWith(mk()[:20]); ok {
 		t.Fatal("short accepted")
+	}
+}
+
+func TestParseTrailer(t *testing.T) {
+	// synthetic 0x07/44-shaped bundle: 5B head + 10B record + 29B trailer
+	app := []byte{0x02, 0x8b, 0x58, 0x4a, 0x93,
+		0x07, 0x07, 0x00, 0x06, 0x00, 0x01, 0x20, 0x77, 0x06, 0x00,
+		0x1a, 0x1a, 0x00, 0x14, 0x93, 0x52, 0x20}
+	payload := make([]byte, 20)
+	binary.LittleEndian.PutUint32(payload[0:], 0x44332211)
+	binary.LittleEndian.PutUint32(payload[4:], math.Float32bits(7.15))
+	binary.LittleEndian.PutUint32(payload[8:], math.Float32bits(373.3))
+	binary.LittleEndian.PutUint32(payload[12:], math.Float32bits(24.5))
+	binary.LittleEndian.PutUint32(payload[16:], math.Float32bits(252.3))
+	app = append(app, payload...)
+	app = append(app, 0x19, 0x00)
+	if len(app) != 44 {
+		t.Fatalf("fixture len=%d", len(app))
+	}
+	tr, ok := ParseTrailer(app)
+	if !ok {
+		t.Fatal("valid trailer rejected")
+	}
+	if tr.Entity != 0x20529314 || tr.Nonce != 0x44332211 {
+		t.Fatalf("entity/nonce=%x/%x", tr.Entity, tr.Nonce)
+	}
+	if tr.Speed < 7.14 || tr.Speed > 7.16 || tr.X < 373 || tr.X > 374 || tr.Tail != [2]byte{0x19, 0x00} {
+		t.Fatalf("payload=%+v", tr)
+	}
+	if _, ok := ParseTrailer(make([]byte, 15)); ok {
+		t.Fatal("short accepted")
+	}
+	bare := []byte{0x02, 0x8b, 0x58, 0x4a, 0x93, 0x07,
+		0x07, 0x00, 0x06, 0x00, 0x01, 0x18, 0x85, 0x06, 0x00}
+	if _, ok := ParseTrailer(bare); ok {
+		t.Fatal("bare call accepted")
 	}
 }
