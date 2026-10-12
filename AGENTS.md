@@ -33,6 +33,11 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `tokendict.go` (`FindTokenDicts`: pickled `{databaseID, token}`
   hunt in decrypted S>C, TokenResponse-shaped).
 - `lobby/` — offline application layer, stdlib-only (no transport):
+  `vehicle_data.go` + `vehicle_data_gen.go` (COMMITTED codegen output:
+  1251 vehicles, components, per-turret guns, shells — built by
+  `cmd/wotgendata` from 2.4.0.0 item_defs (1252 list rows minus the
+  Observer pseudo-row); `GeneratedTable`/`GunSpec`
+  replace XML at runtime),
   `pickle.go` (hand-rolled proto 0-2 decoder, triple-verified vs
   CPython execution + independent emulator on 3 captures; LONG1/4
   sign fix Sep 28; `DecodeAt`/`DecodePrefix`/`Inventory` resync +
