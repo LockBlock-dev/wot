@@ -3,7 +3,7 @@
 // health→0 + recent attacker), explosions, tracers, projectile
 // explodes, shot results, plus battle meta.
 //
-// Usage: wotevents [-pretty] file.wotreplay
+// Usage: wotevents [-pretty] [-shots] file.wotreplay
 package main
 
 import (
@@ -22,9 +22,10 @@ func fatal(err error) {
 
 func main() {
 	pretty := flag.Bool("pretty", false, "indent JSON output")
+	shots := flag.Bool("shots", false, "print [mm:ss] [name] [tank] SHOT feed instead of JSON")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: wotevents [-pretty] file.wotreplay")
+		fmt.Fprintln(os.Stderr, "usage: wotevents [-pretty] [-shots] file.wotreplay")
 		os.Exit(2)
 	}
 	path := flag.Arg(0)
@@ -41,6 +42,12 @@ func main() {
 		fatal(err)
 	}
 	var out []byte
+	if *shots {
+		for _, s := range replay.ShotFeed(tl) {
+			fmt.Println(s.String())
+		}
+		return
+	}
 	if *pretty {
 		out, err = json.MarshalIndent(tl, "", "  ")
 	} else {

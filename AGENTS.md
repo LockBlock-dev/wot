@@ -882,6 +882,13 @@ speak back. Established Sep 20:
   see above).
   Explode CLOSED too (35× 1a/0x91: len8=41, shotID-linked to tracers);
   showShooting/damage/results still open (hide in 0xba tails).
+  Shot feed (Oct-12): `replay.ShotFeed` joins tracers × setup roster
+  → `[mm:ss] [name] [tank] SHOT` (`wotevents -shots`; Prohorovka:
+  128 rows, 11 own pinned); live pieces in `lobby`
+  (`ScanBattleTracers` incl. denormal-ghost rejection,
+  `ParseBattleRoster` entity→name — Sweden: 30 pairs, 132/132 shots
+  attributed, ghost-free); live tank names need the creation
+  compDescr decode (open).
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +

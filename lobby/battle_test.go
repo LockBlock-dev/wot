@@ -3,6 +3,7 @@ package lobby
 // Offline battle parser tests (synthetic fixtures only).
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 )
@@ -174,5 +175,99 @@ func TestFindShootTriggerChained(t *testing.T) {
 		0x06, 0x00, 0x01, 0xa5, 0x78, 0x06, 0x00}
 	if FindShootTrigger(plain) {
 		t.Fatal("false positive on trigger-less 07 bundle")
+	}
+}
+
+func TestScanBattleTracers(t *testing.T) {
+	mk := func(a0, shot uint32, rng float32, tail [2]byte) []byte {
+		app := make([]byte, 60)
+		binary.LittleEndian.PutUint32(app[0:], a0)
+		binary.LittleEndian.PutUint32(app[4:], shot)
+		copy(app[8:12], []byte{0x00, 0x10, 0x02, 0x02})
+		binary.LittleEndian.PutUint32(app[12:], math.Float32bits(rng))
+		binary.LittleEndian.PutUint32(app[16:], math.Float32bits(275.0))
+		binary.LittleEndian.PutUint32(app[20:], math.Float32bits(23.0))
+		binary.LittleEndian.PutUint32(app[24:], math.Float32bits(-2.0))
+		binary.LittleEndian.PutUint32(app[28:], math.Float32bits(-507.0))
+		binary.LittleEndian.PutUint32(app[32:], math.Float32bits(-24.0))
+		binary.LittleEndian.PutUint32(app[36:], math.Float32bits(320.0))
+		binary.LittleEndian.PutUint32(app[40:], math.Float32bits(6.28))
+		binary.LittleEndian.PutUint32(app[44:], math.Float32bits(720.0))
+		app[48], app[49] = tail[0], tail[1]
+		return app
+	}
+	hits := ScanBattleTracers(mk(542282516, 27271648, 152.0, [2]byte{0, 0}))
+	if len(hits) != 1 {
+		t.Fatalf("hits=%d, want 1", len(hits))
+	}
+	h := hits[0]
+	if h.A0 != 542282516 || h.Shot != 27271648 || h.Range != 152.0 {
+		t.Fatalf("hit=%+v", h)
+	}
+	if h.Start != [3]float64{275.0, 23.0, -2.0} {
+		t.Fatalf("start=%v", h.Start)
+	}
+	if len(ScanBattleTracers(mk(1, 2, 999.0, [2]byte{0, 0}))) != 0 {
+		t.Fatal("bad Range accepted")
+	}
+	if len(ScanBattleTracers(mk(1, 2, 152.0, [2]byte{0, 1}))) != 0 {
+		t.Fatal("non-0000 tail accepted")
+	}
+	if len(ScanBattleTracers(mk(1, 2, 152.0, [2]byte{0, 0})[:40])) != 0 {
+		t.Fatal("short app accepted")
+	}
+	offmap := mk(1, 2, 152.0, [2]byte{0, 0})
+	binary.LittleEndian.PutUint32(offmap[16:], math.Float32bits(9999.0))
+	if len(ScanBattleTracers(offmap)) != 0 {
+		t.Fatal("out-of-map start accepted")
+	}
+}
+
+func TestParseBattleRoster(t *testing.T) {
+	var bulk []byte
+	block := func(ent uint32, name, clan string) {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], ent)
+		bulk = append(bulk, tmp[:]...)
+		bulk = append(bulk, 0x01, 0x04, 0x04, 0x10, 0x81, 0x01, 0x0f, 0x01)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		if clan != "" {
+			bulk = append(bulk, byte(len(clan)))
+			bulk = append(bulk, clan...)
+		}
+		bulk = append(bulk, []byte(fmt.Sprint(ent))...)
+		bulk = append(bulk, 0x00, 0x00)
+	}
+	bulk = append(bulk, []byte("epic_config}q inBattleModifiers bw.default compositionRootSlot")...)
+	block(542282516, "ExampleUser", "")
+	block(542264099, "AlphaTank", "LBP")
+	bulk = append(bulk, []byte("0a bw.default")...)
+	got := ParseBattleRoster(bulk)
+	if len(got) != 2 {
+		t.Fatalf("map=%v, want 2 entries", got)
+	}
+	if got[542282516] != "ExampleUser" || got[542264099] != "AlphaTank" {
+		t.Fatalf("map=%v", got)
+	}
+}
+
+func TestScanBattleTracersGhost(t *testing.T) {
+	// 1B-slide ghost shape (denormal dregs, reused shotID): rejected.
+	app := make([]byte, 60)
+	binary.LittleEndian.PutUint32(app[0:], 1778384964)
+	binary.LittleEndian.PutUint32(app[4:], 27312608)
+	copy(app[8:12], []byte{0x00, 0x10, 0x02, 0x02})
+	binary.LittleEndian.PutUint32(app[12:], math.Float32bits(57.0))
+	binary.LittleEndian.PutUint32(app[16:], math.Float32bits(-395.5))
+	app[20], app[21], app[22], app[23] = 0x01, 0x00, 0x00, 0x00 // true denormal
+	binary.LittleEndian.PutUint32(app[24:], 0)
+	binary.LittleEndian.PutUint32(app[28:], 0)
+	binary.LittleEndian.PutUint32(app[32:], 0)
+	binary.LittleEndian.PutUint32(app[36:], 0)
+	if len(ScanBattleTracers(app)) != 0 {
+		t.Fatal("denormal ghost accepted")
 	}
 }

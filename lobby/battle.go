@@ -2,6 +2,7 @@ package lobby
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 )
 
@@ -211,6 +212,185 @@ func ParseAvatarUpdate(app []byte) (AvatarUpdate, bool) {
 		return AvatarUpdate{}, false
 	}
 	return u, true
+}
+
+// TracerRanges is the accepted showTracer Range set (shell caliber in
+// mm, fixed per gun): the Sweden live set plus an earlier replay
+// extras (100/110/120/127/130). Template validated clean on lobby
+// traffic (0/533 S>C bodies, Oct-01 session) — hits need the full
+// 50B shape below, never Range alone.
+var TracerRanges = []float64{57, 75, 76, 85, 88, 90, 100, 105, 110, 120, 122, 127, 128, 130, 150, 152, 155}
+
+// TracerHit is one S>C showTracer candidate: shooter entity, shot ID,
+// caliber, endpoints. Tail bytes must be 0000 (validated shape;
+// non-0000 windows exist live and stay open, uncounted).
+type TracerHit struct {
+	A0    uint32
+	Shot  uint32
+	Range float64
+	Start [3]float64
+	End   [3]float64
+}
+
+// ScanBattleTracers slides the 50B showTracer template over one
+// decrypted S>C battle app body (channel flags/trailer already
+// stripped by the caller): `[I32 a0][shotID][flags×4][Range][start
+// V3][end V3][A9][A10][00 00]`. Same serialization as replays
+// (Avatar.client[17], mid 37). Windows holding denormal V3 components
+// are rejected (1B-slide ghosts of neighboring real tracers: Sep-29
+// Sweden yields 4, all reusing a real shotID with denormal dregs;
+// game physics never emits denormals). Callers dedupe by Shot across
+// packets; battle time comes from transport timestamps, not the wire.
+func ScanBattleTracers(app []byte) []TracerHit {
+	allow := func(r float64) bool {
+		for _, v := range TracerRanges {
+			if math.Round(r) == v {
+				return true
+			}
+		}
+		return false
+	}
+	inMap := func(o int) bool {
+		x := math.Float32frombits(binary.LittleEndian.Uint32(app[o:]))
+		y := math.Float32frombits(binary.LittleEndian.Uint32(app[o+4:]))
+		z := math.Float32frombits(binary.LittleEndian.Uint32(app[o+8:]))
+		fx, fy, fz := float64(x), float64(y), float64(z)
+		if math.IsNaN(fx) || math.IsNaN(fy) || math.IsNaN(fz) {
+			return false
+		}
+		if isDenormal(x) || isDenormal(y) || isDenormal(z) {
+			return false
+		}
+		return fx > -1500 && fx < 1500 && fy > -500 && fy < 500 && fz > -1500 && fz < 1500
+	}
+	var out []TracerHit
+	for o := 0; o+50 <= len(app); o++ {
+		rng := float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+12:])))
+		if !allow(rng) {
+			continue
+		}
+		if !inMap(o+16) || !inMap(o+28) {
+			continue
+		}
+		if app[o+48] != 0 || app[o+49] != 0 {
+			continue
+		}
+		var h TracerHit
+		h.A0 = binary.LittleEndian.Uint32(app[o:])
+		h.Shot = binary.LittleEndian.Uint32(app[o+4:])
+		h.Range = rng
+		for i := 0; i < 3; i++ {
+			h.Start[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+16+i*4:])))
+			h.End[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(app[o+28+i*4:])))
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// isDenormal reports IEEE-754 subnormal f32 (zero exponent, nonzero
+// mantissa) — the signature of misaligned wire reads, never of game
+// physics output.
+func isDenormal(f float32) bool {
+	b := math.Float32bits(f)
+	return b&0x7f800000 == 0 && b&0x007fffff != 0
+}
+
+// ParseBattleRoster pairs battle entities to player names from the
+// concatenated battle-start creation bulk (S>C, decrypted, arrival
+// order — e.g. the Sep-29 Sweden 1223B-run). The run must be
+// concatenated VERBATIM (contiguous fragments; size-filtered subsets
+// can split a vehicle block and lose its pair — seen live with a 90B
+// gap). Per-vehicle blocks carry
+// the entity ID twice: binary LE near the block head, then the player
+// name (packed-string, always doubled back-to-back) and the same ID
+// in ASCII digits within ~160B. Only triples matching all three
+// survive; component blobs, config pickles, single clan tags and
+// dotted section keys (bw.default etc.) are ignored by the doubling
+// rule. Tank identity lives in the creation compDescr (open) — this
+// returns names only.
+func ParseBattleRoster(bulk []byte) map[uint32]string {
+	out := map[uint32]string{}
+	isName := func(b byte) bool {
+		return b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' ||
+			b == '_' || b == '-' || b == '[' || b == ']' || b == '|'
+	}
+	allDigits := func(s []byte) bool {
+		for _, b := range s {
+			if b < '0' || b > '9' {
+				return false
+			}
+		}
+		return len(s) > 0
+	}
+	for o := 0; o+4 <= len(bulk); o++ {
+		v := binary.LittleEndian.Uint32(bulk[o:])
+		if v < 100000 || v > 3000000000 {
+			continue
+		}
+		// doubled player name within the next 160B
+		name := ""
+		for s := o + 4; s < o+160 && s < len(bulk); s++ {
+			if !isName(bulk[s]) {
+				continue
+			}
+			e := s
+			for e < len(bulk) && e-s < 34 && isName(bulk[e]) {
+				e++
+			}
+			cand := bulk[s:e]
+			if len(cand) < 3 || allDigits(cand) {
+				s = e
+				continue
+			}
+			// same run again within 40B (packed-string doubling)
+			again := false
+			for t := e; t+len(cand) <= e+40 && t+len(cand) <= len(bulk); t++ {
+				match := true
+				for k, d := range cand {
+					if bulk[t+k] != d {
+						match = false
+						break
+					}
+				}
+				if match {
+					again = true
+					break
+				}
+			}
+			if again {
+				name = string(cand)
+				break
+			}
+			s = e
+		}
+		if name == "" {
+			continue
+		}
+		// same ID in ASCII digits within 320B
+		digits := []byte(fmt.Sprint(v))
+		found := false
+		for s := o + 4; s+len(digits) <= o+320 && s+len(digits) <= len(bulk); s++ {
+			match := true
+			for k, d := range digits {
+				if bulk[s+k] != d {
+					match = false
+					break
+				}
+			}
+			if match {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		if _, dup := out[v]; !dup {
+			out[v] = name
+		}
+	}
+	return out
 }
 
 // BuildShootTrigger emits the standalone C>S shoot-trigger bundle
