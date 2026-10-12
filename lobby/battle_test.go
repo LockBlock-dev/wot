@@ -340,3 +340,50 @@ func TestParseBattleTeams(t *testing.T) {
 		t.Fatalf("099=%d, want 1", got[542264099])
 	}
 }
+
+func TestParseBattleMounts(t *testing.T) {
+	tab := &StaticTable{
+		Vehicles: map[uint16]map[uint16]VehicleInfo{
+			0: {9: {Name: "R18_SU-152", Turrets: 1}},
+		},
+		Comps: map[uint16]map[CompKind]map[uint16]string{
+			0: {
+				CompChassis:  {19: "Chassis_R18_SU-152_2"},
+				CompEngine:   {270: "V_2IS_SU"},
+				CompFuelTank: {204: "Heavy"},
+				CompRadio:    {9: "_12RT"},
+				CompTurret:   {16: "Turret_1_R18_SU-152"},
+				CompGun:      {32: "_152mm_ML-20_mod_1937"},
+			},
+		},
+	}
+	var bulk []byte
+	block := func(ent uint32, name string, gun uint16) {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], ent)
+		bulk = append(bulk, tmp[:]...)
+		bulk = append(bulk, 0x01, 0x04, 0x04, 0x10, 0x81, 0x01)
+		bulk = append(bulk, 0x0f, 0x01, 0x09)
+		for _, id := range []uint16{19, 270, 204, 9, 16, gun} {
+			bulk = append(bulk, byte(id), byte(id>>8))
+		}
+		bulk = append(bulk, 0x00) // flags: stock, no optdev/camo
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, 0x02, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44)
+		bulk = append(bulk, []byte(fmt.Sprint(ent))...)
+		bulk = append(bulk, 0x00, 0x00)
+	}
+	block(542282516, "ExampleUser", 32)
+	block(542264099, "AlphaTank", 0x00) // unknown gun id: skipped
+	got := ParseBattleMounts(bulk, tab)
+	if len(got) != 1 {
+		t.Fatalf("map=%v, want 1 entry", got)
+	}
+	m := got[542282516]
+	if m.Turret != 16 || m.Gun != 32 || m.Chassis != 19 {
+		t.Fatalf("516=%+v, want turret 16 gun 32 chassis 19", m)
+	}
+}

@@ -521,6 +521,149 @@ func ParseBattleVehicles(bulk []byte) map[uint32]VehicleRef {
 	return out
 }
 
+// MountedModules is a battle entity's mounted modules from its
+// creation compactDescr: raw component IDs (display names via
+// ComponentTable.Component with the matching CompKind).
+type MountedModules struct {
+	Chassis, Engine, FuelTank, Radio, Turret, Gun uint16
+}
+
+// ParseBattleMounts sections each block head's inline mounted-modules
+// compactDescr and returns per-entity module IDs. Wire layout (Sep-29
+// Sweden, 30/30): head `[ent-LE][01][lenA][A...]` then a tag byte —
+// 0x0f carries the 2-byte vehicle IntCD, 0x10 the 3-byte extended
+// form (ids > 255) — followed DIRECTLY by the mounted descriptor:
+// `[chassis,engine,fuelTank,radio LE u16][turret,gun LE u16]`
+// (12B, mounted pair only — the client owns the unlock tree locally,
+// so the server sends what's fitted, not the full type), then the
+// flags chain per SectionCompactDescr semantics and the packed-string
+// player name. Every one of the six IDs must resolve in tab (chance
+// heads die here), and the parsed end must land exactly on the
+// doubled-name length prefix carrying this head's name (wire lengths,
+// never blind offsets). Camo-tailed descrs (length-less tail) are
+// skipped, never guessed.
+func ParseBattleMounts(bulk []byte, tab ComponentTable) map[uint32]MountedModules {
+	out := map[uint32]MountedModules{}
+	for _, h := range scanHeads(bulk) {
+		if h.o+8 > len(bulk) {
+			continue
+		}
+		ln := int(bulk[h.o+5])
+		rend := h.o + 4 + 2 + ln
+		if rend >= len(bulk) {
+			continue
+		}
+		var nation uint8
+		var id uint16
+		var hlen int
+		switch bulk[rend] {
+		case 0x0f:
+			if rend+3 > len(bulk) {
+				continue
+			}
+			b0 := bulk[rend+1]
+			if b0&15 != 1 || b0&compactExtFlag != 0 {
+				continue
+			}
+			nation, id, hlen = uint8(b0>>4&15), uint16(bulk[rend+2]), 2
+		case 0x10:
+			if rend+4 > len(bulk) {
+				continue
+			}
+			b0 := bulk[rend+1]
+			if lo := b0 & 15; lo != 1|compactExtFlag {
+				continue
+			}
+			nation, id, hlen = uint8(b0>>4&15), uint16(bulk[rend+2])|uint16(bulk[rend+3])<<8, 3
+		default:
+			continue
+		}
+		if _, ok := tab.Vehicle(nation, id); !ok {
+			continue
+		}
+		off := rend + 1 + hlen
+		if off+13 > len(bulk) {
+			continue
+		}
+		get := func(o int) uint16 { return uint16(bulk[o]) | uint16(bulk[o+1])<<8 }
+		m := MountedModules{
+			Chassis: get(off), Engine: get(off + 2), FuelTank: get(off + 4),
+			Radio: get(off + 6), Turret: get(off + 8), Gun: get(off + 10),
+		}
+		if _, ok := tab.Component(nation, CompChassis, m.Chassis); !ok {
+			continue
+		}
+		if _, ok := tab.Component(nation, CompEngine, m.Engine); !ok {
+			continue
+		}
+		if _, ok := tab.Component(nation, CompFuelTank, m.FuelTank); !ok {
+			continue
+		}
+		if _, ok := tab.Component(nation, CompRadio, m.Radio); !ok {
+			continue
+		}
+		if _, ok := tab.Component(nation, CompTurret, m.Turret); !ok {
+			continue
+		}
+		if _, ok := tab.Component(nation, CompGun, m.Gun); !ok {
+			continue
+		}
+		end := off + 12 + 1
+		flags := bulk[off+12]
+		slots := flags & 15
+		for i := 0; i < 4; i++ {
+			if slots&(1<<uint(i)) != 0 {
+				end += 2
+			}
+		}
+		if end > len(bulk) {
+			continue
+		}
+		if flags&compactFlagEnh != 0 {
+			if end >= len(bulk) {
+				continue
+			}
+			end += 1 + int(bulk[end])*6
+		}
+		if flags&compactFlagEmb != 0 {
+			if end >= len(bulk) {
+				continue
+			}
+			pos := bulk[end]
+			end++
+			ne, ni := 0, 0
+			for i := 0; i < 4; i++ {
+				if pos&(1<<uint(i)) != 0 {
+					ne++
+				}
+				if pos&(1<<uint(i+4)) != 0 {
+					ni++
+				}
+			}
+			end += ne*6 + ni*7
+		}
+		if flags&compactFlagSkip != 0 {
+			end++
+		}
+		if flags&compactFlagCamo != 0 {
+			continue
+		}
+		if end >= len(bulk) || int(bulk[end]) != len(h.name) {
+			continue
+		}
+		if end+1+len(h.name) > len(bulk) {
+			continue
+		}
+		if string(bulk[end+1:end+1+len(h.name)]) != h.name {
+			continue
+		}
+		if _, dup := out[h.v]; !dup {
+			out[h.v] = m
+		}
+	}
+	return out
+}
+
 // BuildShootTrigger emits the standalone C>S shoot-trigger bundle
 // (41B app): `[02 8b 58 4a][93][10][0400][00000000]` + the 29B position
 // trailer. Wire truth (Sep-29 Sweden: 9/9 own shots carry this record

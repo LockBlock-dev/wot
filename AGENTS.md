@@ -887,10 +887,11 @@ speak back. Established Sep 20:
   128 rows, 11 own pinned); live pieces in `lobby`
   (`ScanBattleTracers` incl. denormal-ghost rejection,
   `ParseBattleRoster` entity→name + `ParseBattleVehicles`
-  entity→(nation,typeID) + `ParseBattleTeams` entity→team — Sweden:
+  entity→(nation,typeID) + `ParseBattleTeams` entity→team +
+  `ParseBattleMounts` entity→mounted (turret,gun) — Sweden:
   30 pairs, 132/132 shots attributed, ghost-free, all 30 tanks
-  resolved via list.xml vehicle IntCDs, 15/15 teams, 26/26 shooter
-  reloads);
+  resolved via list.xml vehicle IntCDs, 15/15 teams, 26/26 exact
+  single-gun reloads (inline mounted-only 12B descr, name-anchored);
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
   `1a ba` is a lobby-framing misparse — neither body- nor
   total-length fits, 12/4047; records show `35 00` separators +
