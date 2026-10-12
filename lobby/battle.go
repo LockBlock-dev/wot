@@ -390,6 +390,14 @@ func ParseBattleRoster(bulk []byte) map[uint32]string {
 // repeats within 40B (packed-string doubling). Single clan tags,
 // dotted section keys and digit runs never qualify.
 func headName(bulk []byte, o int) string {
+	name, _ := headNameAt(bulk, o)
+	return name
+}
+
+// headNameAt is headName plus the end offset of the SECOND occurrence
+// (0 when absent) — the anchor ParseBattleTeams reads the team byte
+// from.
+func headNameAt(bulk []byte, o int) (string, int) {
 	isName := func(b byte) bool {
 		return b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' ||
 			b == '_' || b == '-' || b == '[' || b == ']' || b == '|'
@@ -424,11 +432,37 @@ func headName(bulk []byte, o int) string {
 				}
 			}
 			if match {
-				return string(cand)
+				return string(cand), t + len(cand)
 			}
 		}
 	}
-	return ""
+	return "", 0
+}
+
+// ParseBattleTeams reads each block head's team byte: the u8 right
+// after the doubled player name (1 or 2, replay `team` values; Sep-29
+// Sweden 30/30, 15/15 split, own team = 2 with ExampleUser). The byte
+// must be followed by 00 00 (next field's padding); anything else is
+// skipped, never guessed.
+func ParseBattleTeams(bulk []byte) map[uint32]uint8 {
+	out := map[uint32]uint8{}
+	for _, h := range scanHeads(bulk) {
+		_, end := headNameAt(bulk, h.o)
+		if end == 0 || end+3 > len(bulk) {
+			continue
+		}
+		t := bulk[end]
+		if t != 1 && t != 2 {
+			continue
+		}
+		if bulk[end+1] != 0 || bulk[end+2] != 0 {
+			continue
+		}
+		if _, dup := out[h.v]; !dup {
+			out[h.v] = t
+		}
+	}
+	return out
 }
 
 // ParseBattleVehicles resolves each block head's vehicle identity to

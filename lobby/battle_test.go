@@ -308,3 +308,35 @@ func TestParseBattleVehicles(t *testing.T) {
 		t.Fatalf("names=%v", names)
 	}
 }
+
+func TestParseBattleTeams(t *testing.T) {
+	var bulk []byte
+	block := func(ent uint32, name string, team byte) {
+		var tmp [4]byte
+		binary.LittleEndian.PutUint32(tmp[:], ent)
+		bulk = append(bulk, tmp[:]...)
+		bulk = append(bulk, 0x01, 0x04, 0x04, 0x10, 0x81, 0x01)
+		bulk = append(bulk, 0x0f, 0x01, 0x09)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, byte(len(name)))
+		bulk = append(bulk, name...)
+		bulk = append(bulk, team, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44)
+		bulk = append(bulk, []byte(fmt.Sprint(ent))...)
+		bulk = append(bulk, 0x00, 0x00)
+	}
+	block(542282516, "ExampleUser", 0x02)
+	block(542264099, "AlphaTank", 0x01)
+	// bad team byte (0x07) must be skipped, never guessed
+	block(542264100, "branislavtotka", 0x07)
+	got := ParseBattleTeams(bulk)
+	if len(got) != 2 {
+		t.Fatalf("map=%v, want 2 entries", got)
+	}
+	if got[542282516] != 2 {
+		t.Fatalf("own=%d, want 2", got[542282516])
+	}
+	if got[542264099] != 1 {
+		t.Fatalf("099=%d, want 1", got[542264099])
+	}
+}
