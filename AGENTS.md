@@ -808,25 +808,56 @@ speak back. Established Sep 20:
   NOT disclose, stride refuted) riding standalone + inside 18/12/06-led
   bundles; 0x18 ≠ plain stats; 0x1c/0x1d trackGun medium — Oct-12 census
   7214/7214 decrypt: 07 ×2994 var-len, 18 ×1405, 12 ×165+, 06 ×49+,
-  1c ×21, 1d ×10, 10 ×2, 07/15 ×116 bare; zero 0x1b = zero shots);
+  1c ×21, 1d ×10, 10 ×2, 07/15 ×116 bare; zero 0x1b DESPITE 9 confirmed
+  own shots (see below) — so the shoot SUB is NOT doc-order 0x1b
+  (fork (a) confirmed) or firing is state-based; trigger still open,
+  now well-posed with 9 true shot times (two post-shot 0x1c/0x1d
+  proximities: s6 +0.06 s, s9 +0.04 s — aim aftermath, not trigger);
   every position-carrying call ends with the uniform 29B
   `[1a][1a00][entity][nonce][speed][xyz][tail]` trailer (standalone 0x1a
   = trailer only; `ParseTrailer`; nonce verdict: per-packet
   uniform-random freshness).
   Caliber finding Oct-12 late: tracer Range = shell caliber in mm
-  (57/75/76/85/88/90/105/122/128/150/152/155 battle-wide, fixed per
-  shooter like a0) — zero 122/150/152-shell tracers start near own
-  (all big-gun fire comes from two far duelists 100–750 m out), so an
-  SU-152 (122/152 mm only) fired zero shells here; template validated
-  clean (0/533 lobby bodies).
+  (proven on own-vehicle ground truth: Prohorovka Challenger 17-pdr
+  76.2 mm → Range 76.2 on all 11 own tracers; WolfPlayer T110E5 120 mm
+  → Range 120 on all 42; battle-wide set 57/75/76/85/88/90/105/122/
+  128/150/152/155, fixed per shooter like a0); template validated
+  clean (0/533 lobby bodies). CORRECTION (same day): the recorder
+  (ExampleUser, SU-152) IS entity 542282516 and fired 9× 152 mm in
+  this battle — the old "fired zero" corollary rested on tracer↔own
+  distances computed against the C>S position track, which is
+  displaced/glitchy here (teleports + smooth-but-offset segments, see
+  below), plus a hex arithmetic slip (0x20529314 = 542282516, the
+  user's entity — not 542278420). Identity is triple-proven
+  server-side: battle-start arena-params head pairs
+  (ExampleUser, 542282516) — same shape as the user's Prohorovka
+  replay (ExampleUser, 4730080 = own a0); C>S moveWith entity =
+  542282516; 9 S>C tracers with a0 = 542282516, all Range 152.
   Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits):
   bundle = `[02 8b 58 4a]([93][SUB][len16le][args] |
   [1a][len16le][26B])*` — SUB and len coexist (0x1a/34 =
   [93][1a][len 26][26B]); SUB = own-cell doc index statically (0x1b =
   vehicle_shoot, never sent); long bundles chain implicitly-framed
   records (per-SUB sizes open). T2 stands (a0 shooter proof).
-  Shots hunt Oct-12 (interim): own 0x1b (vehicle_shoot) 0/7313 — player
-  never fired, shape predictable but unsampled; others' shots in S>C
+  OWN SHOTS CLOSED Oct-12 late (9 confirmed, recorder=542282516):
+  s1 20:46:59 (275,23,-2) → 846 m; s2 20:47:16 (275,23,-1) → 841 m
+  + explode (−133,0,284); s3 20:47:57 (261,23,1) → 856 m;
+  s4 20:48:16 (264,23,1) → 859 m; s5 20:48:49 (279,23,-39) → 450 m
+  + explode (426,53,-238); s6 20:49:09 (278,23,-36) → 462 m;
+  s7 20:49:46 (409,27,12) → 484 m; s8 20:50:23 (397,32,-85) → 408 m;
+  s9 20:52:14 (277,23,-21) → 662 m (AMX-duel reply; enemy 542264099
+  3× 57 mm @11.8/12.8/13.9 closing 62→20 m, silent after; own death
+  20:52:17.9, postmortem names 542264105 — kill/direction decode open).
+  Gaps 17–111 s, all ≥152 mm reload-plausible. Muzzles sit on 3 spots
+  ≤130 m apart (A s1–s6 ±20 m, B s7–s8, back-near-A s9) — no chase;
+  T20-window shots all from stationary spot A (user correction
+  accepted; the chase reading rested on teleport artifacts).
+  Ack rule (recorder-supplied,consistent with wire): spotted hits ack
+  live (s2/s5 explodes = the 2–3 acknowledged), unspotted/ground hits
+  withhold everything until battle results (7/9 silent; this capture
+  holds no 1500-request/852 — results never pulled in-window).
+  Shots hunt Oct-12 (interim): own 0x1b (vehicle_shoot) 0/7313 — shape
+  predictable but unsampled; others' shots in S>C
   1a/ba tails (07-echo = confirmed ack by seq tracking; routine 71/74B
   call carries an unidentified V3 pair; ~20 rare long tails are event
   candidates); replay-anchored arg layouts (showTracer fixed-37 50B,
@@ -835,7 +866,9 @@ speak back. Established Sep 20:
   Tracer CLOSED live Oct-12 late: replays are S>C-only (128 tracers +
   81 shootings + 105 explodes, zero inputs); live S>C carries 114
   tracers as [13 tick][1a 0x73][50B] ahead of the snapshot train —
-  same 50B serialization as replay; own 0x1b still unsampled.
+  same 50B serialization as replay; C>S shoot input still unsampled
+  (this battle IS the firing capture now — 9 true times; trigger hunt
+  well-posed, see above).
   Explode CLOSED too (35× 1a/0x91: len8=41, shotID-linked to tracers);
   showShooting/damage/results still open (hide in 0xba tails).
   S>C battle snapshots (276/292B) decrypt with the SAME key (561/561).
