@@ -5,18 +5,22 @@ package lobby
 // touches XML).
 
 // GenShell is one shell entry: display kind, caliber in mm, damage vs
-// armor/modules, penetration by range, ballistics, default ammo share.
+// armor/modules, penetration by range, ballistics, default ammo share,
+// blast data for HE (splash radius, stun).
 type GenShell struct {
-	Name          string
-	Kind          string
-	Caliber       float64
-	DamageArmor   int
-	DamageDevices int
-	Pen           []float64
-	Speed         float64
-	Gravity       float64
-	MaxDistance   float64
-	Portion       float64
+	Name            string
+	Kind            string
+	Caliber         float64
+	DamageArmor     int
+	DamageDevices   int
+	Pen             []float64
+	Speed           float64
+	Gravity         float64
+	MaxDistance     float64
+	Portion         float64
+	ExplosionRadius float64
+	HasStun         bool
+	StunDuration    float64
 }
 
 // GenGun is one per-turret gun entry with mounted stats: nominal

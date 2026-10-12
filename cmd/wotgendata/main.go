@@ -149,11 +149,14 @@ func floatList(body, tag string) []float64 {
 }
 
 type shell struct {
-	name       string
-	kind       string
-	caliber    float64
-	dmgArmor   int
-	dmgDevices int
+	name            string
+	kind            string
+	caliber         float64
+	dmgArmor        int
+	dmgDevices      int
+	explosionRadius float64
+	hasStun         bool
+	stunDuration    float64
 }
 
 type shotStat struct {
@@ -172,6 +175,9 @@ func parseShell(name, body string) shell {
 	}
 	s.caliber = firstFloat(body, "caliber")
 	s.dmgArmor = firstInt(body, "armor")
+	s.explosionRadius = firstFloat(body, "explosionRadius")
+	s.hasStun = strings.Contains(body, "<hasStun>true")
+	s.stunDuration = firstFloat(body, "stunDuration")
 	if m := regexp.MustCompile(`(?s)<damage>(.*?)</damage>`).FindStringSubmatch(body); m != nil {
 		s.dmgArmor = firstInt(m[1], "armor")
 		s.dmgDevices = firstInt(m[1], "devices")
@@ -553,8 +559,8 @@ func main() {
 			if !ok {
 				continue
 			}
-			fmt.Fprintf(&b, "{Name: %s, Kind: %s, Caliber: %v, DamageArmor: %d, DamageDevices: %d, Pen: %s, Speed: %v, Gravity: %v, MaxDistance: %v, Portion: %v}, ",
-				q(s.name), q(s.kind), s.caliber, s.dmgArmor, s.dmgDevices, floats(sh.pen), sh.speed, sh.gravity, sh.maxDist, sh.portion)
+			fmt.Fprintf(&b, "{Name: %s, Kind: %s, Caliber: %v, DamageArmor: %d, DamageDevices: %d, Pen: %s, Speed: %v, Gravity: %v, MaxDistance: %v, Portion: %v, ExplosionRadius: %v, HasStun: %v, StunDuration: %v}, ",
+				q(s.name), q(s.kind), s.caliber, s.dmgArmor, s.dmgDevices, floats(sh.pen), sh.speed, sh.gravity, sh.maxDist, sh.portion, s.explosionRadius, s.hasStun, s.stunDuration)
 		}
 		b.WriteString("}}")
 		return b.String()

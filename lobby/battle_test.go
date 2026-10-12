@@ -476,3 +476,93 @@ func TestParseBattleDeaths(t *testing.T) {
 		t.Fatal("broken key parsed")
 	}
 }
+
+func TestFlightTime(t *testing.T) {
+	// flat gun: 846 m at 750 m/s, g 9.81 → ~1.15 s low arc
+	eta, ok := FlightTime([3]float64{0, 0, 0}, [3]float64{846, 0, 0}, 750, 9.81)
+	if !ok || eta < 1.0 || eta > 1.5 {
+		t.Fatalf("flat eta=%v,%v", eta, ok)
+	}
+	// howitzer: 300 m at 420 m/s, g 140 → high arc, multi-second
+	eta, ok = FlightTime([3]float64{0, 0, 0}, [3]float64{300, 0, 0}, 420, 140)
+	if !ok || eta < 1.5 || eta > 8 {
+		t.Fatalf("lobbed eta=%v,%v", eta, ok)
+	}
+	// out of range: 2000 m at 100 m/s flat (max ~1019 m) → no root
+	if _, ok = FlightTime([3]float64{0, 0, 0}, [3]float64{2000, 0, 0}, 100, 9.81); ok {
+		t.Fatal("out-of-range accepted")
+	}
+	// degenerate inputs refuse
+	if _, ok = FlightTime([3]float64{0, 0, 0}, [3]float64{1, 0, 0}, 0, 9.81); ok {
+		t.Fatal("zero velocity accepted")
+	}
+}
+
+func TestMatchShell(t *testing.T) {
+	g, ok := GunSpec(0, 9, "Turret_1_R18_SU-152", "_152mm_ML-20_mod_1937")
+	if !ok {
+		t.Fatal("no ML-20 spec")
+	}
+	s, ok := MatchShell(g, ShellHEAT)
+	if !ok || s.Caliber != 152 {
+		t.Fatalf("heat=%+v,%v", s, ok)
+	}
+	// unknown kind never matches
+	if _, ok = MatchShell(g, 7); ok {
+		t.Fatal("bad kind matched")
+	}
+	// portion-majority: BP_530 (0.8) beats BP540 (0.0)
+	if s.Portion < 0.5 {
+		t.Fatalf("portion=%v, want majority shell", s.Portion)
+	}
+}
+
+func TestParseSnapshotRecord(t *testing.T) {
+	// hand-built payload from the decompiled formulas: token 0xf4,
+	// X = +66.0 prescale (sign 0, exp adecodes below), dir zeros.
+	// X bits: sign 0, exp 0x9 (f32 exp 0x89 → 2^10=1024 ×1.m), mant 12b.
+	// f32(0x44800000) = 1024.0 → prescale 1022.0. mant for 1.0 fraction 0.
+	payload := []byte{0xf4,
+		0x48, 0x00, 0x00, 0x48, 0x00, 0x00, // X=+1022,Z=+1022 prescale
+		0x00, 0x00, 0x00, 0x00, // dir zeros
+	}
+	_ = payload
+	// construct properly bit by bit instead (6B: X=sign0/exp9/mant0,
+	// Z=sign0/exp9/mant0, Y=sign0/exp9/mant0-9b)
+	var bits uint64
+	put := func(v uint32, n int) {
+		bits = (bits << uint(n)) | uint64(v)
+	}
+	put(0, 1)
+	put(9, 4)
+	put(0, 12) // X mantissa 0 → f32 0x44800000 = 1024 → 1022.0
+	put(0, 1)
+	put(9, 4)
+	put(0, 12) // Z same
+	put(0, 1)
+	put(9, 4)
+	put(0, 9) // Y same (9b mantissa)
+	var pos [6]byte
+	for i := 0; i < 6; i++ {
+		pos[5-i] = byte(bits >> (8 * uint(i)))
+	}
+	app := append([]byte{0xf4}, pos[:]...)
+	app = append(app, 0, 0, 0, 0)
+	s, ok := ParseSnapshotRecord(app)
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if s.Token != 0xf4 {
+		t.Fatalf("token=%02x", s.Token)
+	}
+	if math.Abs(s.PX-1022.0) > 1e-6 || math.Abs(s.PZ-1022.0) > 1e-6 || math.Abs(s.PY-1022.0) > 1e-6 {
+		t.Fatalf("pos=%v %v %v", s.PX, s.PY, s.PZ)
+	}
+	if s.Yaw != 0 || s.Pitch != 0 || s.Roll != 0 {
+		t.Fatalf("dir=%v %v %v", s.Yaw, s.Pitch, s.Roll)
+	}
+	// short payload refuses
+	if _, ok := ParseSnapshotRecord([]byte{1, 2, 3}); ok {
+		t.Fatal("short payload accepted")
+	}
+}

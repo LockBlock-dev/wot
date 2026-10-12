@@ -262,6 +262,102 @@ func ShellKindName(k uint8) string {
 	return "?"
 }
 
+// ShellDefKind maps a tracer kind byte to the item-defs shell <kind>
+// string for table lookup ("") when unobserved.
+func ShellDefKind(k uint8) string {
+	switch k {
+	case ShellHEAT:
+		return "HOLLOW_CHARGE"
+	case ShellHE:
+		return "HIGH_EXPLOSIVE"
+	case ShellAP:
+		return "ARMOR_PIERCING"
+	case ShellAPCR:
+		return "ARMOR_PIERCING_CR"
+	}
+	return ""
+}
+
+// MatchShell resolves a mounted gun plus fired kind to one shell
+// spec: the highest default-portion entry of that kind (loadout
+// majority — exact loadouts are account-side and unknowable;
+// ok=false when the gun carries no shell of that kind).
+func MatchShell(g GenGun, kind uint8) (GenShell, bool) {
+	want := ShellDefKind(kind)
+	var best GenShell
+	found := false
+	for _, s := range g.Shells {
+		if s.Kind != want {
+			continue
+		}
+		if !found || s.Portion > best.Portion {
+			best, found = s, true
+		}
+	}
+	return best, found
+}
+
+// FlightTime solves projectile time-of-flight for pure-gravity
+// ballistics (the shipped PyBallisticsSimulator model: no drag) given
+// muzzle/end points, muzzle velocity and gravity. Howitzers lob
+// (shell gravity > 50 takes the high-arc root, e.g. 140 for SPG
+// plunging fire); flat guns take the low root. ok=false when out of
+// range (no real root).
+func FlightTime(start, end [3]float64, v0, grav float64) (float64, bool) {
+	if v0 <= 0 || grav <= 0 {
+		return 0, false
+	}
+	dx := end[0] - start[0]
+	dz := end[2] - start[2]
+	dy := end[1] - start[1]
+	r := math.Sqrt(dx*dx + dz*dz)
+	f := func(t float64) float64 {
+		vh := r / t
+		vv := dy/t + grav*t/2
+		return vh*vh + vv*vv - v0*v0
+	}
+	// bracket scan on a log grid, then bisect each sign change
+	var roots []float64
+	prevT, prevF := 1e-3, f(1e-3)
+	for i := 1; i <= 400; i++ {
+		t := 1e-3 * math.Pow(60000, float64(i)/400)
+		fv := f(t)
+		if (prevF < 0) != (fv < 0) {
+			lo, hi := prevT, t
+			for j := 0; j < 60; j++ {
+				mid := (lo + hi) / 2
+				if (f(lo) < 0) != (f(mid) < 0) {
+					hi = mid
+				} else {
+					lo = mid
+				}
+			}
+			roots = append(roots, (lo+hi)/2)
+		}
+		prevT, prevF = t, fv
+	}
+	if len(roots) == 0 {
+		return 0, false
+	}
+	if grav > 50 {
+		return roots[len(roots)-1], true
+	}
+	return roots[0], true
+}
+
+// IncomingShot evaluates one tracer against own position: impact
+// distance (horizontal), shell flight ETA, and whether to warn.
+// radius is the caller's danger radius (shell blast + displacement
+// margin — the C>S position track is displaced/teleporty, so live
+// callers pad generously); warn fires inside it.
+func IncomingShot(tr TracerHit, sh GenShell, own [3]float64, radius float64) (dist, eta float64, warn bool) {
+	dx := tr.End[0] - own[0]
+	dz := tr.End[2] - own[2]
+	dist = math.Sqrt(dx*dx + dz*dz)
+	eta, _ = FlightTime(tr.Start, tr.End, sh.Speed, sh.Gravity)
+	return dist, eta, dist <= radius
+}
+
 // ScanBattleTracers slides the 50B showTracer template over one
 // decrypted S>C battle app body (channel flags/trailer already
 // stripped by the caller): `[I32 a0][shotID][flags×4][Range][start
@@ -825,6 +921,129 @@ func ParseBattleDeaths(app []byte) []DeathHit {
 			continue
 		}
 		out = append(out, DeathHit{v, k, app[o+13]})
+	}
+	return out
+}
+
+// BitReader is an MSB-first bit reader over volatile-record bytes
+// (mirrors BW::BitReader: ctor 0x142CA1860, unsigned 0x142CA1900,
+// signed 0x142CA19A0, exact-consumption dtor check 0x142CA1880).
+type BitReader struct {
+	buf []byte
+	pos int
+}
+
+// Read consumes n bits MSB-first as unsigned.
+func (b *BitReader) Read(n int) uint32 {
+	var v uint32
+	for i := 0; i < n; i++ {
+		by := b.buf[b.pos/8]
+		v = (v << 1) | uint32((by>>(7-uint(b.pos%8)))&1)
+		b.pos++
+	}
+	return v
+}
+
+// ReadSigned consumes n bits MSB-first as signed (two's complement).
+func (b *BitReader) ReadSigned(n int) int32 {
+	u := b.Read(n)
+	if u&(1<<(n-1)) != 0 {
+		return int32(u) - int32(uint32(1)<<n)
+	}
+	return int32(u)
+}
+
+// SnapshotRecord is one decoded S>C volatile snapshot record: the
+// token byte plus prescale coordinates and direction. Coordinates are
+// PRESCALE (custom float minus 2.0, no per-entity scale, no base) —
+// sufficient for tracking; absolute mapping needs the runtime scale
+// (open, see below).
+type SnapshotRecord struct {
+	Token byte
+	// Prescale position (wire x,z,y order → x,y,z out; y absolute).
+	PX, PY, PZ float64
+	// Direction in radians.
+	Yaw, Pitch, Roll float64
+}
+
+// decodePrescale reads one custom volatile float: sign + 4b exponent
+// (forced 0b1000 high bits) + mantissa as f32 bits, then + (-2.0)
+// (BW_unpackVolatilePosType0: COERCE_FLOAT(bits) + dword -2.0, sign
+// OR-ed after, per-entity scale multiplied after — scale skipped
+// here, caller fits it).
+func decodePrescale(r *BitReader, mant int) float64 {
+	sign := r.Read(1)
+	exp := r.Read(4)
+	m := r.Read(mant)
+	bits := (uint32(0x80|exp) << 23) | (m << (23 - mant))
+	f := float64(math.Float32frombits(bits)) - 2.0
+	if sign != 0 {
+		return -f
+	}
+	return f
+}
+
+// ParseSnapshotRecord decodes the 11B payload following a [35 00]
+// marker: [token u8][pos 6B][dir 4B]. Position wire order is (x, z, y)
+// → out (x, y, z): X/Z are 1+4+12b prescale, Y is 1+4+9b absolute.
+// Direction wire order is (yaw, pitch, roll): 11b × 2π/2048, 11b ×
+// π/2046 exact, 10b × 2π/1024 (BW_ClientDefaultVolatileUnpacker anti-
+// slip: output order is also yaw-first; the old roll-first reading is
+// withdrawn — mean |roll| would read 2.4 rad against flat physics,
+// while yaw-first validates at turn-rate stats).
+func ParseSnapshotRecord(payload []byte) (SnapshotRecord, bool) {
+	var s SnapshotRecord
+	if len(payload) < 11 {
+		return s, false
+	}
+	s.Token = payload[0]
+	r := &BitReader{buf: payload[1:7]}
+	px := decodePrescale(r, 12)
+	pz := decodePrescale(r, 12)
+	py := decodePrescale(r, 9)
+	s.PX, s.PY, s.PZ = px, py, pz
+	d := &BitReader{buf: payload[7:11]}
+	s.Yaw = float64(d.ReadSigned(11)) * 2 * math.Pi / 2048
+	s.Pitch = float64(d.ReadSigned(11)) * math.Pi / 2046
+	s.Roll = float64(d.ReadSigned(10)) * 2 * math.Pi / 1024
+	return s, true
+}
+
+// ScanSnapshots extracts volatile snapshot records from one decrypted
+// S>C battle app body: 13B `[35 00][11B]` trains. Only runs of 4+
+// consecutive 13B-spaced markers parse (chance `35 00` pairs inside
+// float blobs are dense); token must sit in EB–FE (the live
+// namespace, F8 gap included — exact ID width stays open). Token→
+// entity mapping stays OPEN (muzzle-fit overfits camp clusters; own
+// C>S track is displaced; spawn anchors unmapped); presence is
+// trackable per token meanwhile.
+func ScanSnapshots(app []byte) []SnapshotRecord {
+	var marks []int
+	inRun := map[int]bool{}
+	for o := 0; o+2 <= len(app); o++ {
+		if app[o] == 0x35 && app[o+1] == 0x00 {
+			marks = append(marks, o)
+			inRun[o] = true
+		}
+	}
+	var out []SnapshotRecord
+	for _, o := range marks {
+		if o+13 > len(app) {
+			continue
+		}
+		run := 1
+		for inRun[o+run*13] {
+			run++
+		}
+		if run < 4 {
+			continue
+		}
+		if id := app[o+2]; id < 0xEB || id > 0xFE {
+			continue
+		}
+		if s, ok := ParseSnapshotRecord(app[o+2 : o+13]); ok {
+			out = append(out, s)
+		}
 	}
 	return out
 }
