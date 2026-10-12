@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/LockBlock-dev/wot/keydump"
+	"github.com/LockBlock-dev/wot/lobby"
 	"github.com/LockBlock-dev/wot/login"
 	"github.com/LockBlock-dev/wot/tproxy"
 )
@@ -118,7 +119,16 @@ func main() {
 	baseListen := flag.String("baseapp-listen", "", "BaseApp MITM: listen here (e.g. 127.0.0.1:32901) and rewrite S>C 232B LOGGED_ON endpoints to it via -keyfile (explicit LoginApp mode only; fail-open without a key)")
 	mitmPrivPath := flag.String("mitm-privkey", "", "RSA MITM: our private key (PEM) matching the public_key_path the CUSTOM host entry uses; enables live login-key recovery (explicit LoginApp mode only; fail-open)")
 	mitmPubPath := flag.String("mitm-pubkey", "", "RSA MITM: the real server public key (PEM, e.g. res/loginapp_wot.pubkey) to re-encrypt toward; requires -mitm-privkey")
+	battleFeed := flag.Bool("battle-feed", false, "live battle feed: decrypt BaseApp channel with the session key and print SHOT/HIT/KILL/READY/LINK/SPOT rows (needs -keyfile or MITM keys; past-only victims, names/counts only)")
+	battleOwn := flag.String("battle-own", "", "observer player name (sets ALLY side; empty leaves sides ?)")
+	battleSide := flag.String("battle-side", "all", "SHOT filter: all|ally|enemy (HIT/KILL/READY always print)")
+	battleWatch := flag.String("battle-watch", "", "SHOT filter: name substring")
+	battleMargin := flag.Float64("battle-margin", 25, "incoming danger margin (m) over shell blast")
 	flag.Parse()
+	if *battleSide != "all" && *battleSide != "ally" && *battleSide != "enemy" {
+		fmt.Fprintln(os.Stderr, "wotproxy: -battle-side must be all|ally|enemy")
+		os.Exit(2)
+	}
 	if *upstream == "" && *transparent == "" {
 		fmt.Fprintln(os.Stderr, "wotproxy: need -upstream (explicit mode) or -transparent addr (DNAT mode)")
 		os.Exit(2)
@@ -167,8 +177,42 @@ func main() {
 	// session); the -keyfile stays the fallback. Any load problem
 	// disables the MITM loudly and the proxy continues as before.
 	mitm := setupMitm(*mitmPrivPath, *mitmPubPath)
+
+	// Live battle feed (opt-in): decrypted BaseApp apps stream into
+	// lobby.LiveFeed, which buffers the creation bulk once then scans
+	// per S>C packet. Decrypt mirrors the proxy path (XOR-chain +
+	// Blowfish under the session key: MITM-recovered exact session
+	// first, -keyfile fallback); undecryptable datagrams (handshake,
+	// wrong key) are skipped silently. Never blocks forwarding on
+	// failure — fail-open like the rewrites.
+	bdec := &battleDec{mitm: mitm, keyPath: *keyPath}
+	var live *lobby.LiveFeed
+	if *battleFeed {
+		live = lobby.NewLiveFeed(lobby.LiveConfig{
+			Own: *battleOwn, Side: *battleSide, Watch: *battleWatch, Margin: *battleMargin,
+		})
+		fmt.Printf("wotproxy: battle feed live (own=%q side=%s watch=%q margin=%.0fm)\n",
+			*battleOwn, *battleSide, *battleWatch, *battleMargin)
+	}
+	feedBattle := func(dir string, pkt []byte) {
+		if live == nil {
+			return
+		}
+		app, ok := bdec.decrypt(pkt)
+		if !ok {
+			return
+		}
+		now := time.Now()
+		if dir == "S>C" {
+			for _, r := range live.FeedSC(now, app) {
+				fmt.Println(r)
+			}
+		} else {
+			live.FeedCS(now, app)
+		}
+	}
 	if *transparent != "" {
-		runTransparent(*transparent, dumpLine)
+		runTransparent(*transparent, dumpLine, feedBattle)
 		return
 	}
 
@@ -266,6 +310,7 @@ func main() {
 				peer := client.String() + "->" + orig.String()
 				fmt.Printf("%s %s %-43s %4dB baseapp\n", ts, dir, peer, len(pkt))
 				dumpLine(ts, dir, peer, pkt)
+				feedBattle(dir, pkt)
 			},
 		}
 		go func() {
@@ -396,8 +441,8 @@ func maybeRewrite(pkt []byte, keyPath, baseListen string, ensureRelay func(*net.
 // runTransparent serves DNAT'd game traffic (LoginApp + BaseApp) with
 // per-flow original-destination routing. LoginApp flows (orig port 20016)
 // get Mercury framing annotation; BaseApp flows log sizes only — channel
-// bytes are Blowfish (sidecar decrypt via -keyfile is a later step).
-func runTransparent(listen string, dumpLine func(ts, dir, peer string, pkt []byte)) {
+// bytes are Blowfish (live feed via feedBattle when armed, fail-open).
+func runTransparent(listen string, dumpLine func(ts, dir, peer string, pkt []byte), feedBattle func(dir string, pkt []byte)) {
 	laddr := mustResolve(listen)
 	fmt.Printf("wotproxy: transparent %s (pre-install DNAT per wot/tproxy/doc.go; game runs stock)\n", laddr)
 	fw := &tproxy.Forwarder{
@@ -414,12 +459,79 @@ func runTransparent(listen string, dumpLine func(ts, dir, peer string, pkt []byt
 			}
 			fmt.Printf("%s %s %-43s %4dB %s\n", ts, dir, peer, len(pkt), note)
 			dumpLine(ts, dir, peer, pkt)
+			if orig.Port != 20016 {
+				feedBattle(dir, pkt)
+			}
 		},
 	}
 	if err := fw.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "wotproxy: transparent:", err)
 		os.Exit(1)
 	}
+}
+
+// battleDec decrypts live BaseApp channel datagrams for the battle
+// feed. The working key is cached (per-packet decrypt is one
+// Blowfish pass); on failure it refreshes candidates (MITM exact
+// session first, -keyfile fallback) and caches the winner. All
+// failures are silent skips — the relay never blocks on feed state.
+type battleDec struct {
+	mu      sync.Mutex
+	working string
+	mitm    *mitmState
+	keyPath string
+}
+
+func tryBattleKey(key string, pkt []byte) ([]byte, bool) {
+	cl, err := login.DecryptChannel(key, pkt)
+	if err != nil || len(cl) < 10 {
+		return nil, false
+	}
+	trl := 8
+	if binary.LittleEndian.Uint16(cl[0:2])&0x20 != 0 {
+		trl = 12
+	}
+	if len(cl) < 2+trl {
+		return nil, false
+	}
+	return append([]byte(nil), cl[2:len(cl)-trl]...), true
+}
+
+func (b *battleDec) decrypt(pkt []byte) ([]byte, bool) {
+	if len(pkt) < 4+8 {
+		return nil, false
+	}
+	b.mu.Lock()
+	w := b.working
+	b.mu.Unlock()
+	if w != "" {
+		if app, ok := tryBattleKey(w, pkt); ok {
+			return app, true
+		}
+	}
+	var cands []string
+	if b.mitm != nil {
+		cands = append(cands, b.mitm.latestKeys(3)...)
+	}
+	if b.keyPath != "" {
+		if fk, err := keydump.LatestKeys(b.keyPath, 3); err == nil {
+			for _, k := range fk {
+				cands = append(cands, string(k))
+			}
+		}
+	}
+	for _, k := range cands {
+		if k == "" || k == w {
+			continue
+		}
+		if app, ok := tryBattleKey(k, pkt); ok {
+			b.mu.Lock()
+			b.working = k
+			b.mu.Unlock()
+			return app, true
+		}
+	}
+	return nil, false
 }
 
 func mustResolve(addr string) *net.UDPAddr {

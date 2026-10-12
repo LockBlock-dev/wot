@@ -127,6 +127,10 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   fail-open without a key). Captures stage-1; the relay's `RewriteSC`
   hook rewrites the stage-2 `[44]` redirect the same way
   (`login.RewriteRedirect`, retargets the relay, chains welcome).
+- `cmd/wotproxy -battle-feed` — live battle feed (Oct-12, opt-in):
+  `-battle-own/-side/-watch/-margin` tune `lobby.LiveFeed`, fed with
+  decrypted BaseApp apps on the relay path (explicit + transparent);
+  SHOT/HIT/KILL/READY/LINK/SPOT rows on stdout, names/counts only.
 - `login/rewrite.go` — `RewriteLoginReply` + `encryptLogin` (login-path
   Blowfish mirror, no magic trailer).
 - `tproxy/` — transparent forwarder: `forward.go` (flow table keyed by
@@ -204,13 +208,17 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   dual/AR mag sim, caliber-unique tracerless marks, muzzle-history
   victims: two-sided offline `ObserveExplodeFull`, past-only live
   `ObserveExplode`), synthetic tests
-  in `lobby/feed_test.go`. Validated on Sep-29 Sweden: 132/132
+  in `lobby/feed_test.go`. Streaming twin in `lobby/live.go`
+  (`LiveFeed`: bulk buffering + per-packet scans + own track +
+  presence, mutex-guarded; synthetic tests in `lobby/live_test.go`).
+  Validated on Sep-29 Sweden: 132/132
   shots, 30/30 roster+guns, 31 hits (13 victims: 8 HIGH), 24/24 kills,
   0 incoming
   (correct), 4 LINK + 11 SPOT markers, 5458/19 presence — deltas vs
   the /tmp reference driver
   are live-honest only (running past-evidence calibration, no
-  future-evidence backfill).
+  future-evidence backfill). The streaming path replays count-identical
+  (132/31/24/98/4/11, 5458/19) via `/tmp/opencode/liveverify.go`.
 
 ## Standards (enforced, not optional)
 
