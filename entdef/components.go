@@ -85,9 +85,10 @@ func parseExtension(raw []byte, pkg string) (*Extension, error) {
 	return ex, nil
 }
 
-// CompLoader loads component/space/mode-entity defs from a vendored
-// wotdefs tree (testdata/wotdefs): components/<pkg>/, space_defs/,
-// mode_entities/<pkg>/, extensions/.
+// CompLoader loads component/space/mode-entity defs from an external
+// wotdefs tree (sibling dirs wotdefs-2.4.0/, wotdefs-2.4.1/ — game data,
+// kept outside this repo, never committed): components/<pkg>/,
+// space_defs/, mode_entities/<pkg>/, extensions/.
 type CompLoader struct {
 	Root string
 
@@ -139,8 +140,12 @@ func (l *CompLoader) LoadExtensions() error {
 		l.extByPkg[pkg] = ex
 	}
 	// Interface chain: scripts entity interfaces, space interfaces.
+	ifaceDefs := ScriptsEntityDefsDir
+	if ifaceDefs == "" {
+		ifaceDefs = filepath.Join(l.Root, "..", "..", "World_of_Tanks_EU", "2.4.0.0", "res", "scripts", "entity_defs")
+	}
 	l.ifaceDirs = []string{
-		filepath.Join(l.Root, "..", "..", "World_of_Tanks_EU", "2.4.0.0", "res", "scripts", "entity_defs", "interfaces"),
+		filepath.Join(ifaceDefs, "interfaces"),
 		filepath.Join(l.Root, "space_defs", "interfaces"),
 	}
 	// Component chain: scripts components, then pkgs alphabetical.

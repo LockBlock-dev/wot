@@ -1,18 +1,30 @@
 package lobby
 
-// Offline battle parser tests (synthetic fixtures only).
+// Offline battle parser tests (synthetic fixtures plus pinned genuine
+// wire vectors: Sep-29 2.4.0.x and Oct-14 2.4.1.0 battle flows,
+// decrypted with the session login key).
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"testing"
 )
 
+// testKey4 is a sample flow key (opaque session-assigned bytes; the
+// parser must accept any value here).
+var testKey4 = [BattleKeyLen]byte{0x16, 0xe4, 0xd8, 0x57}
+
+func mkHead(app []byte) []byte {
+	app[0] = BattleC2SHead0
+	copy(app[1:5], testKey4[:])
+	return app
+}
+
 func TestParseAvatarUpdate(t *testing.T) {
 	mk := func() []byte {
-		app := make([]byte, BattlePosLen)
-		app[0], app[1], app[2], app[3] = 0x02, 0x8b, 0x58, 0x4a
-		app[4], app[5] = 0x93, 0x1a
+		app := mkHead(make([]byte, BattlePosLen))
+		app[5] = 0x1a
 		binary.LittleEndian.PutUint32(app[20:], math.Float32bits(373.3))
 		binary.LittleEndian.PutUint32(app[24:], math.Float32bits(24.5))
 		binary.LittleEndian.PutUint32(app[28:], math.Float32bits(252.3))
@@ -43,9 +55,8 @@ func TestParseAvatarUpdate(t *testing.T) {
 
 func TestParseMoveWith(t *testing.T) {
 	mk := func() []byte {
-		app := make([]byte, BattlePosLen)
-		app[0], app[1], app[2], app[3] = 0x02, 0x8b, 0x58, 0x4a
-		app[4], app[5] = BattleFamily, BattleSubMoveWith
+		app := mkHead(make([]byte, BattlePosLen))
+		app[5] = BattleSubMoveWith
 		app[6], app[7] = 0x1a, 0x00
 		binary.LittleEndian.PutUint32(app[8:], 0x20529314)
 		binary.LittleEndian.PutUint32(app[12:], 0x3db2f5c8)
@@ -69,12 +80,13 @@ func TestParseMoveWith(t *testing.T) {
 	if m.X < 373 || m.X > 374 || m.Tail != [2]byte{0x19, 0x00} {
 		t.Fatalf("xyz/tail=%v/%x", m.AvatarUpdate, m.Tail)
 	}
-	bad := mk()
-	bad[4] = 0x95
-	if _, ok := ParseMoveWith(bad); ok {
-		t.Fatal("bad family accepted")
+	// flow key bytes are opaque: any value parses identically.
+	alt := mk()
+	copy(alt[1:5], []byte{0x8b, 0x58, 0x4a, 0x93})
+	if _, ok := ParseMoveWith(alt); !ok {
+		t.Fatal("alternate flow key rejected")
 	}
-	bad = mk()
+	bad := mk()
 	bad[5] = 0x07
 	if _, ok := ParseMoveWith(bad); ok {
 		t.Fatal("other sub accepted")
@@ -86,7 +98,7 @@ func TestParseMoveWith(t *testing.T) {
 
 func TestParseTrailer(t *testing.T) {
 	// synthetic 0x07/44-shaped bundle: 5B head + 10B record + 29B trailer
-	app := []byte{0x02, 0x8b, 0x58, 0x4a, 0x93,
+	app := []byte{0x02, 0x16, 0xe4, 0xd8, 0x57,
 		0x07, 0x07, 0x00, 0x06, 0x00, 0x01, 0x20, 0x77, 0x06, 0x00,
 		0x1a, 0x1a, 0x00, 0x14, 0x93, 0x52, 0x20}
 	payload := make([]byte, 20)
@@ -113,7 +125,7 @@ func TestParseTrailer(t *testing.T) {
 	if _, ok := ParseTrailer(make([]byte, 15)); ok {
 		t.Fatal("short accepted")
 	}
-	bare := []byte{0x02, 0x8b, 0x58, 0x4a, 0x93, 0x07,
+	bare := []byte{0x02, 0x16, 0xe4, 0xd8, 0x57, 0x07,
 		0x07, 0x00, 0x06, 0x00, 0x01, 0x18, 0x85, 0x06, 0x00}
 	if _, ok := ParseTrailer(bare); ok {
 		t.Fatal("bare call accepted")
@@ -121,15 +133,15 @@ func TestParseTrailer(t *testing.T) {
 }
 
 func TestBuildShootTrigger(t *testing.T) {
-	app := BuildShootTrigger(0x20529314, 0x6d9bcd97, 7.15, 275.0, 23.0, -2.0, [2]byte{0x08, 0x03})
+	app := BuildShootTrigger(testKey4, 0x20529314, 0x6d9bcd97, 7.15, 275.0, 23.0, -2.0, [2]byte{0x08, 0x03})
 	if len(app) != 41 {
 		t.Fatalf("len=%d, want 41", len(app))
 	}
-	if app[0] != 0x02 || app[1] != 0x8b || app[2] != 0x58 || app[3] != 0x4a {
+	if app[0] != 0x02 || string(app[1:5]) != string(testKey4[:]) {
 		t.Fatal("bad head")
 	}
-	if app[4] != BattleFamily || app[5] != BattleSubShoot {
-		t.Fatalf("family/sub=%02x/%02x", app[4], app[5])
+	if app[5] != BattleSubShoot {
+		t.Fatalf("sub=%02x", app[5])
 	}
 	if app[6] != 0x04 || app[7] != 0x00 {
 		t.Fatalf("len=%02x%02x, want 0400", app[6], app[7])
@@ -152,9 +164,9 @@ func TestBuildShootTrigger(t *testing.T) {
 }
 
 func TestFindShootTriggerChained(t *testing.T) {
-	// s1-shaped 07-led bundle: outer07 (7B) + inner 0x10 + trailer.
+	// s1-shaped 07-led bundle: head + outer07 (7B) + inner 0x10 + trailer.
 	var b []byte
-	b = append(b, 0x02, 0x8b, 0x58, 0x4a, BattleFamily, 0x07, 0x07, 0x00)
+	b = append(b, 0x02, 0x16, 0xe4, 0xd8, 0x57, 0x07, 0x07, 0x00)
 	b = append(b, 0x06, 0x00, 0x01, 0xa5, 0x78, 0x06, 0x00)
 	b = append(b, BattleSubShoot, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00)
 	for i := 0; i < 29; i++ {
@@ -165,13 +177,13 @@ func TestFindShootTriggerChained(t *testing.T) {
 		t.Fatal("chained inner trigger not recognized")
 	}
 	// moveWith 34B carries no trigger.
-	mv := BuildShootTrigger(1, 2, 7.0, 1.0, 2.0, 3.0, [2]byte{0x19, 0x00})
+	mv := BuildShootTrigger(testKey4, 1, 2, 7.0, 1.0, 2.0, 3.0, [2]byte{0x19, 0x00})
 	mv[5] = BattleSubMoveWith
 	if FindShootTrigger(mv) {
 		t.Fatal("false positive on moveWith-shaped bundle")
 	}
 	// bare 07/44 without inner 0x10.
-	plain := []byte{0x02, 0x8b, 0x58, 0x4a, BattleFamily, 0x07, 0x07, 0x00,
+	plain := []byte{0x02, 0x16, 0xe4, 0xd8, 0x57, 0x07, 0x07, 0x00,
 		0x06, 0x00, 0x01, 0xa5, 0x78, 0x06, 0x00}
 	if FindShootTrigger(plain) {
 		t.Fatal("false positive on trigger-less 07 bundle")
@@ -613,5 +625,127 @@ func TestScanBattleMarkers(t *testing.T) {
 	}
 	if math.Abs(spots[0].Pos[0]-452) > 1e-3 || math.Abs(spots[0].Pos[2]+13.4) > 1e-3 {
 		t.Fatalf("pos=%v", spots[0].Pos)
+	}
+}
+
+func TestGenuineWireVectors(t *testing.T) {
+	// Pinned genuine C>S apps (channel envelope already stripped):
+	// Sep-29 2.4.0.x (flow key 8b584a93) and Oct-14 2.4.1.0 b2
+	// (flow key 16e4d857), decrypted with the session login key.
+	vecs := map[string]string{
+		// Sep-29 moveWith: entity 0x20529314 (recorder).
+		"oldMW": "028b584a931a1a00149352203db2f5c889ace440b4a7ba433f25c4415e4c7c431900",
+		// Sep-29 s3 standalone trigger (lead position).
+		"oldTrig": "028b584a93100400000000001a1a001493522097cd9b6d7ebce440fcfc7cc31d488f41493f06c30803",
+		// Sep-29 s1 chained trigger (07-led, bare inner 0x10).
+		"oldChain": "028b584a93070700060001a5780600100400000000001a1a00149352200d07605943b5e440e0adc5c200cd4c3eacff69430803",
+		// Oct-14 b2 moveWith: entity 0x00348e86 (ExampleUser T20).
+		"newMW": "0216e4d8571a1a00868e3400668ee6109abfe540dd56ab433365a2412674bdc31900",
+		// Oct-14 b2 s3 standalone trigger (lead position).
+		"newTrig": "0216e4d857100400000000001a1a00868e34000fcb0e7621d5e540fd4ebf436673ae413c65b2430403",
+	}
+	app := map[string][]byte{}
+	for k, h := range vecs {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatalf("%s hex: %v", k, err)
+		}
+		app[k] = b
+	}
+	if m, ok := ParseMoveWith(app["oldMW"]); !ok || m.Entity != 0x20529314 {
+		t.Fatalf("oldMW: ok=%v entity=%x", ok, m.Entity)
+	}
+	if m, ok := ParseMoveWith(app["newMW"]); !ok || m.Entity != 0x00348e86 {
+		t.Fatalf("newMW: ok=%v entity=%x", ok, m.Entity)
+	}
+	for _, k := range []string{"oldTrig", "oldChain", "newTrig"} {
+		if !FindShootTrigger(app[k]) {
+			t.Fatalf("%s trigger not recognized", k)
+		}
+	}
+	for _, k := range []string{"oldMW", "newMW"} {
+		if FindShootTrigger(app[k]) {
+			t.Fatalf("%s false positive", k)
+		}
+	}
+	if tr, ok := ParseTrailer(app["newTrig"]); !ok || tr.Entity != 0x00348e86 {
+		t.Fatalf("newTrig trailer: ok=%v %+v", ok, tr)
+	}
+}
+
+func TestParseBattleDeathsVersion(t *testing.T) {
+	// 2.4.1.0 variant pair 0c 23 (genuine b2 shape, counter 8).
+	app := []byte{0x55, 0x0a}
+	app = append(app, []byte("deathOrder")...)
+	app = append(app, 0x71, 0x02, 0x4b, 8, 0x73, 0x2e, 0x0c, 0x23, 0x02, 0x10, 0xe4, 0x78, 0x01)
+	var tmp [4]byte
+	binary.LittleEndian.PutUint32(tmp[:], 3444358)
+	app = append(app, tmp[:]...)
+	binary.LittleEndian.PutUint32(tmp[:], 3444348)
+	app = append(app, tmp[:]...)
+	app = append(app, 0, 0, 0, 0, 0)
+	got := ParseBattleDeaths(app)
+	if len(got) != 1 || got[0].Victim != 3444358 || got[0].Killer != 3444348 || got[0].Counter != 8 {
+		t.Fatalf("got %+v, want the ctr-8 kill", got)
+	}
+	// the per-battle pair is opaque: all observed pairs parse.
+	for _, vw := range [][2]byte{{0x0b, 0xa8}, {0x0c, 0x23}, {0x0c, 0x99}, {0x0c, 0x92}, {0x08, 0xb6}} {
+		v := append([]byte{}, app...)
+		v[2+10+6], v[2+10+7] = vw[0], vw[1]
+		if got := ParseBattleDeaths(v); len(got) != 1 || got[0].Counter != 8 {
+			t.Fatalf("pair %02x%02x: got %+v", vw[0], vw[1], got)
+		}
+	}
+	// broken anchors must not parse.
+	bad := append([]byte{}, app...)
+	bad[2+10+8] = 0x03
+	if len(ParseBattleDeaths(bad)) != 0 {
+		t.Fatal("broken anchor parsed")
+	}
+}
+
+func TestScanSnapshotTokens(t *testing.T) {
+	// gate-free: fragmented marks (no 13-run) still harvest.
+	app := []byte{0x13, 0x00, 0x35, 0x00, 0xf2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+		0xaa, 0xbb, 0x35, 0x00, 0xf7, 1, 2, 3}
+	got := ScanSnapshotTokens(app)
+	if len(got) != 2 || got[0] != 0xf2 || got[1] != 0xf7 {
+		t.Fatalf("got %x", got)
+	}
+	// out-of-namespace token byte rejected.
+	if toks := ScanSnapshotTokens([]byte{0x35, 0x00, 0x10, 0x00}); len(toks) != 0 {
+		t.Fatalf("got %x", toks)
+	}
+	// run members included too (superset of ScanSnapshots tokens).
+	var run []byte
+	for i := 0; i < 4; i++ {
+		run = append(run, 0x35, 0x00, byte(0xeb+i))
+		run = append(run, make([]byte, 10)...)
+	}
+	got = ScanSnapshotTokens(run)
+	if len(got) != 4 {
+		t.Fatalf("got %x", got)
+	}
+}
+
+func TestIntCD11Form(t *testing.T) {
+	// Genuine b1 own-Challenger block shape: 0x11 tag + 2-byte IntCD +
+	// 12B modules + optdev flags, then the doubled name + ASCII ID.
+	app := []byte{0x15, 0xcd, 0x5b, 0x07, 0x01, 0x03, 0x04, 0x10, 0x6b,
+		0x11, 0x51, 0x37, 0x74, 0x00, 0xdc, 0x07, 0xcb, 0x00, 0x0c, 0x00,
+		0x64, 0x00, 0x56, 0x00, 0x04, 0x65, 0x00, 0x0b}
+	app = append(app, []byte("ExampleUser")...)
+	app = append(app, 0x0b)
+	app = append(app, []byte("ExampleUser")...)
+	app = append(app, []byte("123456789")...)
+	v := ParseBattleVehicles(app)
+	ref, ok := v[123456789]
+	if !ok || ref != (VehicleRef{5, 55}) {
+		t.Fatalf("vehicles=%v", v)
+	}
+	m := ParseBattleMounts(app, GeneratedTable())
+	mod, ok := m[123456789]
+	if !ok || mod.Gun != 0x56 || mod.Turret != 0x64 || mod.Chassis != 0x74 {
+		t.Fatalf("mounts=%v", m)
 	}
 }

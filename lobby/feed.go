@@ -667,6 +667,19 @@ func NewPresence() *Presence {
 	return &Presence{Count: map[byte]int{}, First: map[byte]time.Time{}, Last: map[byte]time.Time{}}
 }
 
+// UpdateTokens folds one packet's harvested snapshot tokens into the
+// tracker (gate-free singles included — counts/times per token only).
+func (p *Presence) UpdateTokens(at time.Time, toks []byte) {
+	for _, t := range toks {
+		p.Count[t]++
+		p.Total++
+		if _, ok := p.First[t]; !ok {
+			p.First[t] = at
+		}
+		p.Last[t] = at
+	}
+}
+
 // Update folds one packet's snapshot records into the tracker.
 func (p *Presence) Update(at time.Time, recs []SnapshotRecord) {
 	for _, r := range recs {

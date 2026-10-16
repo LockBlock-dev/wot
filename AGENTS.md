@@ -92,14 +92,21 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   Glacier (2.1.1) + 2.0 decrypt. Offline only.
 - `entdef/` — entity-def reader (packed-section `.def` parser) + login
   digest computation over `../World_of_Tanks_EU/res/scripts`
-  (entities/interfaces/alias) plus vendored `testdata/wotdefs/`
-  (space defs, 339 component defs, 10 mode entities, 17 extension
-  manifests): `components.go`, `digest.go` (`ComputeDigestFull`,
-  318-entry map walk), `defs.go`, `packed.go`, `types.go`.
+  (entities/interfaces/alias) plus external game-data trees kept as
+  uncommitted siblings of this repo (`../wotdefs-2.4.0/`: space defs,
+  339 component defs, 10 mode entities, 17 extension manifests;
+  `../wotdefs-2.4.1/` + `../scripts-2.4.1/`: 2.4.1.0 defs extracted
+  from live `res/packages/scripts.pkg` + 19 mode pkgs; 403-entry walk,
+  18 fails via `Skip241`): `components.go`, `digest.go`
+  (`ComputeDigestFull`, 318-entry map walk for 2.4.0; `DigestVersion`
+  version-aware wrapper + `Truth240`/`Truth241` + `ResetAliases`
+  for multi-version use), `defs.go`, `packed.go`, `types.go`.
+  Game defs are never vendored under `testdata/` (git-ignored).
 - `internal/cuckoo/` — vendored `ZiRo-/cuckgo` (MIT, see
   `LICENSE-THIRD-PARTY`): `cuckoo.go` verbatim, `miner.go` = upstream
   search adapted with early exit + our `SolveChallenge` driver.
-- `testdata/wotdefs/` — vendored defs for offline digest/tests.
+- `testdata/` is git-ignored: digest fixtures live outside this repo
+  (see `entdef/`). Do not vendor game defs here.
 - `cmd/wotlogin/main.go` — thin CLI (`-env`, `-baseapp`, `-host`,
   plus `-relogin` / `-session-guid` / `-temporary` / `-client-context`
   overrides and `-solve` / `-probe-port` / `-empty-key` / `-raw-key` /
@@ -181,6 +188,12 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   userns + NoNewPrivs) are refused pre-attach at any uid — ptrace stops
   threads there without tracership (TracerPid stays 0, Sep 27: 74/74),
   so only CONT resumes; keys there need the in-process mod.
+  `walk.go`/`walk_linux.go` (Oct-15): same backend records the digest
+  walk (entry-filter breakpoint 2.4.1.0 `0x142CAA130`, RDX desc,
+  pass=[+135], MSVC name@[+8]; TRACECLONE + single-step + quiet-end;
+  dead on sandboxed targets — confirmed live Oct-15).
+- `cmd/wotwalkdump/main.go` — walk recorder CLI (dump + optional
+  `entdef` recompute/`-want` compare).
 - `cmd/wotflood/main.go` — offline lobby analyzer (structure only):
   `-stream` bundle inventory + prefix salvage, `-dump -flow` chunk
   table + inventory, `-recover-key` (MITM key to keyfile, lengths
@@ -188,6 +201,10 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   lengths/hashes only unless `-show-token`). Thin CLI, protocol in `login/`.
 - `cmd/wotunpack/main.go` — packed binaries (`.def`/`.xml`, magic
   `0x62a14e45`) to readable XML on stdout.
+- `cmd/wotdigest/main.go` — offline login digest per client version
+  (`-version 2.4.0|2.4.1`, `-wotdefs`/`-entitydefs` overrides;
+  game defs are external uncommitted siblings; prints
+  computed/truth + MATCH/MISMATCH, exit 1 on mismatch).
 - `cmd/wotreplay/main.go` — thin CLI (`file.wotreplay`, `-meta`,
   `-dump PREFIX` for `.stream.bin`).
 - `cmd/wotverify/main.go` — genuineness CLI (structural only, see
@@ -490,12 +507,189 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
 2. Offline digest CLOSED Sep 20 (`TestComputeDigestMatchesClient` green).
    Full client map recomputed byte-identically (`5df886f7…`): spaces +
    40 entities + static-component merge + 10 mode entities + 281
-   dynamics (`ComputeDigestFull`, defs vendored in `testdata/wotdefs/`).
+   dynamics (`ComputeDigestFull`, defs in external `../wotdefs-2.4.0/`).
    Proven visit-for-visit by `ce/walkprobe.lua` (1242 visits),
    `ce/walkprobe2.lua` (flags/volatile), `ce/r8probe.lua` (2625 type
    tags in order), `ce/walkprobe3.lua` (entry names),
    `ce/walkfinal.lua` (entry pass/fail + gate85/varlen/descs); runs
    archived in `ce/`. Live logins carry the recomputed digest.
+   2.4.1.0 truth `c0cc08a2…` (digest-dumper, probe-verified 68 Oct-15;
+   `live.env` updated). Offline recompute OPEN: 2.4.1.0 defs extracted
+   from `res/packages/scripts.pkg` (stock ZIP; +11 mode pkgs; white_tiger/
+   fall_tanks gone from disk) walk to 310 entries (−28 WT/FT +6 new:
+   respawn framework ×4, SpecBoost, StateMachineNetworkSync; all 14
+   fail-list entries present; 299 shared entries byte-identical, 5 drift:
+   Avatar/Account/StaticDeathZoneVisual/VehicleRespawnComponent/
+   SMVehicleRespawnComponent) but hash to `941eba52…` (status 70).
+   Ruled out: fail-set singles (all ±1), missing pkgs (absent from
+   disk too), spaces/interfaces/order (same code paths), manifest
+   enablement. Next: walkfinal re-run on 2.4.1.0 (runtime fail-set) or a
+   new silent-drop construct in the 5 drifted entries.
+   Update Oct-15 (still OPEN): IDA proved the digest algorithm
+   version-invariant (FIXED_DICT visitor pseudo-diff + meth/prop/varlen/
+   entry-filter diffs, all identical incl. the conditional
+   moduleName/instanceName gate) — `implementedBy` (`true_dict.instance`
+   on RespawnFrameworkVehicleComponent/FortRushScoreComponent) is now
+   hashed raw/raw in `entdef` (no-op on 2.4.0). Membership brute-forced
+   to exhaustion (singles, all pairs, triples, 4.6M quads, 8.9M quints,
+   fail inclusions, group wipes, orders, prefixes/suffixes/ranges).
+   Fail rule discovered (live `sys.modules` + full `.pyc` census):
+   component walked ⟺ client `.pyc` exists (14/14 fails lack one; proven
+   on 2.4.0 scripts scope: exactly ExtendedSPG/
+   EnemyShotPredictorController/ArenaVehiclesInfo lack it) → 4 new
+   2.4.1.0 fails (HWArenaDrop/VehicleRemoval/PhaseProgression/
+   SpawnInfo, all `ofEntity Arena` orphans) giving `cb361e6a…`
+   (probe-verified 70, well-formed). Remainder unknown. Tools:
+   `cmd/wotwalkdump` (ptrace walk recorder — dead on sandboxed Steam
+   targets, use the mod route) + `mods/walkset-dumper-mod`
+   (`sys.modules`/`dir(BigWorld)`/`PyEntities` dumper, py2.7).
+   Import-probe (live, 403 names test-imported): ok=385 fail=18, exactly
+   the 14 + 4 HW — walk SET closed. Membership×order cross (pairs under
+   all 24 group orders, 1.8M) also miss. Brute force over.
+   Live walkdump NEVER FIRES (multiple full launch→hangar sessions,
+   armed from spawn): 0x142CAA130 uncalled yet BigWorld.digest present
+   ⇒ the game gets its digest without walking (def-cache? launcher?).
+   Def-category census: only entity/component/space/alias dirs hashed;
+   arena_defs are .xml, user_data_object_defs skipped in both versions.
+   Update Oct-15 (external, version-agnostic, still OPEN): 2.4.1 defs
+   kept as uncommitted siblings `../wotdefs-2.4.1/` (components/extensions/
+   mode_entities/space_defs, 19 mode pkgs incl. halloween-part1+2 and
+   fort_rush) + `../scripts-2.4.1/` (entities.xml + entity_defs,
+   from live scripts.pkg); `TestComputeDigest241Offline` green at the
+   current best `cb361e6a…` (offline, deterministic; truth `c0cc08a2…`
+   open). Shared-entry audit on the external trees: 304 shared, 297
+   identical, 7 diff (Avatar handleScriptEvent 5→4 STRING, Account
+   requiredVersion_2400→2410, StaticDeathZoneVisual +isCircular/
+   customBorder, VehicleRespawn +isDisabledEffect, SMVehicleRespawn
+   +isDisabledEffect via parent, Vehicle/SimulatedVehicle via alias
+   publicInfo.index UINT8→UINT16; ConcentrationMode type rename is
+   alias-neutral). IDA 2.4.1 proof (live DBs): FIXED_DICT visitor
+   `0x142CC25F0` byte-identical to 2.4.0 `0x142AB3A30` (82 insns,
+   same +0x60 raw-string slot for moduleName/instanceName with labels
+   ignored; `qword_143B10958` = "moduleName"), entry filter
+   `0x142CAA130` checks `[RDX+0x87]` like 2.4.0 — algorithm
+   version-invariant, impl raw/raw correct. Re-proved on external
+   403: singles both directions miss, HW/fort/respawn block moves
+   miss, impl 21 single + 441 mixed + 84 per-site-gate miss, pairs
+   (73,920 extra-skip + 153 include) miss, swap-pairs + 2in-1out miss,
+   single moves (147,840) + swaps + true-pkg-block/superblock moves +
+   section permutations + pkg wipes 1–3 miss, new-triples (156,849) +
+   new-quads (3.76M) miss, fail include-triples→sextuples miss,
+   joint singles/pairs/triples × 22 impl encodings miss, component
+   parent same-domain method order variants miss, duplicate aliases
+   byte-identical, user-data defs structurally excluded (no Flags).
+   Defs verified byte-identical to live #974 pkgs (549 files +
+   manifests). Sextuples over 99 new entries (1.1B) MISS (Oct-16,
+   7573 s). Content-subtlety hunt Oct-16 (all miss): full hashed-field
+   audit (exactly 7 byte-diff shared entries, all explained; every
+   241 type/flag/varlen/allowNone/impl construct has byte-identical
+   240 precedent), DatabaseLength ×6 neutral (Login bytes identical),
+   bare <Volatile/> ×6 childless neutral, alias drift = 3×
+   UINT8→UINT16 + 1 neutral rename + 1 unreferenced removal, no
+   cross-pkg name collisions, no static-static dups, zero overrides
+   in new parent chains, visit drop-1 (1141) + drop-2 (650k) + bounded
+   add-1 (696) + dup-entry + name-only fails + 208 trailers/prepends
+   miss, joints skip1×drop1 + include1×drop1 + visits×22impl miss,
+   dynamics alpha/antialpha miss, fail include singles→quads miss
+   (18/153/816/3060), per-site impl 441 mixed now genuinely verified
+   (was only global-22 + gate-42 in-tree) + mixed×skip-singles
+   (169,785) miss, extra-skip triples over all walked (9.4M) miss,
+   2in-2out swaps (11.3M) miss. Drop-three visits (239M): DIED
+   overnight Oct-16 (started 01:02, process gone by 12:18, log shows
+   only the startup line — no MATCH, no completion; untested).
+   Stood down + zz scratch deleted Oct-16 per protocol (suite green).
+   Decisive next: live 2.4.1 walk via ce/walkfinal_241.lua
+   (operator; probe static-verified Oct-16 in IDA on 2.4.1.0 — RVAs
+   land on the right visitor slots, all field offsets re-confirmed,
+   SizeOfImage gate = PE value; script now ALSO arms the r8 type-tag
+   helper, pattern-verified unique at sub_1403DAE20 — one run yields
+   walk + tag streams). IDA Oct-16: top driver sub_142CAA020, map
+   thunk sub_142CA9E80, entity walk sub_142CA1E90 are byte-equivalent
+   to 2.4.0 (unwind metadata only; write order identical) and the
+   member prelude sub_142ABC050 (2.4.0) == sub_142CCAC10 (2.4.1) is
+   instruction-identical too — gate [desc+0x55], streamSize()<0, then
+   `mov r8d,[desc+0x58]; cmp 1; jz` and writer slot +0x40 gets the
+   "varLenHeaderSize" label + r8d=varLen (IDA's decompile elides that
+   third arg) — the algorithm is provably version-invariant, so the
+   delta is in data
+   the visitor sees. Comparator ready: paste the capture as
+   ce/walkfinal_241_RUN.txt, run `go test ./entdef -run Walk241 -v`:
+   diff241 checks entries/order/pass/visits (idx/flags/vol) AND the
+   conditional varLen-u32 hash inputs (prop gate85+flags, meth
+   gate85/varlen vs the model's memberMD5 condition),
+   TestWalk241DigestFromObserved recomputes the digest with the
+   OBSERVED pass-set (closes the gap if membership was the delta),
+   TestWalk241TagsFromObserved aligns the r8 tags vs putTag emission
+   (TypeTagRecorder hook; the tag path is pinned exact by
+   TestR8TagsMatchOracle240 — 2625/2625 vs the archived 2.4.0 r8 run;
+   a model census shows 2.4.1 emits 2724 tags over the same 10 class
+   names, no new datatype class, so the live tag diff is a
+   count/order test, not a class-coverage one).
+   Ceiling of the probes: type-tree numbers
+   (allowNone/dbLen/int sizes) stay offline-only — but those are
+   byte-identical-to-240 constructs per the audit above.
+   Follow-ups miss: include-quints/sextuples among 18 fails, true-pkg
+   block moves, superblock pairs/triples, section permutations (120),
+   alpha sorts, global transforms, rotations, filesystem readdir/mtime
+   pkg orders, per-pkg alpha/reverse, entity/mode-entity alpha,
+   halloween part1/part2 groupings, per-site impl gating, FullIndex
+   zero dup/gap both versions, bool-tag cases all lowercase.
+
+   Update Oct-16 (static closure round): model inputs verified
+   byte-identical against the LIVE Steam install
+   (~/.local/share/Steam/steamapps/common/World of Tanks/eu,
+   2.4.1.0): scripts.pkg (11600 entries, all under scripts/) +
+   all 19 feature pkgs — every extension.xml SAME (19 total across
+   all 229 pkgs; halloween/extension.xml lives in part1, part2 is
+   defs-only; last_stand_hd art-only), entities.xml/components.xml
+   SAME, all 131 scripts component_defs SAME, all per-feature
+   component defs SAME, all 12 mode-entity defs SAME, interfaces/
+   + alias.xml SAME, live spaces.xml = <GeneralSpaceData/>.
+   Orchestrator (2.4.1 sub_142CA72A0, full dump) decoded: spaces →
+   CSE-40 via ECS(true) [always pass] → per-pkg entities via
+   ECS(true) [always pass] → SOE via ECS(false) [noop: entities.xml
+   has no SOE section] → old-style sub_142CA8630 [SKIPPED when
+   ClientServerEntities present] → scripts dynamics via
+   HasScriptOrTag(empty→"scripts/client") → per-pkg dynamics via
+   HasScriptOrTag(node string); spaces decider canBeOnClient is a
+   `return 1` stub; per-side loader a5=0/1 selects
+   CSE+ECS(true)/SOE+ECS(false). Consequence: entities are NEVER
+   .pyc-gated — Login (no scripts/client/Login.pyc in EITHER
+   version, only client_common/Login.pyc) still passes, in both.
+   Merged live top-level client modules (scripts.pkg 239 +
+   per-feature dirs = 523 names) cover all 385 model-pass names
+   except Login (explained); game.log Oct-15 ProbeWalk replays
+   385/18 stable over 7 runs; res_mods/ clean (gui mods only).
+   Model proven deterministic cross-version (zz_perentry: 290
+   shared ENTRY identical, exactly the 7 audited diffs differ) and
+   parse-complete (zz_struct × def cross-check: 403 entries, 22
+   flags all nesting artifacts — <Exposed/>, nested <Default/>,
+   <ReturnValues>). Exhaustive construct census: no new tag/attr/
+   attr-value in 241 (only 3 harmless leaf values: eu_2.4.1,
+   <default>TRUE</default> (defaults ignored both sides),
+   <index>INT32</index> (method arg name)); named method args have
+   34-method 240 precedent; <Parent> has 240 precedent
+   (FallTanks/SM→VehicleRespawn); FIXED_DICT+AllowNone 94 in both;
+   SMVehicleRespawn drift is knock-on via parent. ImplEncoding
+   global sweep 0-20,99 + cleared all miss (cb361e6a best);
+   consistent with prior mixed-441 miss. implementedBy fully decoded
+   (Oct-16, live .i64): FixedDictMetaDataType::getType reads the
+   element, splits at last '.', calls setCustomClassImplementor
+   (sub_142CC6550) which imports the module + getattr (true_dict
+   .instance — attr EXISTS, resolves) for per-object serialization
+   callbacks (createObjFromDict/isSameType/addToStream/
+   createFromStream at +192); digest hasher (sub_142CC25F0) hashes
+   the RAW stored halves in every branch (module-missing resets
+   +184→hash; attr-missing skips — both byte-forms swept). NOT the
+   delta. Build identity closed: live truth-producing exe sha1
+   be3263143bb37dd96aafa7db9d6a2c9bafc5a853 == repo 2.4.1.0 exe
+   (82,163,376 B both) — analysis binary == truth binary. Static now
+   exhausted at every stage (inputs/membership/order/hash/parse/
+   determinism/implt); IDA workers re-verified driver identical
+   (repo .i64 saved). Drop-three grind DIED overnight
+   Oct-16 (no result; see above) — stood down, zz scratch deleted,
+   suite re-verified green. Decisive next UNCHANGED: live walk via
+   ce/walkfinal_241.lua (operator).
 
 ## Replay — key provenance
 
@@ -833,8 +1027,11 @@ speak back. Established Sep 20:
   (table order confirms ranks; matches `ParseAvatarUpdate`); S>C owns
   `avatarUpdateVolatileProperties` (ClientInterface, not C>S as once
   assumed) alongside the packed 11B records.
-  leg — NOT the lobby keys): C>S = one family `[02 8b 58 4a][93
-  SUB…]` at ~18 Hz, `ParseMoveWith` (`lobby/battle.go`, tested)
+  leg — NOT the lobby keys): C>S = `[02][key4][SUB…]` bundles at ~18 Hz
+  (key4 = per-flow server-assigned 4B from the first 36B S>C reply, echoed
+  as every bundle head; records always bare — the Oct-12 `0x93 family`
+  was the Sep-29 key's low byte, corrected Oct-14),
+  `ParseMoveWith` (`lobby/battle.go`, tested)
   decodes the 60B/34B moveWith shape (entity + F1 + speed 7.14 + xyz
   LE f32 at [20:32]; 2535/2538 live packets parse; 60/60 sane + 59/59
   smooth steps verified); SUB = Avatar own-cell index (0x1a=26 moveWith
@@ -842,7 +1039,8 @@ speak back. Established Sep 20:
   NOT disclose, stride refuted) riding standalone + inside 18/12/06-led
   bundles; 0x18 ≠ plain stats; 0x1c/0x1d trackGun medium — Oct-12 census
   7214/7214 decrypt: 07 ×2994 var-len, 18 ×1405, 12 ×165+, 06 ×49+,
-  1c ×21, 1d ×10, 10 ×2, 07/15 ×116 bare; zero 0x1b DESPITE 9 confirmed
+  1c ×21, 1d ×10, 10 ×9 (4 lead + 5 chained), 07/15 ×116 bare; zero 0x1b
+  DESPITE 9 confirmed
   own shots (see below) — so the shoot SUB is NOT doc-order 0x1b
   (fork (a) confirmed) or firing is state-based; trigger still open,
   now well-posed with 9 true shot times (two post-shot 0x1c/0x1d
@@ -867,15 +1065,17 @@ speak back. Established Sep 20:
   (ExampleUser, 542282516) — same shape as the user's Prohorovka
   replay (ExampleUser, 4730080 = own a0); C>S moveWith entity =
   542282516; 9 S>C tracers with a0 = 542282516, all Range 152.
-  Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits):
-  bundle = `[02 8b 58 4a]([93][SUB][len16le][args] |
+  Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits),
+  CORRECTED Oct-14 (records always bare; `0x93` was the flow key's low
+  byte): bundle = `[02][key4]([SUB][len16le][args] |
   [1a][len16le][26B])*` — SUB and len coexist (0x1a/34 =
-  [93][1a][len 26][26B]); SUB = own-cell doc index statically except
+  [1a][len 26][26B]); SUB = own-cell doc index statically except
   the trigger (wire 0x10 = vehicle_shoot behaviorally; doc-order 0x1b
   never sent over 7323 C>S despite 9 confirmed shots); long bundles chain implicitly-framed
   records (per-SUB sizes open). T2 stands (a0 shooter proof).
-  TRIGGER CLOSED Oct-12 late (this battle is the firing capture):
-  C>S shoot = SUB 0x10 record `[93][10][0400][00000000]`, standalone
+  TRIGGER CLOSED Oct-12 late (this battle is the firing capture;
+  shape CORRECTED Oct-14, re-proven 8/8 on 2.4.1.0 b2):
+  C>S shoot = bare SUB 0x10 record `[10][0400][00000000]`, lead
   or chained-inner — 9/9 own shots 60–140 ms pre-tracer, zero baseline.
   OWN SHOTS CLOSED Oct-12 late (9 confirmed, recorder=542282516):
   s1 20:46:59 (275,23,-2) → 846 m; s2 20:47:16 (275,23,-1) → 841 m
@@ -894,12 +1094,12 @@ speak back. Established Sep 20:
   live (s2/s5 explodes = the 2–3 acknowledged), unspotted/ground hits
   withhold everything until battle results (7/9 silent; this capture
   holds no 1500-request/852 — results never pulled in-window).
-  Trigger CLOSED Oct-12 late: C>S shoot = SUB 0x10 record
-  `[93][10][0400][00000000]` (standalone-outer ×4, chained-inner ×5),
+  Trigger CLOSED Oct-12 late: C>S shoot = bare SUB 0x10 record
+  `[10][0400][00000000]` (lead ×4, chained-inner ×5),
   one per shot 60–140 ms before its S>C tracer (9/9 both directions,
   zero baseline over 7323 C>S); builder + recognizer in
-  `lobby/battle.go` (`BuildShootTrigger` reproduces a captured trigger
-  byte-identically, synthetic tests green). Behaviorally
+  `lobby/battle.go` (`BuildShootTrigger` takes the flow key4; genuine
+  Sep-29 + Oct-14 vectors pinned in tests). Behaviorally
   vehicle_shoot() (sole cell call in decompiled Avatar.shoot; no other
   client caller; equipment path excluded); wire index ≠ doc order (0x1b
   never sent) and the 4 zero bytes vs 0-arg defs stay open statically.
@@ -942,12 +1142,19 @@ speak back. Established Sep 20:
   no explode; two-sided offline 13/23 joined with HIGH/MED grading,
   past-only live core), 24-kill feed
   via ParseBattleDeaths (deathOrder victim/killer, counters 1–24;
-  6-record `0b a8 02` death bundle closed: 03/1a-fixed/10 all 24/24),
+  6-record `0b a8 02` death bundle closed: 03/1a-fixed/10 all 24/24;
+  Oct-14: per-battle pair (0c23 b2 28/28 incl. own #8 at 05:12,
+  0c99 b1 2/2, 0c92/08b6 next sessions) matched by nothing, anchors
+  + counters + roster carry it; b1 own single trigger drew no tracer
+  (unserved-shot anomaly, open: burst loss vs server drop)),
   per-shot shell kind (tracer flag byte 3: HEAT/HE/AP/APCR),
   shell blast fields + ballistics (MatchShell/FlightTime/IncomingShot;
   Sweden: 132 evaluated, 0 warnings — correct, nearest Hummel impact
-  217 m), snapshot decoder (ScanSnapshots: 5458 records, 19 tokens —
-  token→entity map OPEN with completed negative survey: global affine
+  217 m), snapshot decoder (ScanSnapshots: 5458 records, 19 tokens;
+  Oct-14: 324B mixed trains (same 13B packing, event smalls
+  interleaved, run gate harvests 0.5/dg) covered by gate-free
+  `ScanSnapshotTokens` (token at fixed +2; presence now folds tokens)
+  — token→entity map OPEN with completed negative survey: global affine
   rejected at chance, own never in snapshots (structural), C>S track
   chaos, yaw≠movement; needs denser anchors or in-process scale),
   type-0x75 markers (`ScanBattleMarkers`: 5 ENEMY+ALLY links + 11 ally
@@ -1111,7 +1318,15 @@ speak back. Established Sep 20:
   ALWAYS 32956, 13B trailer byte-constant
   (`687720000000000f0040771b00`, 19/19 across days) — magic, not
   routing info; the redirect pool is STABLE across Sep-17→Oct-01
-  (83.229.15.109, 52.57.68.91, 63.182.9.216 recur). 1a76 session
+  (83.229.15.109, 52.57.68.91, 63.182.9.216 recur) and Oct-14 adds
+  in-window legs (stage-2s .212:32825/.213:32882/.215:32862+:32894,
+  arenas .77:32815/.71:32811/.67:32810/.69:32815/.77:32811). Oct-14
+  relay guard (same file: `parseRedirectAt` now skips targets outside
+  32810-32999): battle blobs hold coincidental 44..000001 cores
+  (34.160.176.0:4864/13312, 7.0.48.214:50116) that the relay followed
+  into total blackholes, freezing then disconnecting two mid-battle
+  sessions; fail-open now (game follows them direct, relay stays
+  healthy). 1a76 session
   dict + 1a5c queue blob re-verified here.
   148B/84B end with a (98,25) carrier (28B: `[98][1900]` + 25B
   args; `BuildChatCommandFromClient` frames it, both vectors pinned
@@ -1244,7 +1459,7 @@ speak back. Established Sep 20:
 
 ## Potential todos (untouched game surface, Oct-02)
 
-1. Event-mode entities in vendored `testdata/wotdefs` (`white_tiger`,
+1. Event-mode entities in external `../wotdefs-2.4.0` (`white_tiger`,
    `fun_random`, `last_stand`, `comp7*`, `frontline`, `story_mode`,
    battle-royale `Loot`/`Mine`/`ThunderStrike`/`Placement`/
    `InfluenceZone`): data archaeology, zero live needs — DONE Oct-02:
@@ -1322,12 +1537,20 @@ speak back. Established Sep 20:
    flavor; Meta checksum CLOSED Oct-11 (263845007 = REGULAR SELF,
    BP-integrated, reproduced by real py2.7 config execution) with
    the full 62-name map in `../docs/NETWORK_PROTOCOL.md` §17;
-   open: tuple semantics (stream-handle reading) and the res=0 vs
-   RES_STREAM consumer synthesis (C++ 0x45 dispatcher unlocated).
-   `mods/response-logger-mod` (Oct-12, 2.4.0.2, compiled) hooks the
-   Python consumer side (onCmdResponse*, _subscribeForStream,
-   __onGetResponse, __onSyncStreamComplete) — one hangar-idle +
-   stats-UI game run closes both via python.log shapes.
+   consumer synthesis CLOSED Oct-14 (2.4.1.0 live run, 156 logger
+   lines in game.log — hooks armed for onCmdResponse/onCmdResponseExt/
+   _subscribeForStream; BattleResultsCache/SyncController hook paths
+   need 2.4.1.0 module names): res=1 always subscribes (221/223/228/
+   232/233/234), res=2 never (222), res=0 empty acks, res=-10 failures
+   (226 'Not found'); battle-852s pair to onCmdResponse(req,1)+
+   subscribe 2 ms after S>C (233 post-b2, 234 next session); C>S pulls
+   decoded as Port-routed `doCmdInt3(req, 1500, arenaUID u64, 0, 0)`
+   (req allocator-derived, NOT 227 — that was one session's req) with
+   live arenaUIDs `0xf29ccf6a14590120`/`0x200195996acfa588`, then
+   `doCmdInt3(202, 1501, arenaUID, 0, 0)` received-ack; 226 dual fate
+   (Ext str[113] vs -10) and 230's 22 KB ext string observed live;
+   open: tuple second-elem semantics, stream-chunk framing past the
+   852, res=0-wire vs res=1-consumer mapping in the C++ dispatcher.
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
    `eu2-mitmproxy-flows`) — DONE Oct-02 (see `../docs/NETWORK_PROTOCOL.md`
    §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,

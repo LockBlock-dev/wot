@@ -35,6 +35,7 @@ func main() {
 	pattern := flag.String("pattern", keydump.DefaultPattern, "hex signature with ?? wildcards")
 	keyfile := flag.String("keyfile", "wotkeys.txt", "append timestamped key lines here")
 	maxhits := flag.Int("maxhits", 20, "stop after this many dumps (0 = default 20)")
+	force := flag.Bool("force", false, "attempt ptrace even on sandboxed targets (kernel decides)")
 	timeout := flag.Duration("timeout", 0, "overall deadline (0 = default 10m)")
 	wait := flag.Duration("wait", 0, "poll for the game process/image instead of failing when absent (e.g. 5m)")
 	flag.Parse()
@@ -51,6 +52,7 @@ func main() {
 		Mask:    mask,
 		KeyFile: *keyfile,
 		MaxHits: *maxhits,
+		Force:   *force,
 		Timeout: *timeout,
 		WaitFor: *wait,
 	}

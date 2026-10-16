@@ -273,7 +273,8 @@ func codeRegions(pid int, exe string) ([]memRegion, error) {
 		}
 		r := memRegion{start, end}
 		all = append(all, r)
-		if len(fields) >= 6 && strings.Contains(fields[5], exe) {
+		// Pathname is fields[5:] joined (spaces in "World of Tanks").
+		if len(fields) >= 6 && strings.Contains(strings.Join(fields[5:], " "), exe) {
 			named = append(named, r)
 		}
 	}
@@ -287,7 +288,7 @@ func codeRegions(pid int, exe string) ([]memRegion, error) {
 }
 
 func (t *tracer) attach() error {
-	if sandboxedTarget(t.pid) {
+	if sandboxedTarget(t.pid) && !t.cfg.Force {
 		// Steam pressure-vessel runs the game NoNewPrivs in a
 		// single-UID user namespace. ptrace there is a trap: ATTACH
 		// stops every thread (SIGSTOP lands) but tracership never
@@ -356,6 +357,7 @@ func (t *tracer) attach() error {
 		return fmt.Errorf("keydump: open mem: %w", err)
 	}
 	t.mem = f
+	fmt.Printf("keydump: %d threads stopped\n", len(t.tids))
 	return nil
 }
 
@@ -427,13 +429,18 @@ func (t *tracer) snapshotTids() []int {
 	return append([]int(nil), t.tids...)
 }
 
-func (t *tracer) findHit() error {
+func (t *tracer) findHit() error { return t.scanHit(false) }
+
+func (t *tracer) findHitQuiet() error { return t.scanHit(true) }
+
+func (t *tracer) scanHit(quiet bool) error {
 	regions, err := codeRegions(t.pid, t.cfg.ExeName)
 	if err != nil {
 		return err
 	}
 	var hits []uint64
 	var total uint64
+	st0 := time.Now()
 	for _, r := range regions {
 		size := r.end - r.start
 		if size == 0 || size > 512<<20 {
@@ -450,10 +457,12 @@ func (t *tracer) findHit() error {
 	}
 	switch len(hits) {
 	case 0:
-		return fmt.Errorf("keydump: pattern not found in %d code regions (%.1f MB scanned; wrong game version? re-derive via IDA sub_140E6E210)", len(regions), float64(total)/1048576)
+		return fmt.Errorf("keydump: pattern not found in %d code regions (%.1f MB scanned in %v; wrong game version? re-derive via IDA sub_140E6E210)", len(regions), float64(total)/1048576, time.Since(st0))
 	case 1:
 		t.hitVA = hits[0]
-		fmt.Printf("keydump: pattern hit at %x, arming breakpoint\n", t.hitVA)
+		if !quiet {
+			fmt.Printf("keydump: pattern hit at %x, arming breakpoint\n", t.hitVA)
+		}
 		return nil
 	default:
 		return fmt.Errorf("keydump: pattern hits %d addresses %x (refine the pattern, refusing to guess)", len(hits), hits)
@@ -531,6 +540,11 @@ func (t *tracer) run() error {
 			sig := 0
 			if ws.Stopped() {
 				sig = int(ws.StopSignal())
+			}
+			// Never re-inject job-control stops (see walk_linux.go):
+			// CONT(SIGSTOP) parks the thread again.
+			if sig == int(unix.SIGSTOP) || sig == int(unix.SIGTSTP) || sig == int(unix.SIGTTIN) || sig == int(unix.SIGTTOU) {
+				sig = 0
 			}
 			unix.PtraceCont(wpid, sig) //nolint:errcheck // forward foreign stops
 			continue

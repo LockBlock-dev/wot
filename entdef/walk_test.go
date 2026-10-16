@@ -2,20 +2,22 @@ package entdef
 
 // Live-walk regression tests: the model's predicted visit stream must
 // match the game's digest walk exactly (names, order, FullIndex/legacy,
-// flags, volatile). The run file is a paste from ce/walkfinal.lua
+// flags, volatile; and the r8 datatype tag stream against the 2.4.0
+// oracle). The run file is a paste from ce/walkfinal.lua
 // (walkfinal_RUN.txt), which supersedes the walkprobe/walkprobe2/
 // walkprobe3 runs (same visits plus entry pass/fail, gate85, varlen,
 // descriptor pointers). Skips when absent; the digest oracle test
 // below covers CI.
 
 import (
+	"encoding/hex"
 	"os"
 	"regexp"
 	"strconv"
 	"testing"
 )
 
-const testWotdefsDir = "../testdata/wotdefs"
+const testWotdefsDir = "../../wotdefs-2.4.0"
 
 type walkVisit struct {
 	kind  string // "prop" | "meth"
@@ -177,4 +179,45 @@ func TestWalkFlagsMatchProbe(t *testing.T) {
 			t.Fatalf("diverge at %d: model=%+v obs=%+v", i, exp[i], obs[i])
 		}
 	}
+}
+
+// TestR8TagsMatchOracle240 pins the model's datatype tag stream (every
+// putTag emission: type dispatch names, NUL-terminated) against the
+// archived live 2.4.0 r8 run (ce/r8probe_20260920_10000.txt, 2625
+// tags) — the same emission path TestWalk241TagsFromObserved relies on
+// for the 2.4.1 capture, proven exact here. The walk hashes the pinned
+// 2.4.0 digest in the same call, so a tag match implies the tag stream
+// really is the walk's.
+func TestR8TagsMatchOracle240(t *testing.T) {
+	if _, err := os.Stat(testWotdefsDir); err != nil {
+		t.Skipf("external 2.4.0 defs unavailable: %v", err)
+	}
+	raw, err := os.ReadFile("../../ce/r8probe_20260920_10000.txt")
+	if err != nil {
+		t.Skipf("r8 archive unavailable: %v", err)
+	}
+	re := regexp.MustCompile(`\[r8probe\] hit #\d+ R8=[0-9A-Fa-f]+ str="([^"]*)"`)
+	var obs []string
+	for _, m := range re.FindAllStringSubmatch(string(raw), -1) {
+		obs = append(obs, m[1])
+	}
+	var tags []string
+	TypeTagRecorder = &tags
+	defer func() { TypeTagRecorder = nil }()
+	d, err := DigestVersion(testWotdefsDir, testDefsDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(d[:]); got != Truth240 {
+		t.Fatalf("digest = %s, want %s", got, Truth240)
+	}
+	if len(tags) != len(obs) {
+		t.Fatalf("model tags=%d observed=%d", len(tags), len(obs))
+	}
+	for i := range tags {
+		if tags[i] != obs[i] {
+			t.Fatalf("tag diverge at %d: model=%q observed=%q", i, tags[i], obs[i])
+		}
+	}
+	t.Logf("r8 tags match: %d tags in live order", len(tags))
 }

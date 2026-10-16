@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/binary"
 	"testing"
 )
 
@@ -127,5 +128,46 @@ func TestMitmPacketShapes(t *testing.T) {
 	// Non-login datagram forwards untouched (error, no rewrite).
 	if _, _, err := MitmPacket([]byte{1, 2, 3}, m, &s.PublicKey); err == nil {
 		t.Fatal("short datagram must fail")
+	}
+}
+
+func TestMitmLoginParamsFromPacket(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Skip("no RSA key")
+	}
+	// Hand-built cleartext: flags + 4 packed strings + digest + nonce.
+	clear := []byte{0x01}
+	for _, s := range []string{`{"login":"a","temporary":"0"}`, "pwd", "0123456789abcdef", `{"lang_id":"en"}`} {
+		clear = appendPackedString(clear, s)
+	}
+	var dg [16]byte
+	for i := range dg {
+		dg[i] = byte(i)
+	}
+	clear = append(clear, dg[:]...)
+	clear = append(clear, 0x78, 0x56, 0x34, 0x12)
+	cipher, err := encryptChunks(clear, &priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Minimal LoginApp C>S framing around the cipher.
+	pkt := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x00, 0x00}
+	var tmp [2]byte
+	binary.LittleEndian.PutUint16(tmp[:], uint16(len(cipher)+5))
+	pkt = append(pkt, tmp[:]...)
+	pkt = append(pkt, 0x11, 0x22, 0x33, 0x44, 0x00, 0x00)
+	pkt = append(pkt, 0x05, 0x00, 0x01, 0x17, 0x01)
+	pkt = append(pkt, cipher...)
+	pkt = append(pkt, 0x02, 0x00)
+	got, err := MitmLoginParamsFromPacket(pkt, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Flags != 0x01 || got.Username != `{"login":"a","temporary":"0"}` ||
+		got.Password != "pwd" || got.EncKey != "0123456789abcdef" ||
+		got.ClientCtx != `{"lang_id":"en"}` || got.Digest != dg ||
+		got.Nonce != 0x12345678 {
+		t.Fatalf("mismatch: %+v", got)
 	}
 }

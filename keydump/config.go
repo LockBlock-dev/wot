@@ -15,6 +15,10 @@ type Config struct {
 	MaxHits int
 	Timeout time.Duration
 	WaitFor time.Duration
+	// Force bypasses the sandboxed-target refusal and lets the kernel
+	// decide (opt-in only: a failed attach can briefly freeze the game
+	// until detach CONTs it; every exit path restores + CONTs).
+	Force bool
 }
 
 func (c *Config) withDefaults() error {

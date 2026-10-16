@@ -144,7 +144,6 @@ func (f *LiveFeed) FeedSC(ts time.Time, app []byte) []string {
 	explodes := ScanBattleExplodes(app)
 	deaths := ParseBattleDeaths(app)
 	pairs, spots := ScanBattleMarkers(app)
-	snaps := ScanSnapshots(app)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -152,11 +151,11 @@ func (f *LiveFeed) FeedSC(ts time.Time, app []byte) []string {
 	// Presence needs no observer (tokens are anonymous until the
 	// map closes), so it folds every packet — including creation-bulk
 	// windows the offline CLI also counts.
-	if len(snaps) > 0 {
+	if toks := ScanSnapshotTokens(app); len(toks) > 0 {
 		if f.presence == nil {
 			f.presence = NewPresence()
 		}
-		f.presence.Update(ts, snaps)
+		f.presence.UpdateTokens(ts, toks)
 	}
 	if f.obs == nil && !f.built {
 		if diag, done := f.collect(ts, app); done {

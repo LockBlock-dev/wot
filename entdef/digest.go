@@ -35,9 +35,17 @@ var (
 	// DigestVarLen hashes varLen header-size u32 values OSE-style
 	// (fork +64 handler may be label-only/no-op instead).
 	DigestVarLen = false
-	// DigestMethodVarLen hashes method VariableLengthHeaderSize (IDA
-	// sub_142ABC050: the +64 slot hashes u32(varLen) when the gate
-	// holds; 7 client methods in 2.4.0 carry Var != 1, all do fire).
+	// DigestMethodVarLen hashes method VariableLengthHeaderSize. The
+	// member prelude is instruction-identical on both builds (IDA
+	// sub_142ABC050 2.4.0 == sub_142CCAC10 2.4.1): gate [a1+0x55],
+	// streamSize()<0, then `mov r8d,[a1+0x58]; cmp r8d,1; jz` and
+	// writer slot +0x40 called with the "varLenHeaderSize" label and
+	// r8d = varLen as a third arg the decompiler elides. 8 exposed
+	// methods in 2.4.0 carry Var != 1 (Account.showGUI/setParticipants,
+	// Avatar.updateSpawnList/explodeProjectile/updateQuestProgress/
+	// setUpdatedGoodiesSnapshot, FLAvatarComponent.updateRespawnVehicles/
+	// updateRespawnInfo); ce/walkfinal_RUN.txt shows all 8 firing
+	// (varlen=2, gate85=1) and the closed digest confirms the writes.
 	DigestMethodVarLen = true
 	// DigestVarLenLabel hashes the "varLenHeaderSize" label when the
 	// varLen condition holds (the fork's +64 call passes the label but
@@ -291,6 +299,12 @@ func (m *Method) isExposed() bool {
 
 // Oracle-probing variants (kept for live-server experiments).
 var (
+	// ScriptsEntityDefsDir overrides the scripts entity-defs
+	// interfaces dir used by the component interface chain (default:
+	// the 2.4.0.0 shipped tree the pinned tests walk). Set it when
+	// computing the digest for another client version (e.g. 2.4.1.0
+	// defs extracted from res/packages/scripts.pkg).
+	ScriptsEntityDefsDir = ""
 	// SkipEmptyEntities drops entities with no props and no methods.
 	SkipEmptyEntities = true
 	// FullFlagMask, when set, hashes all dataFlags bits (not just dist).
@@ -337,6 +351,19 @@ func entryIncluded(e *Entity, statics []*Entity) bool {
 		return false
 	}
 	return true
+}
+
+// Skip241 lists the extra 2.4.1.0 walk fails beyond the built-in 14
+// (ProbeWalk import-probe, game.log Oct-15: ok=385 fail=18 total=403).
+// Pass it as skip to ComputeDigestFull with the external 2.4.1 defs
+// (sibling dirs wotdefs-2.4.1/ + scripts-2.4.1/, kept out of this repo);
+// the 14 built-ins are still skipped via failEntries. Current best with
+// this set is cb361e6a… vs truth c0cc08a2… (open).
+var Skip241 = map[string]bool{
+	"HWArenaDropComponent":             true,
+	"HWArenaVehicleRemovalComponent":   true,
+	"HWArenaPhaseProgressionComponent": true,
+	"HWArenaSpawnInfoComponent":        true,
 }
 
 // BuildMapOrder assembles the full digest walk order: spaces, scripts
@@ -439,6 +466,37 @@ func BuildMapOrder(wotdefsDir, defsDir string) ([]MapEntry, error) {
 		entries = append(entries, MapEntry{Ent: st})
 	}
 	return entries, nil
+}
+
+// Truth240 is the live 2.4.0 BigWorld.digest (digest-dumper mod,
+// 2026-09-17, re-dumped 2026-09-20 identical). The LoginApp server
+// accepts it (dummy creds then fail with status 68, not 70).
+const Truth240 = "5df886f75e73b33cff9d87fb9c69389c"
+
+// Truth241 is the live 2.4.1.0 BigWorld.digest (digest-dumper mod,
+// game.log Oct-15; dummy-creds probe → status 68). Offline recompute
+// is still OPEN (current best cb361e6a… → status 70).
+const Truth241 = "c0cc08a2f494f7087112009ce1d002db"
+
+// DigestVersion computes the offline login digest for one client version
+// from external (uncommitted) def trees. It owns the globals both inputs
+// depend on (alias cache, ScriptsEntityDefsDir, ImplEncoding): it resets
+// them, computes, and restores them, so back-to-back versions in one
+// process stay isolated. wotdefsDir holds components/extensions/
+// mode_entities/space_defs; entityDefsDir holds entities.xml +
+// entity_defs. skip lists extra walk fails beyond the built-in 14
+// (e.g. Skip241).
+func DigestVersion(wotdefsDir, entityDefsDir string, skip map[string]bool) ([16]byte, error) {
+	prevDir, prevImpl := ScriptsEntityDefsDir, ImplEncoding
+	ResetAliases()
+	ScriptsEntityDefsDir = entityDefsDir
+	ImplEncoding = 0
+	defer func() {
+		ScriptsEntityDefsDir = prevDir
+		ImplEncoding = prevImpl
+		ResetAliases()
+	}()
+	return ComputeDigestFull(wotdefsDir, entityDefsDir, skip)
 }
 
 // ComputeDigestFull hashes the full client map (spaces + entities +

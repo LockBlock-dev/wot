@@ -603,6 +603,18 @@ func parseRedirectAt(clear []byte) (*net.UDPAddr, int, bool) {
 			if port < 1024 {
 				continue
 			}
+			// Manager window (cf. validSessionRecord in hijack.go): every
+			// genuine redirect target across all EU2+p5 captures lands
+			// 32810-32999. Battle blobs can hold coincidental 44..000001
+			// cores pointing out-of-window (Oct-14: 34.160.176.0:4864/
+			// 13312 and 7.0.48.214:50116 inside arena state, both
+			// followed live by the relay into total blackholes that froze
+			// then disconnected mid-battle sessions); skipping them is
+			// fail-open (the game follows the bytes directly and only that
+			// flow dies, the relay stays healthy).
+			if port < 32810 || port > 32999 {
+				continue
+			}
 			return &net.UDPAddr{IP: ip, Port: port}, i, true
 		}
 	}

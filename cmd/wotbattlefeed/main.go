@@ -448,8 +448,8 @@ func main() {
 		if p.dir != "S>C" {
 			continue
 		}
-		if recs := lobby.ScanSnapshots(p.app); len(recs) > 0 {
-			pr.Update(p.ts, recs)
+		if toks := lobby.ScanSnapshotTokens(p.app); len(toks) > 0 {
+			pr.UpdateTokens(p.ts, toks)
 		}
 	}
 	fmt.Printf("presence records=%d tokens=%d\n", pr.Total, len(pr.Count))

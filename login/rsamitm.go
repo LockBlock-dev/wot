@@ -204,6 +204,26 @@ func extractLoginParams(pkt []byte) (params []byte, start, end int, encrypted bo
 	return pkt[ps:pe], ps, pe, pkt[body+4] == 0x01, nil
 }
 
+// MitmLoginParamsFromPacket decrypts the RSA-encrypted LogOnParams out
+// of one captured C>S LoginApp datagram with our MITM private key.
+// Offline census helper (version-drift checks on username/clientContext
+// keys across client builds): values stay in the returned struct, and
+// callers must log keys/lengths only, never secrets.
+func MitmLoginParamsFromPacket(pkt []byte, mitmPriv *rsa.PrivateKey) (LogOnParams, error) {
+	cipher, _, _, encrypted, err := extractLoginParams(pkt)
+	if err != nil {
+		return LogOnParams{}, err
+	}
+	if !encrypted {
+		return LogOnParams{}, fmt.Errorf("wotlogin: login params not encrypted")
+	}
+	clear, err := decryptChunks(cipher, mitmPriv)
+	if err != nil {
+		return LogOnParams{}, err
+	}
+	return parseLogOnParamsClear(clear)
+}
+
 // MitmPacket inspects one C>S LoginApp datagram. If it carries a login
 // message RSA-encrypted to mitmPriv, it returns a rebuilt datagram
 // (same bytes except re-encrypted params) plus the login Blowfish key.

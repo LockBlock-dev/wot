@@ -7,13 +7,23 @@ import (
 )
 
 // Battle (CellApp arena) client→server application messages, Sep-29
-// proxy session (decryptable arena capture, crafts game EU2 — all
-// shapes below verified against it; tests stay synthetic).
+// proxy session + Oct-14 2.4.1.0 sessions (decryptable arena captures —
+// all shapes below verified against genuine wire across versions;
+// tests mix synthetic fixtures with pinned genuine vectors).
 //
-// Wire why: every C>S battle packet opens `[02][8b 58 4a]` then
-// Mercury messages, each length-prefixed: `[0x93][SUB][len16le]
-// [args]` (base-routed Avatar cell call; SUB = Avatar own-cell doc
-// index for the mapped methods (interfaces excluded), except the shoot
+// Wire why: every C>S battle bundle opens `[02][key4]` then bare
+// records, each length-prefixed: `[SUB][len16le][args]` (base-routed
+// Avatar cell call; SUB = Avatar own-cell doc index for the mapped
+// methods, interfaces excluded) and `[0x1a][len16le][26B position
+// block]` (len always 26: entity + nonce + speed + xyz + tail;
+// 3357/3357 exact). `key4` is the 4B value the server assigns per flow
+// in the flow's first 36B S>C reply (same slot both versions); the
+// client echoes it as every C>S bundle head, acks included (Sep-29
+// `8b584a93`, Oct-14 `831e5b63`/`16e4d857`/`92062e02`). The Oct-12
+// `0x93 family` model mistook the Sep-29 key's low byte for a
+// per-record tag (corrected Oct-14: chained-inner records were bare
+// all along; records were always bare, only the key varies).
+// Except the shoot
 // trigger (wire 0x10 ≠ doc 0x1b — see BattleSubShoot); 0x1a=26 moveWith (position smooth-track
 // proven), 0x1d=29 trackRelative (relative-scale V3 proven), rest by
 // shape/count: 0x18=24 reportClientStats, 0x07=7 discloseEntities,
@@ -21,30 +31,31 @@ import (
 // shoot trigger (CLOSED, see BattleSubShoot — not doc-order 0x1b),
 // 0x1c=28 trackWorldPointWithGun; IDA
 // tables confirm the messaging layer beneath)
-// and `[0x1a][len16le][26B position block]` (len always 26: entity +
-// nonce + speed + xyz + tail; 3357/3357 exact). A standalone 0x1a
-// bundle is one [93][1a][len 26][26B] message; other SUBs prepend
-// their method args and usually append the position message (e.g.
-// 0x07/44 = [93][07][len 7][7B] + [1a][len 26][29B]). Longer bundles
+// A standalone 0x1a bundle is one [1a][len 26][26B] message; other SUBs
+// prepend their method args and usually append the position message
+// (e.g. 0x07/44 = [07][len 7][7B] + [1a][len 26][29B]). Longer bundles
 // (63B+) carry extra implicitly-framed records between args and
 // trailer (per-SUB sizes open). The shoot trigger is wire SUB 0x10
-// ([93][10][len 4][00000000], standalone or chained inner — 9/9 own
-// shots 60–140 ms pre-tracer, zero baseline; behaviorally
-// vehicle_shoot(), the only cell call in the decompiled Avatar.shoot
-// path; the doc index (own[27]) and 0x1b never appear on wire).
+// ([10][len 4][00000000], lead or chained inner — 9/9 own shots
+// 60–140 ms pre-tracer (Sep-29) and 8/8 at 49–118 ms (Oct-14 b2),
+// zero baseline both; behaviorally vehicle_shoot(), the only cell call
+// in the decompiled Avatar.shoot path; the doc index (own[27]) and
+// 0x1b never appear on wire).
 // S>C battle traffic is tick + opaque entity blobs (NOT lobby smalls:
 // the apparent `1a ba` is a misparse — neither body- nor
 // total-length framing fits; snapshots are 276/292B alternating with
 // 13B `[35 00][11B]` records per §14). Lengths/hashes/names/counts on
 // screen only — positions are gameplay data, never logged.
 const (
-	// BattleC2SHead is the 4B head of every C>S battle app bundle.
+	// BattleC2SHead0 is the bundle tag opening every C>S battle app.
 	BattleC2SHead0 = 0x02
-	BattleC2SHead1 = 0x8b
-	BattleC2SHead2 = 0x58
-	BattleC2SHead3 = 0x4a
-	// BattleFamily tags Avatar cell calls (cf. lobby A1 tags).
-	BattleFamily = 0x93
+	// BattleHeadLen is the bundle head length: tag + flow key.
+	BattleHeadLen = 5
+	// BattleKeyLen is the flow-key length: the 4B value the server
+	// assigns per flow in the first 36B S>C reply, echoed by the
+	// client (Sep-29 8b584a93, Oct-14 per-flow values). Opaque —
+	// never parsed, never matched.
+	BattleKeyLen = 4
 	// Battle SUBs (Avatar own-cell indices; see above for grading).
 	BattleSubMoveWith      = 0x1a // 26 vehicle_moveWith(UINT8): CLOSED
 	BattleSubReportStats   = 0x18 // 24 reportClientStats(6×f32): medium
@@ -57,9 +68,11 @@ const (
 	// index (own[27] vehicle_shoot; 0x1b never appears on wire over
 	// 7323 C>S despite 9 confirmed shots). Wire truth (Sep-29 Sweden,
 	// 9/9 own tracers paired 60–140 ms later, zero occurrences
-	// elsewhere in the battle): a [10][len 4][00000000] record, either
-	// standalone-outer (0x10-led bundles) or chained-inner (inside
-	// 07/18-led bundles). Behaviorally vehicle_shoot(): the decompiled
+	// elsewhere in the battle): a bare [10][len 4][00000000] record,
+	// either lead or chained-inner (inside 07/18-led bundles; records
+	// carry no family tag — the Oct-12 `[93][10]` reading was the flow
+	// key's low byte abutting a lead record, corrected Oct-14).
+	// Behaviorally vehicle_shoot(): the decompiled
 	// Avatar.shoot (Avatar.pyc) calls self.cell.vehicle_shoot() with no
 	// args and no accompanying cell call, and no other client code
 	// references vehicle_shoot; the only other 0x10 candidate
@@ -71,7 +84,7 @@ const (
 	// over; the index mismatch (16 vs 27) is open statically.
 	BattleSubShoot = 0x10
 	// BattleShootArgsLen is the trigger record's fixed arg length: 4
-	// zero bytes (9/9 identical on wire).
+	// zero bytes (9/9 identical on Sep-29 wire, 8/8 on Oct-14 b2).
 	BattleShootArgsLen = 4
 	// BattleTrailerTag opens the position trailer ending every
 	// position-carrying call.
@@ -110,7 +123,7 @@ type AvatarUpdate struct {
 }
 
 // MoveWith is a decoded 0x1a vehicle_moveWith call (34B app):
-// `[02 8b 58 4a][93][1a][1a00][entity u32][nonce u32][speed f32]
+// `[02][key4][1a][1a00][entity u32][nonce u32][speed f32]
 // [xyz 3×f32][tail 2B]`. Entity is battle-constant (0x20529314 in
 // the Sep-29 session — the recorder's own entity: battle-start head,
 // S>C tracer a0 and this field all agree on 542282516); Nonce is per-packet uniform-random (distinct=n,
@@ -133,10 +146,10 @@ func ParseMoveWith(app []byte) (MoveWith, bool) {
 	if len(app) != BattlePosLen {
 		return m, false
 	}
-	if app[0] != BattleC2SHead0 || app[1] != BattleC2SHead1 || app[2] != BattleC2SHead2 || app[3] != BattleC2SHead3 {
+	if app[0] != BattleC2SHead0 {
 		return m, false
 	}
-	if app[4] != BattleFamily || app[5] != BattleSubMoveWith {
+	if app[BattleHeadLen] != BattleSubMoveWith {
 		return m, false
 	}
 	if app[6] != 0x1a || app[7] != 0x00 {
@@ -193,16 +206,18 @@ func ParseTrailer(app []byte) (Trailer, bool) {
 }
 
 // ParseAvatarUpdate decodes the 60B/34B C>S position shape. ok=false
-// for any other shape (offsets unverified there — no guessing).
+// for any other shape (offsets unverified there — no guessing). Field
+// offsets are head-length invariant (5B head in both versions), only
+// the head bytes themselves are opaque.
 func ParseAvatarUpdate(app []byte) (AvatarUpdate, bool) {
 	var u AvatarUpdate
 	if len(app) != BattlePosLen {
 		return u, false
 	}
-	if app[0] != BattleC2SHead0 || app[1] != BattleC2SHead1 || app[2] != BattleC2SHead2 || app[3] != BattleC2SHead3 {
+	if app[0] != BattleC2SHead0 {
 		return u, false
 	}
-	if app[4] != BattleFamily || app[5] != BattleSubMoveWith {
+	if app[BattleHeadLen] != BattleSubMoveWith {
 		return u, false
 	}
 	u.X = math.Float32frombits(binary.LittleEndian.Uint32(app[BattlePosOff:]))
@@ -619,7 +634,11 @@ func ParseBattleVehicles(bulk []byte) map[uint32]VehicleRef {
 		var nation uint8
 		var id uint16
 		switch bulk[rend] {
-		case 0x0f:
+		case 0x0f, 0x11:
+			// 0x11 carries the same 2-byte IntCD as 0x0f (pinned on
+			// the genuine b1 own-Challenger block: flags 0x04 with
+			// one optdev slot fitted; vehicle + flags walk land
+			// exactly — single-sample shape, table-gated below).
 			if rend+3 > len(bulk) {
 				continue
 			}
@@ -659,8 +678,10 @@ type MountedModules struct {
 
 // ParseBattleMounts sections each block head's inline mounted-modules
 // compactDescr and returns per-entity module IDs. Wire layout (Sep-29
-// Sweden, 30/30): head `[ent-LE][01][lenA][A...]` then a tag byte —
-// 0x0f carries the 2-byte vehicle IntCD, 0x10 the 3-byte extended
+// Sweden, 30/30; 0x11 form pinned Oct-14 b1): head
+// `[ent-LE][01][lenA][A...]` then a tag byte — 0x0f carries the
+// 2-byte vehicle IntCD (0x11 the same shape, seen with a fitted
+// optdev flags byte), 0x10 the 3-byte extended
 // form (ids > 255) — followed DIRECTLY by the mounted descriptor:
 // `[chassis,engine,fuelTank,radio LE u16][turret,gun LE u16]`
 // (12B, mounted pair only — the client owns the unlock tree locally,
@@ -686,7 +707,8 @@ func ParseBattleMounts(bulk []byte, tab ComponentTable) map[uint32]MountedModule
 		var id uint16
 		var hlen int
 		switch bulk[rend] {
-		case 0x0f:
+		case 0x0f, 0x11:
+			// Same 2-byte IntCD under 0x11 (see ParseBattleVehicles).
 			if rend+3 > len(bulk) {
 				continue
 			}
@@ -892,13 +914,21 @@ var deathOrderKey = []byte("deathOrder")
 
 // ParseBattleDeaths extracts kill events from one decrypted S>C
 // battle app body. Wire framing (Sep-29 Sweden, 24/24 identical):
-// `[55][0a]deathOrder[71 02][4b ctr][73 2e][0b a8 02 10][XX 78 01]
+// `[55][0a]deathOrder[71 02][4b ctr][73 2e][VV WW 02 10][XX 78 01]
 // [victim u32 LE][killer u32 LE]` — victim first (a body naming a
 // survivor second never occurs; the counter runs 1,2,3… per death).
-// XX varies per event (damage or timing, open — only the constant
-// `78 01` tail is checked). Victim and killer must both be nonzero;
-// otherwise the window is skipped, never guessed. Self-kills name the
-// same entity twice (server records suicides that way).
+// VV WW is a per-battle pair, opaque: `0b a8` (Sep-29), `0c 23`
+// (Oct-14 b2, 28/28), `0c 99` (Oct-14 b1, 2/2), `0c 92` and `08 b6`
+// (Oct-14 1752 battles) — uniform within each battle, varying across
+// battles on the same host and build, so it is matched by nothing.
+// No mapping found yet (arenaTypeIDs 23/74/4 vs pairs 99/23/b6;
+// tiers 8/7 vs 99/23 — single samples each; open).
+// Hit confidence comes from the rest: 10B ASCII key + 8 anchor bytes
+// + gapless counters + roster-sane nonzero IDs. XX varies per event
+// (damage or timing, open — only the constant `78 01` tail is
+// checked). Victim and killer must both be nonzero; otherwise the
+// window is skipped, never guessed. Self-kills name the same entity
+// twice (server records suicides that way).
 func ParseBattleDeaths(app []byte) []DeathHit {
 	var out []DeathHit
 	for o := 0; o+10 <= len(app); o++ {
@@ -918,7 +948,7 @@ func ParseBattleDeaths(app []byte) []DeathHit {
 		if app[o-2] != 0x55 || app[o-1] != 0x0a ||
 			app[o+10] != 0x71 || app[o+11] != 0x02 ||
 			app[o+12] != 0x4b || app[o+14] != 0x73 || app[o+15] != 0x2e ||
-			app[o+16] != 0x0b || app[o+17] != 0xa8 || app[o+18] != 0x02 || app[o+19] != 0x10 ||
+			app[o+18] != 0x02 || app[o+19] != 0x10 ||
 			app[o+21] != 0x78 || app[o+22] != 0x01 {
 			continue
 		}
@@ -1023,7 +1053,11 @@ func ParseSnapshotRecord(payload []byte) (SnapshotRecord, bool) {
 // namespace, F8 gap included — exact ID width stays open). Token→
 // entity mapping stays OPEN (muzzle-fit overfits camp clusters; own
 // C>S track is displaced; spawn anchors unmapped); presence is
-// trackable per token meanwhile.
+// trackable per token meanwhile. Trains fragment: 324B datagrams
+// interleave event smalls between records (Oct-14 b2: 269 dgs, ~8
+// marks each, only 21% on a 13-stride), so runs under-harvest there
+// (0.5/dg vs 5.7–5.9 on 276/292) — see ScanSnapshotTokens for the
+// gate-free token harvest that covers them.
 func ScanSnapshots(app []byte) []SnapshotRecord {
 	var marks []int
 	inRun := map[int]bool{}
@@ -1050,6 +1084,28 @@ func ScanSnapshots(app []byte) []SnapshotRecord {
 		}
 		if s, ok := ParseSnapshotRecord(app[o+2 : o+13]); ok {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ScanSnapshotTokens harvests snapshot token bytes from one decrypted
+// S>C battle app body without the run gate: every `35 00` mark with
+// the token byte in EB–FE is reported in scan order. Rationale: marks
+// run ~2500× over chance density (b2 276/292: ~11/dg vs ~0.004/dg
+// random), so ~all marks are real record starts and only the spacing
+// is irregular (fragmented 324 trains); token bytes sit at a fixed
+// offset and survive framing errors that would corrupt payload
+// decodes. For presence (counts/times per token) only — never for
+// positions. Chance-pair singletons show up as n=1 tokens, trivially
+// separable from real ones (n=400+).
+func ScanSnapshotTokens(app []byte) []byte {
+	var out []byte
+	for o := 0; o+3 <= len(app); o++ {
+		if app[o] == 0x35 && app[o+1] == 0x00 {
+			if id := app[o+2]; id >= 0xEB && id <= 0xFE {
+				out = append(out, id)
+			}
 		}
 	}
 	return out
@@ -1164,17 +1220,20 @@ func ScanBattleMarkers(app []byte) ([]MarkerPair, []MarkerSpot) {
 }
 
 // BuildShootTrigger emits the standalone C>S shoot-trigger bundle
-// (41B app): `[02 8b 58 4a][93][10][0400][00000000]` + the 29B position
-// trailer. Wire truth (Sep-29 Sweden: 9/9 own shots carry this record
-// 60–140 ms before the server's S>C tracer — 4 standalone-outer like
-// this, 5 chained-inner inside 07/18-led bundles; the 4 arg bytes are
-// zero on all 9). Trailer fields mirror ParseTrailer (nonce/speed/xyz
-// are the caller's live values; the server answers with a tracer, not
-// an ack — unspotted/ground hits stay silent until battle results).
-func BuildShootTrigger(entity, nonce uint32, speed, x, y, z float32, tail [2]byte) []byte {
+// (41B app): `[02][key4][10][0400][00000000]` + the 29B position
+// trailer. key4 is the flow key from the flow's first 36B S>C reply
+// (opaque here, echoed verbatim). Wire truth (Sep-29: 9/9 own shots
+// carry this record 60–140 ms before the server's S>C tracer — 4 lead
+// like this, 5 chained-inner inside 07/18-led bundles; Oct-14 b2:
+// 8/8 at 49–118 ms; the 4 arg bytes are zero on all of them).
+// Trailer fields mirror ParseTrailer (nonce/speed/xyz are the caller's
+// live values; the server answers with a tracer, not an ack —
+// unspotted/ground hits stay silent until battle results).
+func BuildShootTrigger(key4 [BattleKeyLen]byte, entity, nonce uint32, speed, x, y, z float32, tail [2]byte) []byte {
 	app := make([]byte, 0, 41)
-	app = append(app, BattleC2SHead0, BattleC2SHead1, BattleC2SHead2, BattleC2SHead3)
-	app = append(app, BattleFamily, BattleSubShoot, BattleShootArgsLen, 0x00)
+	app = append(app, BattleC2SHead0)
+	app = append(app, key4[:]...)
+	app = append(app, BattleSubShoot, BattleShootArgsLen, 0x00)
 	app = append(app, 0x00, 0x00, 0x00, 0x00)
 	app = append(app, BattleTrailerTag, 0x1a, 0x00)
 	var tmp [4]byte
@@ -1195,27 +1254,15 @@ func BuildShootTrigger(entity, nonce uint32, speed, x, y, z float32, tail [2]byt
 }
 
 // FindShootTrigger reports whether app carries the shoot-trigger
-// record ([10][0400][00000000]) either standalone-outer or chained
-// inside a longer bundle. Shape-only (args must be the 4 zero bytes);
-// positions/trailer are not validated here.
+// record (bare `[10][0400][00000000]`) in lead or chained-inner
+// position. Shape-only (args must be the 4 zero bytes);
+// positions/trailer are not validated here. The trailer walks as an
+// ordinary non-matching record, so no special-casing is needed.
 func FindShootTrigger(app []byte) bool {
-	if len(app) < 8 || app[0] != BattleC2SHead0 || app[4] != BattleFamily {
+	if len(app) < BattleHeadLen+3 || app[0] != BattleC2SHead0 {
 		return false
 	}
-	if app[5] == BattleSubShoot &&
-		binary.LittleEndian.Uint16(app[6:8]) == BattleShootArgsLen &&
-		len(app) >= 8+BattleShootArgsLen &&
-		app[8] == 0 && app[9] == 0 && app[10] == 0 && app[11] == 0 {
-		return true
-	}
-	ln := int(binary.LittleEndian.Uint16(app[6:8]))
-	if 8+ln > len(app) {
-		return false
-	}
-	rest := app[8+ln:]
-	if len(rest) >= BattleTrailerLen && rest[0] == BattleTrailerTag {
-		rest = rest[:len(rest)-BattleTrailerLen]
-	}
+	rest := app[BattleHeadLen:]
 	for len(rest) >= 3 {
 		iln := int(binary.LittleEndian.Uint16(rest[1:3]))
 		if 3+iln > len(rest) {

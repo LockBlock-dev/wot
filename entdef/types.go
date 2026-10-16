@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"strings"
 )
 
 // DataType is one entity-def datatype.
@@ -21,6 +22,11 @@ type DataType interface {
 }
 
 func putU8(h hash.Hash, v uint8) { h.Write([]byte{v}) }
+func putU16(h hash.Hash, v uint16) {
+	var b [2]byte
+	binary.LittleEndian.PutUint16(b[:], v)
+	h.Write(b[:])
+}
 func putI32(h hash.Hash, v int) {
 	var b [4]byte
 	binary.LittleEndian.PutUint32(b[:], uint32(int32(v)))
@@ -32,7 +38,19 @@ func putU32(h hash.Hash, v uint) {
 	h.Write(b[:])
 }
 func putStr(h hash.Hash, s string) { h.Write([]byte(s)) }
-func putTag(h hash.Hash, s string) { h.Write([]byte(s)); h.Write([]byte{0}) } // sizeof("...") incl NUL
+
+// TypeTagRecorder, when non-nil, collects type tags in emission order.
+// Oracle probing only: tests diff it against ce/r8probe captures
+// (live strlen+append fires). The digest path never sets it.
+var TypeTagRecorder *[]string
+
+func putTag(h hash.Hash, s string) {
+	if TypeTagRecorder != nil {
+		*TypeTagRecorder = append(*TypeTagRecorder, s)
+	}
+	h.Write([]byte(s))
+	h.Write([]byte{0}) // sizeof("...") incl NUL
+}
 func putBool(h hash.Hash, v bool) {
 	if v {
 		h.Write([]byte{1})
@@ -102,6 +120,40 @@ func (t *stringType) Describe() string     { return t.tag }
 func (t *stringType) Equal(o DataType) bool {
 	x, ok := o.(*stringType)
 	return ok && x.tag == t.tag
+}
+
+// ClearImpl recursively clears hasImpl on all FixedDicts under dt
+// (brute-force gate probing; not used in production).
+func ClearImpl(dt DataType) {
+	switch t := dt.(type) {
+	case *fixedDictType:
+		t.hasImpl = false
+		for _, f := range t.fields {
+			ClearImpl(f.typ)
+		}
+	case *seqType:
+		ClearImpl(t.elem)
+	}
+}
+
+// ClearEntityImpl clears hasImpl on every type reachable from e
+// (props + all method args/returns, own and iface).
+func ClearEntityImpl(e *Entity) {
+	for i := range e.Props {
+		ClearImpl(e.Props[i].Type)
+	}
+	all := [][]Method{e.ClientMethods, e.BaseMethods, e.CellMethods,
+		e.IfaceClientMethods, e.IfaceBaseMethods, e.IfaceCellMethods}
+	for _, ms := range all {
+		for i := range ms {
+			for _, a := range ms[i].Args {
+				ClearImpl(a)
+			}
+			for _, r := range ms[i].ReturnValues {
+				ClearImpl(r)
+			}
+		}
+	}
 }
 
 // --- mailbox (EntityID u32 + Address 4+2+2 = 12 bytes) ---
@@ -177,12 +229,139 @@ type fixedDictField struct {
 type fixedDictType struct {
 	fields    []fixedDictField
 	allowNone bool
+	// module/instance from <implementedBy>module.instance</implementedBy>
+	// (2.4.1.0: true_dict.instance on two FixedDicts). IDA 2.4.1.0
+	// sub_142CC25F0 hashes them (visitor +0x60, "moduleName" then
+	// "instanceName") iff the implementedBy helper ran (hasImpl); absent
+	// FixedDicts skip both. Labels themselves hash nothing (stub slots).
+	module   string
+	instance string
+	hasImpl  bool
+	// encOverride selects a per-object encoding for mixed per-site
+	// probing (-1 = follow ImplEncoding).
+	encOverride int
 }
+
+// ImplEncoding selects the moduleName/instanceName byte form for the
+// implementedBy brute-force matrix (0 = raw/raw default per stub-label
+// model). Reset to 0 after probing.
+var ImplEncoding int
+
+// encOverride selects a per-object ImplEncoding (mixed per-site probing).
+// -1 = follow ImplEncoding.
+func (t *fixedDictType) setEncOverride(e int) { t.encOverride = e }
 
 func (t *fixedDictType) AddToMD5(h hash.Hash) {
 	putTag(h, "FixedDict")
-	// No <implementedBy> anywhere in 2.4.0 defs: module/instance are empty,
-	// so both branches (append empties vs skip) contribute zero bytes.
+	if t.hasImpl {
+		enc := ImplEncoding
+		if t.encOverride >= 0 {
+			enc = t.encOverride
+		}
+		switch enc {
+		case 1:
+			putTag(h, t.module)
+			putTag(h, t.instance)
+		case 2:
+			putStr(h, t.module)
+			putTag(h, t.instance)
+		case 3:
+			putTag(h, t.module)
+			putStr(h, t.instance)
+		case 4:
+			putStr(h, t.instance)
+			putStr(h, t.module)
+		case 5:
+			putTag(h, t.instance)
+			putTag(h, t.module)
+		case 6:
+			putStr(h, "moduleName")
+			putStr(h, t.module)
+			putStr(h, "instanceName")
+			putStr(h, t.instance)
+		case 7:
+			putTag(h, "moduleName")
+			putStr(h, t.module)
+			putTag(h, "instanceName")
+			putStr(h, t.instance)
+		case 8:
+			putTag(h, "moduleName")
+			putTag(h, t.module)
+			putTag(h, "instanceName")
+			putTag(h, t.instance)
+		case 9:
+			putStr(h, "moduleName")
+			putTag(h, t.module)
+			putStr(h, "instanceName")
+			putTag(h, t.instance)
+		case 10:
+			putU32(h, uint(len(t.module)))
+			putStr(h, t.module)
+			putU32(h, uint(len(t.instance)))
+			putStr(h, t.instance)
+		case 11:
+			putU32(h, uint(len(t.module)+1))
+			putTag(h, t.module)
+			putU32(h, uint(len(t.instance)+1))
+			putTag(h, t.instance)
+		case 12:
+			putTag(h, "String")
+			putStr(h, t.module)
+			putTag(h, "String")
+			putStr(h, t.instance)
+		case 13:
+			putTag(h, "String")
+			putTag(h, t.module)
+			putTag(h, "String")
+			putTag(h, t.instance)
+		case 14:
+			putStr(h, t.module+"."+t.instance)
+		case 15:
+			putTag(h, t.module+"."+t.instance)
+		case 16:
+			putBool(h, t.allowNone)
+			putStr(h, t.module)
+			putStr(h, t.instance)
+			putLabel(h, "fields")
+			for _, f := range t.fields {
+				putFieldName(h, f.name)
+				putTypeLabel(h, false)
+				f.typ.AddToMD5(h)
+			}
+			return
+		case 17:
+			putBool(h, t.allowNone)
+			putTag(h, t.module)
+			putTag(h, t.instance)
+			putLabel(h, "fields")
+			for _, f := range t.fields {
+				putFieldName(h, f.name)
+				putTypeLabel(h, false)
+				f.typ.AddToMD5(h)
+			}
+			return
+		case 18:
+			putStr(h, t.module)
+			putStr(h, t.module)
+			putStr(h, t.instance)
+			putStr(h, t.instance)
+		case 19:
+			putTag(h, t.module)
+			putTag(h, t.module)
+			putTag(h, t.instance)
+			putTag(h, t.instance)
+		case 20:
+			putU16(h, uint16(len(t.module)))
+			putStr(h, t.module)
+			putU16(h, uint16(len(t.instance)))
+			putStr(h, t.instance)
+		case 99:
+			// skip impl bytes (per-site gate probing)
+		default:
+			putStr(h, t.module)
+			putStr(h, t.instance)
+		}
+	}
 	putBool(h, t.allowNone)
 	putLabel(h, "fields")
 	for _, f := range t.fields {
@@ -208,7 +387,8 @@ func (t *fixedDictType) StreamSize() int {
 func (t *fixedDictType) Describe() string { return "FIXED_DICT" }
 func (t *fixedDictType) Equal(o DataType) bool {
 	x, ok := o.(*fixedDictType)
-	if !ok || x.allowNone != t.allowNone || len(x.fields) != len(t.fields) {
+	if !ok || x.allowNone != t.allowNone || len(x.fields) != len(t.fields) ||
+		x.module != t.module || x.instance != t.instance || x.hasImpl != t.hasImpl {
 		return false
 	}
 	for i := range t.fields {
@@ -295,7 +475,15 @@ func buildFixedDict(sec *Section) (DataType, error) {
 	if an := sec.Child("AllowNone"); an != nil {
 		allowNone = an.AsString() == "true" || an.AsInt() != 0
 	}
-	return &fixedDictType{fields: fields, allowNone: allowNone}, nil
+	fd := &fixedDictType{fields: fields, allowNone: allowNone, encOverride: -1}
+	if ib := sec.Child("implementedBy"); ib != nil && ib.AsString() != "" {
+		parts := strings.SplitN(ib.AsString(), ".", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("entdef: fixed-dict <implementedBy> %q must contain a '.'", ib.AsString())
+		}
+		fd.module, fd.instance, fd.hasImpl = parts[0], parts[1], true
+	}
+	return fd, nil
 }
 
 // DescribeDeep renders the full structural type: primitives as
@@ -325,6 +513,16 @@ func DescribeDeep(dt DataType) string {
 
 // aliases maps alias name -> built datatype (alias.xml, file order).
 var aliases = map[string]DataType{}
+
+// ResetAliases clears the global alias cache so successive offline digest
+// computations for different client versions (2.4.0 vs 2.4.1) don't reuse
+// each other's types. Tests computing multiple versions in one process
+// must call this when switching versions (along with ScriptsEntityDefsDir).
+func ResetAliases() {
+	for k := range aliases {
+		delete(aliases, k)
+	}
+}
 
 // InitAliases builds all alias.xml entries in order (OSE single pass;
 // std::map::insert keeps the FIRST definition on duplicates).

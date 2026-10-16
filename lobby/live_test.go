@@ -182,7 +182,7 @@ func TestLiveMarkers(t *testing.T) {
 func TestLiveFeedCS(t *testing.T) {
 	f := NewLiveFeed(LiveConfig{})
 	// bare call without trailer: no track, no panic
-	f.FeedCS(time.Now(), []byte{0x02, 0x8b, 0x58, 0x4a})
+	f.FeedCS(time.Now(), []byte{0x02, 0x16, 0xe4, 0xd8})
 	if _, ok := f.ownAt(time.Now()); ok {
 		t.Fatal("empty track must miss")
 	}
