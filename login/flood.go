@@ -93,6 +93,55 @@ func ReadKeyFile(path string) (string, error) {
 	return string(b), nil
 }
 
+// ReadCEKeyFile reads a CE/wotkeydump-style memory capture: comment
+// lines (# …), spaced-hex runs, and the channel key as the FIRST 16 B
+// of the LAST valid run (key3.txt's live line trails ASCII memory past
+// the key — the game's Blowfish channel slot is exactly 16 B,
+// ce/CE_KEY_HUNT.md; lines stripped of # comments decode as runs).
+func ReadCEKeyFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var run []byte
+	for _, line := range strings.Split(string(raw), "\n") {
+		stripped := strings.TrimSpace(line) // CR from CRLF endings
+		if i := strings.IndexByte(stripped, '#'); i >= 0 {
+			stripped = stripped[:i]
+		}
+		stripped = strings.ReplaceAll(stripped, " ", "")
+		if stripped == "" {
+			continue
+		}
+		b, err := hex.DecodeString(stripped) // scratch var: a bad line never clobbers the last good run
+		if err != nil || len(b) == 0 {
+			continue // comment fragments / non-hex memory rows
+		}
+		run = b
+	}
+	if len(run) == 0 {
+		return "", fmt.Errorf("wotlogin: no hex key run in %s", path)
+	}
+	if len(run) > 16 {
+		run = run[:16] // trailing memory rides past the key slot
+	}
+	return string(run), nil
+}
+
+// ReadAnyKeyFile: clean keyfiles first, CE dumps second (both formats
+// coexist in captures/).
+func ReadAnyKeyFile(path string) (string, error) {
+	key, err := ReadKeyFile(path)
+	if err == nil && len(key) >= 8 {
+		return key, nil
+	}
+	key, err2 := ReadCEKeyFile(path)
+	if err2 != nil {
+		return "", fmt.Errorf("wotlogin: key file: %v (last hex err: %v)", err2, err)
+	}
+	return key, nil
+}
+
 // KeyID hashes a block key for logs (lengths/hashes only, never key
 // bytes).
 func KeyID(key string) string {

@@ -3,10 +3,13 @@
 Single Go project for World of Tanks EU internals: LoginApp + BaseApp
 client (`login`), LoginApp ping (`ping`), `.wotreplay` reader
 (`replay`), entity-def reader + login digest (`entdef`), live key
-dumper (`keydump`), transparent forwarder (`tproxy`). All 8 CLIs
+dumper (`keydump`), transparent forwarder (`tproxy`), private server
+half — LoginApp + BaseApp stage-1/2 (`login/loginapp.go`,
+`login/baseappsrv.go`, `cmd/wotserver`). All CLIs
 live under `cmd/`. Run from here: `go run ./cmd/wotlogin -env
 live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
-(login) and `../docs/REPLAY.md` (replays); update them on wire changes.
+(login + server-side stage shapes §18) and `../docs/REPLAY.md`
+(replays); update them on wire changes.
 
 ## Layout
 
@@ -138,8 +141,157 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `-battle-own/-side/-watch/-margin` tune `lobby.LiveFeed`, fed with
   decrypted BaseApp apps on the relay path (explicit + transparent);
   SHOT/HIT/KILL/READY/LINK/SPOT rows on stdout, names/counts only.
+- `login/loginapp.go` — LoginApp SERVER half (same package: framing/
+  statuses/packed strings stay single-sourced with the client halves).
+  UDP serve loop (1 s deadline, ctx-cancelled) + per-client pending-PoW
+  map; C>S walk mirrors udp_bundle_processor.cpp (request-chain
+  offsets, next-request links honored by FIXED members too, varlen
+  login/CR/MTU, login len covers DATA only); order version→
+  unencrypted-64 →RSA-OAEP chunk decrypt→PoW→digest→LOGGED_ON.
+  PoW: prefixes are ours (16-hex+':'), verify = HasPrefix + cuckoo Verify
+  over exactly 42 nonces; ANY rejection (bad table/foreign prefix/bad
+  nonces/restart) reissues a FRESH status-66 challenge — a documented
+  server choice (live reject wording unobserved); the real client
+  hierarchy ends at any second reply, so reissues surface cleanly.
+  Digest gate: strict allowlist defaults to entdef.Truth240/Truth241
+  (status 70 `Defs digest mismatch`, zero digest refuses like live);
+  AcceptAnyDigest opts out. LOGGED_ON: 12 B record (mirror listener or
+  explicit Advertise, IPv4-only, salt 0) + packed servermsg
+  encrypted with the CLIENT's key via encryptLogin (no magic); minted
+  per login: session_key u32, session_id 32-char with the genuine
+  constant stretches (`06G`@[0:3], `000000`@[10:16], `41VPHF`@[16:22];
+  census = 3 samples: captures/game_20260920.log:413,:4871 +
+  login3-game.log — suspected time field at [0:10] not reproduced),
+  token2 69 digits `9:19:39` with segments never zero-led,
+  pseudoAccountID = FNV-1a
+  (name) floor-biased to 9 digits, servermsg JSON field order
+  isDemoAccount,name,security_msg,session_id,token2 compact unescaped
+  (199 B with the ExampleUser census cite captures/game_20260920.log:413
+  — values SYNTHESIZED, shape faithful); no account DB: any identity.
+  Tests offline (`loginapp_test.go`): challenge 55-B echo + fresh-mint
+  replacement, unencrypted 64 / version 65 / digest 70 texts, ping 16 B
+  echo incl. a chained ping+login datagram, probe silence, bad-solution
+  reissues (no index panic on short tables), malformed-datagram table,
+  mint-shape units vs the genuine 199-B vector, full loopback handshake
+  over real Client + SolveChallenge (Short-skipped).
 - `login/rewrite.go` — `RewriteLoginReply` + `encryptLogin` (login-path
   Blowfish mirror, no magic trailer).
+- `login/baseappsrv.go` — BaseApp SERVER half (Oct-17; transport-frame
+  parity with `baseapp.go`'s client script so a LOGGED_ON client walks
+  stage-1 → rotation → tick → `[44]` → stage-2 → double-auth → flood
+  against US, decrypt-verified). Shapes byte-exact vs the flows3
+  decrypts (`baseappsrv_test.go`: rotation 36B `5804|FF 08 000000|
+  rid|newkey|seq0|cumul0`, tick 28B `13 3e|seq2|cumul1`, redirect 36B
+  `13 3f|44|ip BE|port BE|000001|seq4|cumul1` — the other stage-1
+  smalls + the 76B stage-2 descriptor are v1-cut, capture-ackable).
+  Channel crypto = the LOGGED_ON key for BOTH stages (rotation rides
+  as app content — decrypt-proven flows3). Stage-1 keyed by login
+  sessionKey (pending record ≈60 s TTL; rotation re-send reuses the
+  minted key with the CURRENT rid), stage-2 non-handshake datagrams
+  keyed by SOURCE ADDR (28B double-auth carries no parseable key
+  header); flood = flows3-s2 440×1252B carrier decrypted once at load,
+  re-keyed per frame at serve (fresh prefix + ECB+XOR chain), contents
+  stale reference (per-session bulk heads future work). Tests: shape
+  units + unknown-key silence + full loopback dance incl. a
+  decrypt-verified 1252B frame (skips when captures absent).
+  MILESTONE v2 — post-flood chain (Oct-17): `loadPost` pulls the tail's
+  332B terminator, `[13][7b]` rev answer, 1a/5b stats answer and the
+  12B seed tick (tag 7a / seq 503 / cumul 3) out of the SAME carrier;
+  `serveBulk` ends with the terminator, `sweepStage2` mints one tick
+  per `PostTickPeriod` (100 ms, measured `1562.609→.810→.911`), and
+  `servePostFlood` classifies bundles via `postDoCmd` on the cmd field
+  (100 → rev answer once/session, 501 → stats answer per poll, else
+  v1-cut silent). Green at both levels: loopback
+  `TestBaseAppStageLoopback` (full chain, byte-exact seed tick + rev
+  answer) and a real CLI-binary walk (6/6 polls answered, census
+  `28:225 36:7 60:1 332:1`). Two live-caught bugs, both
+  regression-pinned (`TestBaseAppPostDoCmd`): the sync and the poll
+  SHARE the leading `0x95` A1 tag — only cmd 100 vs 501 separates
+  them; and the "sync answered" latch must be set on a cmd-100 arrival,
+  never on the first post-flood datagram (the client's per-tick acks
+  arrive first and would swallow the sync).
+  MILESTONE v2.1 — per-session smalls (Oct-17): `loadPre` (same
+  carrier) keeps three more flows3-s2 templates and `handleStage2`
+  serves them per session —
+  info (36B wire, app verbatim + footers seq1/cumul0, byte-exact),
+  descriptor (76B, `descriptorFrame` substitutes the session name into
+  the packed `[nlen 0b][ExampleUser]` slot at clear[25], 255-truncated
+  like the 1B field; companion footers seq2/cumul1 ride verbatim),
+  and the 1a/76 session-dict small (`1a 76 9c 00` + 156B = status 9b +
+  155B proto-2 pickle; sent at serveBulk START as `[13][40]` + tpl +
+  footers seq2/cumul-live). The dict's personal riders are V1-cut:
+  `1a 73` (clan block, personal text) + `1a 79` (redirect offer with
+  the capture's IP/port) never re-enter our wire.
+  `dictApp`/`patchDict` re-patch four pickle fields per send —
+  serverUTC (BINFLOAT, mint time), aogasStartedAt (= utc − 1.951 ms,
+  the capture's playtime-watcher delta), sessionStartedAt (admission),
+  databaseID (`pseudoAccountID(name)`) — the three booleans replay
+  the capture's values; the patcher locates values by
+  `key + BINPUT(0x71) + opcode` (`patchPickleValue`, fails loud on
+  drift; loadPre dry-runs it on a COPY so the stored template keeps
+  the capture's stale reference values).
+  Post-flood answers are per-session MINTED on the shared walk
+  (`allocPost`/`mintPost`: one WALK SLOT per S>C frame — tag
+  7a+n mod 256, seq 503+n, cumul = live watermark; the genuine tail
+  walks 7b/504 rev → 7e/506 offer-cut → a4/545 poll → dd/602 1a5e):
+  rev answer once/session, 1a/5b poll stats per poll (body = the
+  capture's FIRST answer — counters drift, stale note), and NEW cmd
+  121 season-select → minted `[1a 5e 05][req u16 LE echo][000]` (we
+  hold no garage; the genuine failure small is the honest answer).
+  `noteReliable` advances the watermark from the client's reliable
+  sends (byte-0 bit 0x10; seq at clear[len-8:len-4] + 1) so minted
+  cumuls ramp like the capture (4 rev / 5 poll / 7 season); the seed
+  floor `max(live, 3)` keeps the rev byte-exact. Deltas in §18.7:
+  dict at burst-START (seq 2) vs the capture's mid-burst seq 176;
+  descriptor's in-clear footers stay capture-stale. Tests green:
+  `TestBaseAppPostFloodCarrier` (templates byte-exact incl.
+  name-splice + 255-truncation units), `TestBaseAppPostDoCmd` (req
+  surfacing: sync 224/100, poll 202/501, season 225/121),
+  `TestBaseAppStageLoopback` (full walk: info byte-exact, spliced
+  descriptor, dict decoded with per-session values via
+  `lobby.DecodePrefix`, seed tick + rev byte-exact, minted poll + 1a5e
+  at cumuls 5/7).
+- `cmd/wotserver/main.go` — thin both-halves CLI (`-addr` default
+  `127.0.0.1:20016`, `-privkey` default `mitm/loginapp_mitm.privkey`
+  = the pair the game encrypts to under mods/custom-server-mod;
+  BaseApp default-ON: `-s1 127.0.0.1:32850` = the LOGGED_ON record
+  endpoint (LOGGED_ON mint admits via `cfg.OnLoggedOn`),
+  `-s2 127.0.0.1:32851` = the `[44]` redirect target (bind inside the
+  32810-32999 manager window or construction fails loud),
+  `-flood` + `-floodkey` default the flows3 stage-2 carrier + its CE
+  key (`../captures/…`, relative from `wot/`; empty `-flood` = no
+  carrier, stage-2 answers the dance then errors on the flood loud);
+  `-baseapp host:port` overrides the record endpoint (external
+  advertise), `-maxnonce`, `-any-version`, `-digest any` gate bypass,
+  `-verbose`; signal-ctx graceful stop, LoginApp+BaseApp concurrent.
+  Milestone v1 green Oct-17: our client's full decrypt-verified
+  1252B flood over loopback (`TestBaseAppStageLoopback`), then the
+  real CLI-binary walk (`go build wotlogin+wotserver`, scratch .env
+  pointing at loopback, `-digest any`): basic login → LOGGED_ON
+  (OnLoggedOn admits) → 22B rid rid+1 → rotation/tick/redirect all
+  byte-exact → redirect followed (fresh socket) → rotation-2 →
+  double-auth → FLOOD 1252B decrypt-verified → `LOBBY flood reached`;
+  server census 440 frames emitted. Note: the smoke needs
+  `-digest any` (client .env DIGEST_HEX empty = zero digest) and the
+  MITM pubkey pair (PUBKEY_PATH=../mitm/loginapp_mitm.pubkey). Smoke-tested live: `wotping` 3/3 echo vs the running
+  server binary.
+  Oct-17 IDA packer pass (2.4.0.0 image) feeds the v2 mint plan: the
+  client has NO pack side (`packVolatilePositionDirection: Unpacker was
+  requested to pack` = log-only stubs `0x140E36520/0x140E52520`) —
+  CellApp packing is server-only; the fork's mandatory packer name is
+  the 10-byte constant `"bw.default"` (`0x143606830`, memcmp 0xA inside
+  `ServerConnection::createEntity 0x140E4E870` / `-Detailed
+  0x140E4ED50` / `-changeVolatilePackerType 0x140E4DBF0`, mismatch →
+  disconnect); `createEntity` wire parse closed
+  (`[entityID u32][u16][blobLen u8 | 0xFF→24-bit LE][creation
+  blob][1B per-entity map slot][packerName len-scheme][dir u32
+  dirType0]`). The flows3 116B "entity burst" is REFRAMED: it rides
+  exactly one per flood tick (28 tick windows, `[13][5e..79]` tag ramp,
+  counter +9/tick, app opaque after 8×11-volatile + raw-deflate +
+  wrappers falsifications) — a flood-phase companion, not a
+  creation/defs document; doc details in NETWORK_PROTOCOL.md §14/§18.5
+  (incl. the post-flood tail: 332B terminator → `[13][7a]` short tick →
+  client 84B `[02][key2][1c00]` re-auth → `[13][7b]` 60B reply).
 - `tproxy/` — transparent forwarder: `forward.go` (flow table keyed by
   client+origDst, 4 MiB rcvbuf, idle reaper), `origdst_linux.go`
   (`SO_ORIGINAL_DST` via `x/sys/unix`), OS stub elsewhere.
