@@ -379,7 +379,11 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `ObserveExplode`), synthetic tests
   in `lobby/feed_test.go`. Streaming twin in `lobby/live.go`
   (`LiveFeed`: bulk buffering + per-packet scans + own track +
-  presence, mutex-guarded; synthetic tests in `lobby/live_test.go`).
+  presence, mutex-guarded; re-arms across battles — a ≥1000B S>C app
+  while an observer is live is the next battle's bulk head, the old
+  observer retires with its dedup maps (death counters/shot IDs
+  restart per battle), lobby floods between battles close as rejected
+  bulks; synthetic tests in `lobby/live_test.go`).
   Validated on Sep-29 Sweden: 132/132
   shots, 30/30 roster+guns, 31 hits (13 victims: 8 HIGH), 24/24 kills,
   0 incoming

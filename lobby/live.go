@@ -12,7 +12,12 @@ package lobby
 // proven live by a missing-head regression when size-filtered).
 // Roster/teams/vehicles/mounts resolve once via NewObserver; then
 // ScanBattleTracers runs per S>C packet (50B sliding window —
-// negligible vs forward) and rows print in arrival order. Explodes
+// negligible vs forward) and rows print in arrival order. The feed
+// re-arms across battles: a ≥1000B S>C app while an observer is live
+// is the next battle's bulk head — the old observer retires with its
+// dedup maps (death counters/shot IDs restart per battle) and the
+// window re-opens; lobby floods between battles close as rejected
+// bulks (roster <10) and re-arm the same way. Explodes
 // use past-only attribution (ObserveExplode: no future evidence by
 // construction — the offline two-sided refinement is unavailable
 // live). Deaths and explodes share arrival order, so a HIT printed
@@ -85,7 +90,6 @@ type LiveFeed struct {
 	bulk       []liveApp
 	smallRun   int
 	bulkStart  time.Time
-	built      bool // observer built or bulk rejected (single battle per process, v1)
 	rejected   bool
 	nBulkApps  int
 	nBulkBytes int
@@ -157,15 +161,28 @@ func (f *LiveFeed) FeedSC(ts time.Time, app []byte) []string {
 		}
 		f.presence.UpdateTokens(ts, toks)
 	}
-	if f.obs == nil && !f.built {
+	// A ≥liveBulkMin S>C app while an observer is live is the NEXT
+	// battle's creation-bulk head (same size rule as the offline CLI,
+	// which held for whole battles — mid-battle apps stay below the
+	// line): retire the old battle here, or battle N+1 would scan
+	// against a stale roster with battle-N dedup maps (death counters
+	// and shot IDs restart every battle — rows would be suppressed).
+	if f.obs != nil && len(app) >= liveBulkMin {
+		f.retire()
+	}
+	if f.obs == nil {
+		// Stay armed: every closed window either builds a roster or
+		// rejects; the next battle's creation bulk re-opens a window
+		// on its own (no polling — nothing flows between battles).
 		if diag, done := f.collect(ts, app); done {
 			return diag
 		}
 		return nil
 	}
-	if f.obs == nil {
-		return nil // rejected bulk: stay silent
-	}
+	// Live observer: keep the 2s lookback ring warm so the next
+	// battle's bulk head seeds sub-1000B pre-apps exactly like the
+	// offline CLI (collect() consumes the ring at window open).
+	f.notePre(ts, app)
 	var out []string
 	for _, r := range f.obs.FlushReady(ts) {
 		out = append(out, r)
@@ -220,6 +237,18 @@ func (f *LiveFeed) FeedSC(ts time.Time, app []byte) []string {
 	return out
 }
 
+// notePre appends one app to the 2s lookback ring (bounded copy —
+// callers may reuse the slice).
+func (f *LiveFeed) notePre(ts time.Time, app []byte) {
+	f.pre = append(f.pre, liveApp{ts, append([]byte(nil), app...)})
+	for len(f.pre) > 0 && ts.Sub(f.pre[0].ts) > liveBulkPre {
+		f.pre = f.pre[1:]
+	}
+	if len(f.pre) > 128 {
+		f.pre = f.pre[len(f.pre)-128:]
+	}
+}
+
 // collect buffers pre-observer S>C apps; returns (diagnostic rows,
 // done=true) when the bulk closes (built or rejected).
 func (f *LiveFeed) collect(ts time.Time, app []byte) ([]string, bool) {
@@ -227,6 +256,7 @@ func (f *LiveFeed) collect(ts time.Time, app []byte) ([]string, bool) {
 	if !f.haveFirst {
 		if len(app) >= liveBulkMin {
 			f.haveFirst = true
+			f.rejected = false
 			f.tFirst = ts
 			f.bulkStart = ts
 			// seed with lookback apps inside [tFirst-2s, tFirst)
@@ -245,24 +275,18 @@ func (f *LiveFeed) collect(ts time.Time, app []byte) ([]string, bool) {
 			}
 			return nil, false
 		}
-		f.pre = append(f.pre, liveApp{ts, cp})
-		for len(f.pre) > 0 && ts.Sub(f.pre[0].ts) > liveBulkPre {
-			f.pre = f.pre[1:]
-		}
-		if len(f.pre) > 128 {
-			f.pre = f.pre[len(f.pre)-128:]
-		}
+		f.notePre(ts, app)
 		return nil, false
 	}
 	if ts.After(f.tFirst.Add(liveBulkSpan)) {
-		return f.build(), true
+		return f.build(ts), true
 	}
 	f.bulk = append(f.bulk, liveApp{ts, cp})
 	if len(app) < liveBulkSmall {
 		f.smallRun++
 		if f.smallRun >= 3 {
 			f.bulk = f.bulk[:len(f.bulk)-3] // drop the heartbeat smalls
-			return f.build(), true
+			return f.build(ts), true
 		}
 	} else {
 		f.smallRun = 0
@@ -271,25 +295,32 @@ func (f *LiveFeed) collect(ts time.Time, app []byte) ([]string, bool) {
 }
 
 // build resolves the buffered bulk verbatim into an Observer.
-func (f *LiveFeed) build() []string {
-	f.built = true
+func (f *LiveFeed) build(ts time.Time) []string {
 	var bulk []byte
 	for _, a := range f.bulk {
 		bulk = append(bulk, a.app...)
 	}
 	f.nBulkApps = len(f.bulk)
 	f.nBulkBytes = len(bulk)
+	t0 := f.bulkStart
+	// Reset collection state so the next window opens fresh (a
+	// stale haveFirst/tFirst/smallRun here re-triggers an immediate
+	// empty build or a negative slice on the next collect call).
+	f.haveFirst = false
+	f.tFirst = time.Time{}
+	f.bulkStart = time.Time{}
+	f.smallRun = 0
 	f.bulk = nil
 	f.pre = nil
 	obs := NewObserver(bulk, f.cfg.Own)
 	if len(obs.Ents) < liveMinRoster {
 		f.rejected = true
-		return []string{fmt.Sprintf("battle: bulk rejected apps=%d bytes=%d roster=%d (lobby-shaped, staying silent)",
+		return []string{fmt.Sprintf("battle: bulk rejected apps=%d bytes=%d roster=%d (lobby-shaped, re-armed)",
 			f.nBulkApps, f.nBulkBytes, len(obs.Ents))}
 	}
-	obs.SetT0(f.bulkStart)
+	obs.SetT0(t0)
 	f.obs = obs
-	f.t0 = f.bulkStart
+	f.t0 = t0
 	guns := 0
 	for _, d := range obs.Ents {
 		if d != nil && d.HasGun {
@@ -298,6 +329,21 @@ func (f *LiveFeed) build() []string {
 	}
 	return []string{fmt.Sprintf("battle: roster=%d guns=%d bulk apps=%d bytes=%d",
 		len(obs.Ents), guns, f.nBulkApps, f.nBulkBytes)}
+}
+
+// retire drops the live observer and all per-battle state. Death
+// counters and shot IDs restart every battle, so carrying the dedup
+// maps over would suppress battle N+1 rows; presence and the own
+// track are per-battle diagnostics and restart with them.
+func (f *LiveFeed) retire() {
+	f.obs = nil
+	f.t0 = time.Time{}
+	f.presence = nil
+	f.track = nil
+	f.seenShot = map[uint32]bool{}
+	f.seenDeath = map[byte]bool{}
+	f.seenPair = map[[2]uint32]bool{}
+	f.seenSpot = map[[2]uint32]bool{}
 }
 
 func (f *LiveFeed) showShot(line string, ent uint32) bool {

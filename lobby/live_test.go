@@ -43,7 +43,6 @@ func liveDeath(ctr byte, v, k uint32) []byte {
 func liveObs(f *LiveFeed) {
 	f.obs = testObserver()
 	f.t0 = time.Date(2026, 9, 29, 20, 45, 42, 0, time.UTC)
-	f.built = true
 	f.presence = NewPresence()
 }
 
@@ -71,12 +70,13 @@ func TestLiveBulkReject(t *testing.T) {
 	if len(diag) != 1 || !strings.Contains(diag[0], "bulk rejected") {
 		t.Fatalf("diag=%v, want one bulk-rejected line", diag)
 	}
-	// rejected bulk stays silent afterwards
-	if out := f.FeedSC(t1.Add(9*time.Second), liveTracer(1, 7)); len(out) != 0 {
-		t.Fatalf("post-reject rows=%v, want none", out)
+	// a later app re-opens a window (no latch — the next battle's
+	// creation bulk re-collects on its own)
+	if out := f.FeedSC(t1.Add(9*time.Second), make([]byte, 1200)); len(out) != 0 {
+		t.Fatalf("re-open rows=%v, want none", out)
 	}
-	if s := f.Status(); !strings.Contains(s, "rejected") {
-		t.Fatalf("status=%q, want rejected", s)
+	if s := f.Status(); !strings.Contains(s, "collecting") {
+		t.Fatalf("status=%q, want collecting after re-open", s)
 	}
 }
 
@@ -185,5 +185,43 @@ func TestLiveFeedCS(t *testing.T) {
 	f.FeedCS(time.Now(), []byte{0x02, 0x16, 0xe4, 0xd8})
 	if _, ok := f.ownAt(time.Now()); ok {
 		t.Fatal("empty track must miss")
+	}
+}
+
+func TestLiveRearmAfterBattle(t *testing.T) {
+	f := NewLiveFeed(LiveConfig{})
+	liveObs(f)
+	at := time.Date(2026, 9, 29, 20, 47, 0, 0, time.UTC)
+	kill := func(rows []string) bool {
+		for _, r := range rows {
+			if strings.Contains(r, "KILLED") {
+				return true
+			}
+		}
+		return false
+	}
+	// battle 1: death counter 4 prints once
+	if rows := f.FeedSC(at, liveDeath(4, 2, 1)); !kill(rows) {
+		t.Fatalf("rows=%v, want KILL for battle 1", rows)
+	}
+	// the next battle's bulk head (≥1000B) retires the live observer
+	if rows := f.FeedSC(at.Add(1*time.Second), make([]byte, 1200)); len(rows) != 0 {
+		t.Fatalf("retire rows=%v, want none", rows)
+	}
+	if s := f.Status(); strings.Contains(s, "live roster") {
+		t.Fatalf("status=%q, want retired (collecting/waiting)", s)
+	}
+	// battle 2 observer resolved: the SAME death counter must print
+	// again — the dedup maps retired with battle 1
+	liveObs(f)
+	if rows := f.FeedSC(at.Add(2*time.Second), liveDeath(4, 2, 1)); !kill(rows) {
+		t.Fatalf("rows=%v, want KILL for battle 2 (maps must reset)", rows)
+	}
+	// per-battle diagnostics retired too: presence restarts empty
+	f.mu.Lock()
+	p := f.presence
+	f.mu.Unlock()
+	if p == nil || p.Total != 0 {
+		t.Fatalf("presence=%v, want fresh empty presence after retire", p)
 	}
 }

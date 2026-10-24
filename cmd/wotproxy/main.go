@@ -124,6 +124,7 @@ func main() {
 	battleSide := flag.String("battle-side", "all", "SHOT filter: all|ally|enemy (HIT/KILL/READY always print)")
 	battleWatch := flag.String("battle-watch", "", "SHOT filter: name substring")
 	battleMargin := flag.Float64("battle-margin", 25, "incoming danger margin (m) over shell blast")
+	quiet := flag.Bool("quiet", false, "suppress per-datagram S>C/C>S console lines, LoginApp and BaseApp alike")
 	flag.Parse()
 	if *battleSide != "all" && *battleSide != "ally" && *battleSide != "enemy" {
 		fmt.Fprintln(os.Stderr, "wotproxy: -battle-side must be all|ally|enemy")
@@ -212,7 +213,7 @@ func main() {
 		}
 	}
 	if *transparent != "" {
-		runTransparent(*transparent, dumpLine, feedBattle)
+		runTransparent(*transparent, dumpLine, feedBattle, *quiet)
 		return
 	}
 
@@ -308,7 +309,9 @@ func main() {
 			OnDatagram: func(dir string, client, orig *net.UDPAddr, pkt []byte) {
 				ts := time.Now().Format("15:04:05.000")
 				peer := client.String() + "->" + orig.String()
-				fmt.Printf("%s %s %-43s %4dB baseapp\n", ts, dir, peer, len(pkt))
+				if !*quiet {
+					fmt.Printf("%s %s %-43s %4dB baseapp\n", ts, dir, peer, len(pkt))
+				}
 				dumpLine(ts, dir, peer, pkt)
 				feedBattle(dir, pkt)
 			},
@@ -346,7 +349,9 @@ func main() {
 				}
 				pkt := append([]byte(nil), buf[:n]...)
 				ts := time.Now().Format("15:04:05.000")
-				fmt.Printf("%s S>C %-21s %4dB %s\n", ts, key, n, describe(pkt))
+				if !*quiet {
+					fmt.Printf("%s S>C %-21s %4dB %s\n", ts, key, n, describe(pkt))
+				}
 				if fwd := maybeRewrite(pkt, *keyPath, *baseListen, ensureRelay, mitm); fwd != nil {
 					pkt = fwd
 				}
@@ -368,7 +373,9 @@ func main() {
 		}
 		pkt := append([]byte(nil), buf[:n]...)
 		ts := time.Now().Format("15:04:05.000")
-		fmt.Printf("%s C>S %-21s %4dB %s\n", ts, caddr, n, describe(pkt))
+		if !*quiet {
+			fmt.Printf("%s C>S %-21s %4dB %s\n", ts, caddr, n, describe(pkt))
+		}
 		dumpLine(ts, "C>S", caddr.String(), pkt)
 		if fwd := mitmForward(pkt, mitm, ts); fwd != nil {
 			pkt = fwd
@@ -442,7 +449,7 @@ func maybeRewrite(pkt []byte, keyPath, baseListen string, ensureRelay func(*net.
 // per-flow original-destination routing. LoginApp flows (orig port 20016)
 // get Mercury framing annotation; BaseApp flows log sizes only — channel
 // bytes are Blowfish (live feed via feedBattle when armed, fail-open).
-func runTransparent(listen string, dumpLine func(ts, dir, peer string, pkt []byte), feedBattle func(dir string, pkt []byte)) {
+func runTransparent(listen string, dumpLine func(ts, dir, peer string, pkt []byte), feedBattle func(dir string, pkt []byte), quiet bool) {
 	laddr := mustResolve(listen)
 	fmt.Printf("wotproxy: transparent %s (pre-install DNAT per wot/tproxy/doc.go; game runs stock)\n", laddr)
 	fw := &tproxy.Forwarder{
@@ -457,7 +464,9 @@ func runTransparent(listen string, dumpLine func(ts, dir, peer string, pkt []byt
 			if orig.Port != 20016 {
 				note = fmt.Sprintf("baseapp(%dB)", len(pkt))
 			}
-			fmt.Printf("%s %s %-43s %4dB %s\n", ts, dir, peer, len(pkt), note)
+			if !quiet {
+				fmt.Printf("%s %s %-43s %4dB %s\n", ts, dir, peer, len(pkt), note)
+			}
 			dumpLine(ts, dir, peer, pkt)
 			if orig.Port != 20016 {
 				feedBattle(dir, pkt)
