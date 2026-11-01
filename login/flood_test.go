@@ -52,18 +52,27 @@ func TestCensusSmalls(t *testing.T) {
 
 func encSmall(t *testing.T, flags uint16, app []byte, seq, cumul uint32) []byte {
 	t.Helper()
-	// Trailer: [seq][cumul], plus [mirror] first when flags&0x20.
+	// Trailer length and order follow ChannelTrailerLen:
+	// [requests 8B][aux 4B][seq 4B][cumul 4B].
 	full := make([]byte, 2)
 	binary.LittleEndian.PutUint16(full, flags)
 	full = append(full, app...)
 	var s, c [4]byte
 	binary.LittleEndian.PutUint32(s[:], seq)
 	binary.LittleEndian.PutUint32(c[:], cumul)
-	if flags&0x20 != 0 {
+	if flags&chFlagRequests != 0 {
+		full = append(full, s[:]...) // request id
+		full = append(full, c[:]...) // reply id
+	}
+	if flags&chFlagAux != 0 {
 		full = append(full, s[:]...)
 	}
-	full = append(full, s[:]...)
-	full = append(full, c[:]...)
+	if flags&chFlagSequence != 0 {
+		full = append(full, s[:]...)
+	}
+	if flags&chFlagCumulAck != 0 {
+		full = append(full, c[:]...)
+	}
 	enc, err := encryptBlowfish(floodTestKey, full)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +172,7 @@ func TestClassifySmalls(t *testing.T) {
 	if msgs[4].ID != 0x46 || string(msgs[4].Body) != "hello-pickle" {
 		t.Fatalf("bad 46: %+v", msgs[4])
 	}
-	// 12B-trailer variant + unknown-ID rest.
+	// 16B-trailer variant (0x0478 = ON|REL|SEQ|REQ|CUMUL) + unknown-ID rest.
 	pkt2 := encSmall(t, 0x0478, []byte{0x13, 0x01, 0xBB, 0x02}, 9, 4)
 	msgs, rest, err = ClassifySmalls(pkt2, floodTestKey)
 	if err != nil {

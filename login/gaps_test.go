@@ -425,7 +425,8 @@ func TestCensusEntityBurstsSynthetic(t *testing.T) {
 	}
 	var dump []DumpDatagram
 	for _, c := range []uint16{249, 258} {
-		clear := append([]byte{0x20, 0x00}, mk(c)...)
+		// 0x0078 = ON|REL|SEQ|REQ -> 12B trailer.
+		clear := append([]byte{0x78, 0x00}, mk(c)...)
 		clear = append(clear, bytes.Repeat([]byte{0x07}, 12)...)
 		enc, err := encryptBlowfish(key, clear)
 		if err != nil {

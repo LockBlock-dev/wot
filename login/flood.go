@@ -8,11 +8,10 @@ package login
 // [seq u32][cumul u32]; the channel seq is the chunk id and each
 // chunk's datagrams arrive contiguously (audited: 48 runs for 48
 // seqs on two captures), so arrival order is bundle order (~625KB
-// single shared-memo pickle). The 12B trailer (vs 8B on reliable
-// 0x0458 datagrams) is flagged by bit5 (0x20) — empirically 0x0478/
-// 0x0078/0x0058 carry [mirror][seq][cumul] where the first word
-// echoes seq. Strip per-datagram trailers plus the one head header
-// per chunk and concatenate.
+// single shared-memo pickle). The trailer length is additive over the
+// channel flag bits (ChannelTrailerLen): 8B on reliable 0x0458, 12B on
+// 0x0078, 16B on 0x0478. Strip per-datagram trailers plus the one head
+// header per chunk and concatenate.
 //
 // Smalls: [flags 2][msgs...][trailer] with app IDs 0x13 (tick,
 // FIXED-1), 0xFF ([len u32][rid][...]), 0x1a ([type8][len8]: 76
@@ -21,8 +20,8 @@ package login
 // 73 clan-text, 4d tiny, 79 redirect struct — plus 5b,
 // the fixed [type8][u32][u32] server-stats reply with NO length),
 // method invocation, value opaque), 0x46 ([len u16][declen u32][zlib]
-// cPickle). Trailer 8B [seq][cumul], 12B [mirror][seq][cumul] when
-// flags&0x20. Unknown IDs stop the walk with the rest preserved
+// cPickle). Trailer length from ChannelTrailerLen. Unknown IDs stop
+// the walk with the rest preserved
 // (EU2-metal carries opaque binary families — bb/68/ce/24/7d-led
 // 0478 smalls and a 564B class — mapped later, never dropped).
 // Payload bytes never reach logs; this package returns values, it does
@@ -166,8 +165,8 @@ type FloodStats struct {
 // dd00 heads: 0x78 Sep 27, 0x51 Sep 17); unrecognized heads strip 8B
 // by analogy (single Sep-17 sample, documented heuristic) with NN
 // gap-filled from the missing indices in arrival order.
-// Continuation payloads append raw. Per-datagram trailers follow
-// flags bit5 (0x20): 12B when set, else 8B.
+// Continuation payloads append raw. Per-datagram trailer length comes
+// from ChannelTrailerLen.
 func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, blockKey string) (frags []lobby.Frag, offsets []int, st FloodStats, err error) {
 	type group struct {
 		seq     uint32
@@ -191,10 +190,7 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 		}
 		n := len(clear)
 		seq := binary.LittleEndian.Uint32(clear[n-8 : n-4])
-		tr := 8
-		if binary.LittleEndian.Uint16(clear[0:2])&0x20 != 0 {
-			tr = 12
-		}
+		tr := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
 		if len(clear) < 2+tr {
 			st.Skipped++
 			continue
@@ -317,10 +313,7 @@ func ReassembleBulk(dump []DumpDatagram, flowSubstr string, fragSize int, blockK
 			st.Skipped++
 			continue
 		}
-		trailer := 8
-		if binary.LittleEndian.Uint16(clear[0:2])&0x20 != 0 {
-			trailer = 12
-		}
+		trailer := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
 		if len(clear) < 2+trailer {
 			st.Skipped++
 			continue
@@ -440,10 +433,7 @@ func CensusEntityBursts(dump []DumpDatagram, flowSubstr, blockKey string) (count
 			skipped++
 			continue
 		}
-		trailer := 8
-		if binary.LittleEndian.Uint16(clear[0:2])&0x20 != 0 {
-			trailer = 12
-		}
+		trailer := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
 		body := clear[2 : len(clear)-trailer]
 		if len(body) != entityBurstBodyLen {
 			skipped++
@@ -542,10 +532,9 @@ type SmallMsg struct {
 }
 
 // ClassifySmalls decrypts one S>C small datagram and splits its app
-// messages by ID. Trailer size follows flags bit5 (0x20): 12B
-// [mirror][seq][cumul] when set, else 8B [seq][cumul]. Unknown IDs stop
-// the walk (returned as rest, not an error — the EU2-metal taxonomy is
-// still being mapped). Truncation of known framing errors.
+// messages by ID. Trailer length comes from ChannelTrailerLen. Unknown
+// IDs stop the walk (returned as rest, not an error — the EU2-metal
+// taxonomy is still being mapped). Truncation of known framing errors.
 func ClassifySmalls(pkt []byte, blockKey string) (msgs []SmallMsg, rest []byte, err error) {
 	if len(pkt) < 4+8 {
 		return nil, nil, fmt.Errorf("wotlogin: small too short (%d B)", len(pkt))
@@ -554,9 +543,9 @@ func ClassifySmalls(pkt []byte, blockKey string) (msgs []SmallMsg, rest []byte, 
 	if err != nil {
 		return nil, nil, err
 	}
-	trailer := 8
-	if len(clear) >= 2 && binary.LittleEndian.Uint16(clear[0:2])&0x20 != 0 {
-		trailer = 12
+	trailer := 0
+	if len(clear) >= 2 {
+		trailer = ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
 	}
 	if len(clear) < 2+trailer {
 		return nil, nil, fmt.Errorf("wotlogin: small cleartext too short (%d B)", len(clear))

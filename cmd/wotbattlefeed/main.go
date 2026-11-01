@@ -138,12 +138,9 @@ func main() {
 			nskip++
 			continue
 		}
-		// channel footer: [seq][cumul] u32 (12B with cumul flag
-		// 0x0400, else 8B); app sits past the 2B head.
-		trl := 8
-		if binary.LittleEndian.Uint16(cl[0:2])&0x20 != 0 {
-			trl = 12
-		}
+		// channel footers: length is additive over the flag bits
+		// (login.ChannelTrailerLen); app sits past the 2B head.
+		trl := login.ChannelTrailerLen(binary.LittleEndian.Uint16(cl[0:2]))
 		if len(cl) < 2+trl {
 			nskip++
 			continue
