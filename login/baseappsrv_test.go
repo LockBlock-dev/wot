@@ -585,15 +585,17 @@ func TestBaseAppStageLoopback(t *testing.T) {
 		}
 		pkt := readDatagram(t, c2, 5*time.Second)
 		clear := decryptTest(t, blockKey, pkt)
-		switch len(pkt) {
-		case 1252:
-			continue
-		case 332:
+		// The burst is the carrier's fragment chain: full 1252B frames
+		// plus the chain's SHORT last fragment (a bundle does not end on
+		// a 1252B boundary), then the 332B terminator.
+		if len(pkt) == 332 {
 			sawTerm = true
 			if clear[0] != 0x78 || clear[1] != 0x04 {
 				t.Fatalf("terminator flags %x (want 7804 companion)", clear[:2])
 			}
-		default:
+			continue
+		}
+		if len(clear) < 14 || clear[0]&0x20 == 0 {
 			t.Fatalf("unexpected %dB in burst drain: %x", len(pkt), clear[:min(len(clear), 12)])
 		}
 	}

@@ -459,12 +459,22 @@ func (s *BaseAppServer) loadBulk() (int, error) {
 		return 0, err
 	}
 	for _, d := range dump {
-		if d.Dir != "S>C" || len(d.Data) != s.cfg.BulkFragSize || !s.inFlow(d.Addr) {
+		if d.Dir != "S>C" || len(d.Data) < 20 || !s.inFlow(d.Addr) {
 			continue
 		}
 		clear, err := decryptBlowfish(key, d.Data[4:])
-		if err != nil {
+		if err != nil || len(clear) < 14 {
 			continue // mis-captured frame: drop silently
+		}
+		// Only fragments belong to the burst. The LAST fragment of a
+		// chain is short (the bundle does not end on a 1252B boundary),
+		// so filtering on the full size drops the tail of every bundle
+		// and the client assembles a short one:
+		//
+		//   BundleDataPos::advance: Ran out of packets.
+		//   MF_ASSERT_DEV FAILED: tailAdvanceSuccess
+		if binary.LittleEndian.Uint16(clear[0:2])&chFlagFragment == 0 {
+			continue
 		}
 		s.bulk = append(s.bulk, clear)
 	}
@@ -509,12 +519,15 @@ func (s *BaseAppServer) splitBulkFrames() ([]bulkFrame, error) {
 	}
 	var out []bulkFrame
 	for _, d := range dump {
-		if d.Dir != "S>C" || len(d.Data) != s.cfg.BulkFragSize || !s.inFlow(d.Addr) {
+		if d.Dir != "S>C" || len(d.Data) < 20 || !s.inFlow(d.Addr) {
 			continue
 		}
 		clear, err := decryptBlowfish(key, d.Data[4:])
 		if err != nil || len(clear) < 14 {
 			continue // mis-captured frame: drop silently
+		}
+		if binary.LittleEndian.Uint16(clear[0:2])&chFlagFragment == 0 {
+			continue // not a fragment: the burst is the fragment chain
 		}
 		n := len(clear)
 		flags := binary.LittleEndian.Uint16(clear[0:2])
