@@ -23,8 +23,18 @@ import (
 const serverTestMaxNonce = 8 << 20
 
 // testDigestA is the "guest" digest configured into the test server's
-// allowlist (values are arbitrary; the gate compares bytes only).
+// version table (values are arbitrary; the gate compares bytes only).
 var testDigestA = [16]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+
+// testVersions is the one-build table the tests run against: the live
+// protocol bytes paired with testDigestA.
+func testVersions() []ClientVersion {
+	return []ClientVersion{{
+		Name:   "test",
+		Proto:  [4]byte{verSub, verPatch, verMinor, verMajor},
+		Digest: testDigestA,
+	}}
+}
 
 var (
 	testPrivOnce sync.Once
@@ -53,7 +63,7 @@ func testServer(t *testing.T, listen *net.UDPAddr) *LoginAppServer {
 	t.Helper()
 	srv, err := NewLoginAppServer(ServerConfig{
 		MaxNonce: serverTestMaxNonce,
-		Digests:  [][16]byte{testDigestA},
+		Versions: testVersions(),
 	}, testRSAKey(t))
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -619,7 +629,7 @@ func TestLoginAppCredentialGate(t *testing.T) {
 	reject := true
 	srv, err := NewLoginAppServer(ServerConfig{
 		MaxNonce: serverTestMaxNonce,
-		Digests:  [][16]byte{testDigestA},
+		Versions: testVersions(),
 		VerifyCredentials: func(user, pass string) (int64, error) {
 			gotUser, gotPass = user, pass
 			if reject {

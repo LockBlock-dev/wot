@@ -45,7 +45,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LockBlock-dev/wot/entdef"
 	"github.com/LockBlock-dev/wot/internal/cuckoo"
 )
 
@@ -92,18 +91,14 @@ type ServerConfig struct {
 	// MaxNonce is the PoW easiness bound announced in every challenge
 	// (default DefaultMaxNonce; the solver only scans nonces < 1<<32).
 	MaxNonce uint64
-	// Version is the accepted protocol version bytes (sub, patch,
-	// minor, major; zero → the live 2.4.0 {5,0,1,17}, §5.1). AnyVersion
-	// accepts anything (protocol subpatchs moved between client
-	// builds; strict helps otherwise).
-	Version    [4]byte
-	AnyVersion bool
-	// Digests is the accepted BigWorld.digest allowlist. nil → both
-	// pinned client truths (entdef.Truth240/Truth241: 2.4.0 recomputed
-	// offline byte-identically plus in-game dump; 2.4.1 in-game dump
-	// Oct-15). AcceptAnyDigest turns the gate off (probes only; the
-	// live server rejects mismatches with status 70).
-	Digests         [][16]byte
+	// Versions is the set of client builds the server serves, each
+	// pairing the protocol bytes it announces with the entity-defs
+	// digest it presents (see versions.go). nil → KnownVersions(), the
+	// two pinned builds. AnyVersion accepts any protocol bytes and
+	// AcceptAnyDigest any digest (probes only; the live server refuses
+	// mismatches with status 65 and 70 respectively).
+	Versions        []ClientVersion
+	AnyVersion      bool
 	AcceptAnyDigest bool
 	// Advertise is the endpoint minted into the LOGGED_ON record (12 B
 	// ip4 + port BE + salt + key). nil → mirror the listener (IP
@@ -367,15 +362,8 @@ func NewLoginAppServer(cfg ServerConfig, priv *rsa.PrivateKey) (*LoginAppServer,
 	if cfg.MaxNonce > 1<<32 {
 		return nil, fmt.Errorf("wotserver: PoW bound %d above the 32-bit nonce range", cfg.MaxNonce)
 	}
-	if cfg.Version == [4]byte{} {
-		cfg.Version = [4]byte{verSub, verPatch, verMinor, verMajor}
-	}
-	if cfg.Digests == nil {
-		truths, err := pinnedDigests()
-		if err != nil {
-			return nil, err
-		}
-		cfg.Digests = truths
+	if cfg.Versions == nil {
+		cfg.Versions = KnownVersions()
 	}
 	if cfg.Advertise != nil {
 		if cfg.Advertise.Port == 0 {
@@ -390,23 +378,6 @@ func NewLoginAppServer(cfg ServerConfig, priv *rsa.PrivateKey) (*LoginAppServer,
 		priv:    priv,
 		pending: make(map[string]*pendingChallenge),
 	}, nil
-}
-
-// pinnedDigests decodes the two live client truths into record digests
-// (single-sourced from entdef: 2.4.0 offline recompute green since
-// 2026-09-20; 2.4.1 in-game via mods/digest-dumper, Oct-15).
-func pinnedDigests() ([][16]byte, error) {
-	out := make([][16]byte, 0, 2)
-	for _, hx := range []string{entdef.Truth240, entdef.Truth241} {
-		b, err := hex.DecodeString(hx)
-		if err != nil {
-			return nil, fmt.Errorf("wotserver: pinned digest %s…: %w", hx[:8], err)
-		}
-		var d [16]byte
-		copy(d[:], b)
-		out = append(out, d)
-	}
-	return out, nil
 }
 
 // Serve runs the read loop until ctx closes. Per datagram: handle,
@@ -509,8 +480,8 @@ func (s *LoginAppServer) handlePacket(pkt []byte, from, listen *net.UDPAddr) ([]
 // any second reply, RetryingRequest-style, so a reissue surfaces as
 // "rejected status=66" on their side and the NEXT attempt starts clean).
 func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLoginReq, sol *loginAppChallengeResp) ([]byte, error) {
-	if !s.cfg.AnyVersion && req.version != s.cfg.Version {
-		s.logf("%s: login rid=%d version %v rejected (want %v)", from, req.rid, req.version, s.cfg.Version)
+	if !s.cfg.AnyVersion && !AcceptsProto(s.cfg.Versions, req.version) {
+		s.logf("%s: login rid=%d version %v rejected (known: %s)", from, req.rid, req.version, versionNames(s.cfg.Versions))
 		return refusePacket(req.rid, statusBadVersion, textBadVersion)
 	}
 	if !req.encrypted {
@@ -545,8 +516,8 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 	} else {
 		return s.issueChallenge(from, req.rid)
 	}
-	if !s.acceptDigest(params.Digest) {
-		s.logf("%s: digest %x rejected", from, params.Digest)
+	if !s.acceptDigest(req.version, params.Digest) {
+		s.logf("%s: digest %x rejected for version %v", from, params.Digest, req.version)
 		return refusePacket(req.rid, statusBadDigest, textBadDigest)
 	}
 	var accountID int64
@@ -612,17 +583,31 @@ func (s *LoginAppServer) verifyChallenge(from *net.UDPAddr, sol *loginAppChallen
 }
 
 // acceptDigest is the entity-defs gate (live semantics: never zero,
-// never foreign — status 70 otherwise).
-func (s *LoginAppServer) acceptDigest(d [16]byte) bool {
+// never foreign — status 70 otherwise). The digest is checked against
+// the version the client announced, so a build's protocol bytes paired
+// with another build's digest is refused rather than accepted by a flat
+// allowlist.
+func (s *LoginAppServer) acceptDigest(proto [4]byte, d [16]byte) bool {
 	if s.cfg.AcceptAnyDigest {
 		return true
 	}
-	for _, t := range s.cfg.Digests {
-		if d == t {
-			return true
-		}
+	_, ok := Identify(s.cfg.Versions, proto, d)
+	return ok
+}
+
+// versionNames renders the known builds for a log line.
+func versionNames(versions []ClientVersion) string {
+	if len(versions) == 0 {
+		return "none"
 	}
-	return false
+	out := ""
+	for i, v := range versions {
+		if i > 0 {
+			out += ", "
+		}
+		out += v.Name
+	}
+	return out
 }
 
 // loggedOn builds the success reply: [FF][rid][status 1][Blowfish body]

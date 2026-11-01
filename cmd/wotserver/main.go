@@ -52,6 +52,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -293,13 +294,24 @@ func advertiseOf(conn *net.UDPConn) *net.UDPAddr {
 	return &net.UDPAddr{IP: ip, Port: la.Port}
 }
 
-// digestGateName names the configured gate (allowlist count only, the
-// values are public pinned truths).
+// digestGateName names the configured gate: the accepted builds, or
+// "any" when the gate is off. The digests themselves are public pinned
+// truths and are not printed.
 func digestGateName(cfg login.ServerConfig) string {
 	if cfg.AcceptAnyDigest {
 		return "any"
 	}
-	return fmt.Sprintf("strict(%d)", len(cfg.Digests))
+	// The default table is applied inside NewLoginAppServer, so a nil
+	// slice here means "the pinned builds".
+	versions := cfg.Versions
+	if versions == nil {
+		versions = login.KnownVersions()
+	}
+	names := make([]string, 0, len(versions))
+	for _, v := range versions {
+		names = append(names, v.Name)
+	}
+	return "strict(" + strings.Join(names, ",") + ")"
 }
 
 // recordName shows the effective record endpoint (nil = listener
