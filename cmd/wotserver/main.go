@@ -18,7 +18,12 @@
 //	          [-s1 127.0.0.1:32850] [-s2 127.0.0.1:32851]
 //	          [-flood FILE] [-floodkey FILE]
 //	          [-baseapp host:port] [-maxnonce N] [-any-version]
-//	          [-digest any] [-verbose]
+//	          [-digest any] [-verbose] [-config FILE]
+//
+// -config reads a JSON object whose keys mirror the flags (see
+// wotserver.example.json). A flag given on the command line always wins
+// over the file, and the file wins over the built-in default, so the
+// file is a base profile and the command line stays an override.
 //
 // BaseApp runs by default: the record advertises stage-1 (-s1) unless
 // -baseapp overrides it, and the redirect advertises -s2 (must bind
@@ -48,30 +53,67 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/LockBlock-dev/wot/login"
 	"github.com/LockBlock-dev/wot/server"
 )
 
-func main() {
-	addr := flag.String("addr", "127.0.0.1:20016", "LoginApp UDP listen address (host:port)")
-	privkey := flag.String("privkey", "mitm/loginapp_mitm.privkey",
-		"PEM RSA private key for LogOnParams decryption (pairs with mods/custom-server-mod)")
-	s1 := flag.String("s1", "127.0.0.1:32850", "BaseApp stage-1 listener host:port (the LOGGED_ON record shows this; \"\" = LoginApp only)")
-	s2 := flag.String("s2", "127.0.0.1:32851", "BaseApp stage-2 listener host:port (the [44] redirect target; bind inside 32810-32999)")
-	flood := flag.String("flood", "../captures/flows3-s2.txt", "wotproxy-style stage-2 dump for the bulk carrier (\"\" = no carrier)")
-	floodKey := flag.String("floodkey", "../captures/key3.txt", "hex block key file for the carrier dump")
-	baseapp := flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
-	maxnonce := flag.Int64("maxnonce", int64(login.DefaultMaxNonce), "PoW easiness bound announced in challenges")
-	anyVersion := flag.Bool("any-version", false, "accept any client protocol version")
-	digest := flag.String("digest", "", `"any" disables the entity-defs gate (default: the pinned client truths)`)
-	verbose := flag.Bool("verbose", false, "per-datagram diagnostics to stderr")
-	dbPath := flag.String("db", "wotserver.db", "SQLite database path (accounts + player state)")
-	defUser := flag.String("user", "admin", "default account provisioned on startup when absent")
-	defPass := flag.String("pass", "admin", "password for the default account")
-	flag.Parse()
+// Flag targets live at package scope so -config can fill the ones the
+// command line left alone (see config.go).
+var (
+	flagAddr       *string
+	flagPrivKey    *string
+	flagS1         *string
+	flagS2         *string
+	flagFlood      *string
+	flagFloodKey   *string
+	flagBaseApp    *string
+	flagMaxNonce   *int64
+	flagAnyVersion *bool
+	flagDigest     *string
+	flagVerbose    *bool
+	flagDB         *string
+	flagUser       *string
+	flagPass       *string
+	flagConfig     *string
+)
 
-	priv, err := login.LoadRSAPrivateKey(*privkey)
+func main() {
+	flagAddr = flag.String("addr", "127.0.0.1:20016", "LoginApp UDP listen address (host:port)")
+	flagPrivKey = flag.String("privkey", "mitm/loginapp_mitm.privkey",
+		"PEM RSA private key for LogOnParams decryption (pairs with mods/custom-server-mod)")
+	flagS1 = flag.String("s1", "127.0.0.1:32850", "BaseApp stage-1 listener host:port (the LOGGED_ON record shows this; \"\" = LoginApp only)")
+	flagS2 = flag.String("s2", "127.0.0.1:32851", "BaseApp stage-2 listener host:port (the [44] redirect target; bind inside 32810-32999)")
+	flagFlood = flag.String("flood", "../captures/flows3-s2.txt", "wotproxy-style stage-2 dump for the bulk carrier (\"\" = no carrier)")
+	flagFloodKey = flag.String("floodkey", "../captures/key3.txt", "hex block key file for the carrier dump")
+	flagBaseApp = flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
+	flagMaxNonce = flag.Int64("maxnonce", int64(login.DefaultMaxNonce), "PoW easiness bound announced in challenges")
+	flagAnyVersion = flag.Bool("any-version", false, "accept any client protocol version")
+	flagDigest = flag.String("digest", "", `"any" disables the entity-defs gate (default: the pinned client truths)`)
+	flagVerbose = flag.Bool("verbose", false, "per-datagram diagnostics to stderr")
+	flagDB = flag.String("db", "wotserver.db", "SQLite database path (accounts + player state)")
+	flagUser = flag.String("user", "admin", "default account provisioned on startup when absent")
+	flagPass = flag.String("pass", "admin", "password for the default account")
+	flagConfig = flag.String("config", "", "JSON config file; flags given on the command line win")
+	flag.Parse()
+	// The file fills only what the command line did not set, so a flag
+	// always beats the file and the file beats the built-in default.
+	fileCfg, err := loadConfig(*flagConfig)
+	if err != nil {
+		fatal(err)
+	}
+	fileCfg.apply(func(name string) bool {
+		seen := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == name {
+				seen = true
+			}
+		})
+		return seen
+	})
+
+	priv, err := login.LoadRSAPrivateKey(*flagPrivKey)
 	if err != nil {
 		fatal(err)
 	}
@@ -79,23 +121,23 @@ func main() {
 	// Application layer: accounts, sessions, player state. The store is
 	// the only thing that knows SQL; swapping it for PostgreSQL means
 	// another server.Store implementation.
-	store, err := server.OpenSQLite(*dbPath)
+	store, err := server.OpenSQLite(*flagDB)
 	if err != nil {
 		fatal(err)
 	}
 	defer store.Close()
 	core := server.New(store, server.Config{
-		DefaultUser:     *defUser,
-		DefaultPassword: *defPass,
+		DefaultUser:     *flagUser,
+		DefaultPassword: *flagPass,
 	})
 	if err := core.Provision(context.Background()); err != nil {
 		fatal(err)
 	}
 
 	cfg := login.ServerConfig{
-		MaxNonce:   uint64(*maxnonce),
-		AnyVersion: *anyVersion,
-		Verbose:    *verbose,
+		MaxNonce:   uint64(*flagMaxNonce),
+		AnyVersion: *flagAnyVersion,
+		Verbose:    *flagVerbose,
 		// Every login is checked against the account store; a refusal
 		// rides status 68 with the error's text.
 		VerifyCredentials: func(user, pass string) (int64, error) {
@@ -106,17 +148,17 @@ func main() {
 			return acct.ID, nil
 		},
 	}
-	if *digest == "any" {
+	if *flagDigest == "any" {
 		cfg.AcceptAnyDigest = true
-	} else if *digest != "" {
-		fatal(fmt.Errorf("wotserver: unsupported -digest %q (use \"any\" or omit)", *digest))
+	} else if *flagDigest != "" {
+		fatal(fmt.Errorf("wotserver: unsupported -digest %q (use \"any\" or omit)", *flagDigest))
 	}
 
 	// BaseApp half: bind stage-1 (+ stage-2) unless -s1 is empty.
 	var base *login.BaseAppServer
 	var s1conn, s2conn *net.UDPConn
-	if *s1 != "" {
-		base, s1conn, s2conn = startBaseApp(*s1, *s2, *flood, *floodKey, *verbose)
+	if *flagS1 != "" {
+		base, s1conn, s2conn = startBaseApp(*flagS1, *flagS2, *flagFlood, *flagFloodKey, *flagVerbose)
 		// LoginApp→BaseApp handoff: every finished login feeds the
 		// stage-1 pending record (SessionKey, BlockKey, Name).
 		// Every finished login feeds stage-1; the account's free XP
@@ -136,8 +178,8 @@ func main() {
 			cfg.Advertise = advertiseOf(s1conn)
 		}
 	}
-	if *baseapp != "" {
-		rec, err := net.ResolveUDPAddr("udp", *baseapp)
+	if *flagBaseApp != "" {
+		rec, err := net.ResolveUDPAddr("udp", *flagBaseApp)
 		if err != nil {
 			fatal(fmt.Errorf("wotserver: -baseapp resolve: %w", err))
 		}
@@ -147,7 +189,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	listen, err := net.ResolveUDPAddr("udp", *addr)
+	listen, err := net.ResolveUDPAddr("udp", *flagAddr)
 	if err != nil {
 		fatal(fmt.Errorf("wotserver: -addr resolve: %w", err))
 	}
@@ -162,10 +204,12 @@ func main() {
 		digestGateName(cfg), recordName(cfg))
 	// Account name and DB path are not secrets; the password never
 	// gets a line.
-	fmt.Printf("wotserver: accounts in %s, default account %q\n", *dbPath, server.NormalizeName(*defUser))
+	fmt.Printf("wotserver: accounts in %s, default account %q\n", *flagDB, server.NormalizeName(*flagUser))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Sessions are in-memory; drop expired ones for the life of the run.
+	go core.SweepLoop(ctx, 10*time.Minute)
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 	wg.Add(1)
