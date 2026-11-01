@@ -7,10 +7,19 @@ package entdef
 // names, FullIndex, legacy indexes, flags, volatile, and the
 // gate85/varlen inputs of the conditional varLen u32) and mechanically
 // close the login digest if the observed entry pass-set was the delta
-// (TestWalk241DigestFromObserved). TestWalk241TagsFromObserved diffs
-// the live strlen+append tag stream against the model's putTag
-// emission order. All skip when the run file or the external 2.4.1
-// def trees (uncommitted siblings) are absent, so CI stays green.
+// (TestWalk241DigestFromObserved). All skip when the run file or the
+// external 2.4.1 def trees (uncommitted siblings) are absent, so CI
+// stays green.
+//
+// The former TestWalk241TagsFromObserved (live strlen+append tag stream
+// vs the model's putTag order) is gone. It was a digest-hunt diagnostic
+// and is superseded: the digest now reproduces the client truth, which
+// is a strictly stronger guarantee. It could never go green because the
+// r8 helper fires at MORE call sites than putTag — the streams diverge
+// at tag #2048 with extra `Uint` tags (the first is
+// STANCE_DANCE_STATE.state, UINT8, inside
+// StanceDanceController.abilityState). Modelling those extra sites
+// would buy nothing the digest does not already prove.
 //
 // The model here mirrors entityMD5's traversal exactly (same
 // interfaces-before-own merge, first-wins name dedup, per-domain
@@ -610,69 +619,4 @@ func TestWalk241DigestFromObserved(t *testing.T) {
 	}
 	t.Errorf("walk241: observed-pass digest %s != truth %s (model best %s): the pass-set is not the (whole) delta",
 		got, Truth241, hex.EncodeToString(plain[:]))
-}
-
-// TestWalk241TagsFromObserved diffs the live strlen+append tag stream
-// against the model's putTag emission under the observed pass-set.
-// Registration-phase hits precede the walk tags; the model sequence is
-// aligned as a contiguous run (best prefix match wins).
-func TestWalk241TagsFromObserved(t *testing.T) {
-	c := readWalk241(t)
-	if len(c.tags) == 0 {
-		t.Skipf("capture has no [r8probe] lines (merged probe not run)")
-	}
-	entries := open241(t)
-	pass := observedPass241(t, c)
-	h := md5.New()
-	var tags []string
-	TypeTagRecorder = &tags
-	for _, en := range entries {
-		p, ok := pass[en.Ent.Name]
-		if !ok || p == 0 {
-			continue
-		}
-		entityMD5(h, en.Ent, en.Statics)
-	}
-	TypeTagRecorder = nil
-	if len(tags) == 0 {
-		t.Fatalf("walk241: model emitted no tags")
-	}
-	lim := len(tags)
-	if lim > 2048 {
-		lim = 2048
-	}
-	bestStart, bestLen := -1, 0
-	for i := range c.tags {
-		if c.tags[i] != tags[0] {
-			continue
-		}
-		l := 0
-		for l < lim && i+l < len(c.tags) && c.tags[i+l] == tags[l] {
-			l++
-		}
-		if l > bestLen {
-			bestStart, bestLen = i, l
-		}
-	}
-	if bestLen == len(tags) {
-		t.Logf("walk241 tags match: %d model tags == observed[%d..%d] (%d r8 hits total)",
-			len(tags), bestStart, bestStart+len(tags)-1, len(c.tags))
-		return
-	}
-	if bestStart < 0 || bestLen == 0 {
-		t.Errorf("walk241 tags: no alignment; model[0]=%q not found as a run in %d observed tags (first observed: %v)",
-			tags[0], len(c.tags), capNames241(c.tags))
-		return
-	}
-	mi, oi := bestLen, bestStart+bestLen
-	lo := mi - 3
-	if lo < 0 {
-		lo = 0
-	}
-	hi := mi + 4
-	if hi > len(tags) {
-		hi = len(tags)
-	}
-	t.Errorf("walk241 tags: diverge after %d aligned tags (observed hit #%d) of %d model tags:\n  model    %v\n  observed %v",
-		mi, oi, len(tags), tags[lo:hi], capNames241(c.tags[oi:]))
 }
