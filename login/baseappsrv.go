@@ -1166,16 +1166,16 @@ func (s *BaseAppServer) handleStage1(conn Transport, from *net.UDPAddr, pkt []by
 	// redirect(36). The info rides with the rotation; the rest is the
 	// tail, so a lost rotation is re-signaled without replaying it.
 	s.mu.Lock()
-	acct, name := st.accountID, st.name
+	acct, name, ent := st.accountID, st.name, st.entityID
 	s.mu.Unlock()
-	info, err := buildChannelPacket(st.blockKey, flagsRel, stage1InfoApp(accountIDFor(acct, name)), nil, 1, 1)
+	info, err := buildChannelPacket(st.blockKey, flagsRel, stage1InfoApp(ent, accountIDFor(acct, name)), nil, 1, 1)
 	if err != nil {
 		return err
 	}
 	if _, err := conn.WriteToUDP(info, from); err != nil {
 		return err
 	}
-	s.logf("stage1 %s: info %dB (account %d)", from, len(info), accountIDFor(acct, name))
+	s.logf("stage1 %s: createBasePlayer %dB (entity %d, account %d)", from, len(info), ent, accountIDFor(acct, name))
 	return nil
 }
 
@@ -1249,22 +1249,30 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 // + footers (flows3 s1_srv_4 decrypts to exactly that; the 0x13 head
 // is the piggy-backed tick, the 0x44 core trails 7 B, cumul 1 acks
 // the client's reliable auth1 seq 0).
-// stage1InfoApp mints the 52B stage-1 info app: the same
-// [02 0a 01 00 …] info the stage-2 pre-flood sends (infoApp), plus the
-// account id as an ASCII string. Captured verbatim from the paired EU2
-// login (flows3 flow 14, seq 1, decrypts to
-// `58 04 02 0a 01 00 3e 8b 23 00 13 3e 05 12 00 f1 f7 2b 00 0b 00 00
+// stage1InfoApp mints the 52B stage-1 info app. The client reads it as
+// ClientInterface::createBasePlayer — its own log says so:
 //
-//	09 "123456789" 00 01 00 00 00 01 00 00 00`). The id is substituted
+//	ServerConnection::createBasePlayer: id 2881521
 //
-// per session; it is always 9 digits (accountIDFor), so the length byte
-// and the frame size never move.
-func stage1InfoApp(accountID uint64) []byte {
+// so it carries the player entity id, and that id must be the SAME one
+// stage-2's CreateBasePlayer uses. Two different ids leave the client
+// with two player entities and it asserts `pEntity` when it enters the
+// space (bw_entities.cpp:1103).
+//
+// Captured verbatim from the paired EU2 login (flows3 flow 14, seq 1,
+// which decrypts to 58 04 | 02 0a 01 00 3e 8b 23 00 13 3e 05 12 00
+// f1 f7 2b 00 0b 00 00 09 "123456789" 00 | 01 00 00 00 | 01 00 00 00).
+// There f1 f7 2b 00 is that session's entity id and the 9 ASCII digits
+// are its account id; both are substituted here. The account id is
+// always 9 digits (accountIDFor), so the length byte and the frame size
+// never move.
+func stage1InfoApp(entityID uint32, accountID uint64) []byte {
 	app := []byte{
 		0x02, 0x0a, 0x01, 0x00, 0x3e, 0x8b, 0x23, 0x00, 0x13, 0x3e,
-		0x05, 0x12, 0x00, 0xf1, 0xf7, 0x2b, 0x00, 0x0b, 0x00, 0x00,
+		0x05, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
 		0x09,
 	}
+	binary.LittleEndian.PutUint32(app[13:17], entityID)
 	app = append(app, []byte(fmt.Sprintf("%09d", accountID))...)
 	return append(app, 0x00)
 }

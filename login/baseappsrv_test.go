@@ -36,7 +36,11 @@ const (
 	// frame, seq 3) — the two frames the client needs between the
 	// rotation and the redirect. The info carries the account id as an
 	// ASCII string; the space names the space to enter.
-	genuineStage1InfoPrefix = "5804020a01003e8b2300133e051200f1f72b000b000009"
+	// The entity id (capture: f1 f7 2b 00) and the account id (capture:
+	// "123456789") are substituted per session, so the template is
+	// prefix + entityID(4) + mid + 9 digits + suffix.
+	genuineStage1InfoPrefix = "5804020a01003e8b2300133e051200"
+	genuineStage1InfoMid    = "0b000009"
 	genuineStage1InfoSuffix = "000100000001000000"
 	genuineStage1SpaceRaw   = "5804133e1a500d0764656661756c74048002 4e2e0300000001000000"
 	genuineRedirectRaw      = "5804133f445cdf14d4804c0000010400000001000000"
@@ -390,16 +394,27 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	info1 := readDatagram(t, c1, 3*time.Second)
 	clearInfo1 := decryptTest(t, blockKey, info1)
 	prefix, _ := hex.DecodeString(genuineStage1InfoPrefix)
+	mid, _ := hex.DecodeString(genuineStage1InfoMid)
 	suffix, _ := hex.DecodeString(genuineStage1InfoSuffix)
-	if len(clearInfo1) != len(prefix)+9+len(suffix) {
-		t.Fatalf("stage-1 info clear %x: %d B, want %d", clearInfo1, len(clearInfo1), len(prefix)+9+len(suffix))
+	wantLen := len(prefix) + 4 + len(mid) + 9 + len(suffix)
+	if len(clearInfo1) != wantLen {
+		t.Fatalf("stage-1 info clear %x: %d B, want %d", clearInfo1, len(clearInfo1), wantLen)
 	}
-	if !bytes.Equal(clearInfo1[:len(prefix)], prefix) || !bytes.Equal(clearInfo1[len(prefix)+9:], suffix) {
-		t.Fatalf("stage-1 info clear %x: prefix/suffix do not match the capture", clearInfo1)
+	if !bytes.Equal(clearInfo1[:len(prefix)], prefix) {
+		t.Fatalf("stage-1 info clear %x: prefix does not match the capture", clearInfo1)
 	}
-	for _, c := range clearInfo1[len(prefix) : len(prefix)+9] {
+	// The entity id must be the one stage-2 uses (the session key), or
+	// the client ends up with two player entities and asserts pEntity.
+	if got := binary.LittleEndian.Uint32(clearInfo1[len(prefix) : len(prefix)+4]); got != sessKey {
+		t.Fatalf("stage-1 createBasePlayer entity %d, want the session key %d", got, sessKey)
+	}
+	rest := clearInfo1[len(prefix)+4:]
+	if !bytes.Equal(rest[:len(mid)], mid) || !bytes.Equal(rest[len(mid)+9:], suffix) {
+		t.Fatalf("stage-1 info clear %x: mid/suffix do not match the capture", clearInfo1)
+	}
+	for _, c := range rest[len(mid) : len(mid)+9] {
 		if c < '0' || c > '9' {
-			t.Fatalf("stage-1 info account id %q is not 9 digits", clearInfo1[len(prefix):len(prefix)+9])
+			t.Fatalf("stage-1 info account id %q is not 9 digits", rest[len(mid):len(mid)+9])
 		}
 	}
 	// tick, space, then redirect: the sweep fires ~300 ms after the rotation.
