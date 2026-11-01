@@ -47,6 +47,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/LockBlock-dev/wot/lobby"
 )
 
 // Manager port window every genuine [44] redirect target lands in
@@ -1044,7 +1046,7 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		return nil // acks and anything else: no answer (genuine parity)
 	}
 	switch cmd {
-	case 100: // CmdSyncData — answered ONCE per session
+	case lobby.CmdSyncData: // answered ONCE per session
 		s.mu.Lock()
 		synced := st.synced
 		st.synced = true
@@ -1056,13 +1058,13 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			}
 			s.logf("stage2 %s: post-flood sync → [13] rev answer (minted)", from)
 		}
-	case 501: // CmdReqServerStats
+	case lobby.CmdReqServerStats:
 		app := append([]byte{0x13, 0}, s.pollAns[4:len(s.pollAns)-8]...)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}
 		s.logf("stage2 %s: post-flood poll → 1a/5b stats answer (minted)", from)
-	case 121: // CmdSetActiveVehSeason
+	case lobby.CmdSetActiveVehSeason:
 		// We hold no garage, so answer the genuine failure small the
 		// capture shows (~22 ms after the 52B season bundle, flows3-s2
 		// idx 1209/1210): `[13][tag][1a 5e 05][req u16 LE][00 00 00]`

@@ -57,30 +57,11 @@ const (
 	// Kept aliases: the family constant equals the Int3 length.
 	MsgDoCmdFamily = 0x1c
 
-	// Server command IDs (shipped scripts/common/AccountCommands.pyc).
-	CmdSyncData           = 100
-	CmdSyncShop           = 300
-	CmdSyncDossiers       = 600
-	CmdSetActiveVehSeason = 121
-	CmdReqServerStats     = 501
-
-	// RequestIDNoResponse marks fire-and-forget base calls: the
-	// STREAM_ID_ACCOUNT_CMDS range starts at 200 (shipped
-	// scripts/common/streamIDs.pyc), so MIN+2 = 202
-	// (AccountCommands.REQUEST_ID_NO_RESPONSE).
-	RequestIDNoResponse = 202
-
 	// Broker token types (shipped scripts/common/constants.pyc
 	// TOKEN_TYPE): the genuine opener requests XMPPCS first, then
 	// WGNI_JWT inside the 68B poll bundle.
 	TokenTypeXMPPCS  = 1
 	TokenTypeWGNIJWT = 5
-
-	// Chat command ordinals (shipped scripts/common/chat_shared.pyc
-	// CHAT_COMMANDS declaration order: initAck first, then 21 more
-	// entries before requestLastSysMessages).
-	ChatCmdInitAck                = 0
-	ChatCmdRequestLastSysMessages = 22
 
 	// A1 method tags (Mercury IDs = 136 + exposed rank; codebook
 	// above — one tag per method, no family sharing).
@@ -185,25 +166,30 @@ func putI64(b []byte, v int64) []byte {
 	return append(b, tmp[:]...)
 }
 
+// sequenceIDHighBound is SequenceIDGenerator's default highBound
+// (shipped scripts/common/ids_generators.pyc). The token and chat
+// sequences both use the default 0..highBound range.
+const sequenceIDHighBound = 32767
+
 // RequestSequence mirrors helpers SequenceIDGenerator (shipped
 // scripts/common/ids_generators.pyc): each Next increments, wrapping
 // to the low bound at the high bound. Three independent sequences
 // exist on the wire, and confusing them misattributes IDs:
 //
 //   - base calls allocate from the shared account repository, which
-//     starts at REQUEST_ID_UNRESERVED_MIN = 220 and wraps at
-//     REQUEST_ID_UNRESERVED_MAX = 30000 (shipped Account.pyc
+//     starts at RequestIDUnreservedMin and wraps at
+//     RequestIDUnreservedMax (shipped Account.pyc
 //     __getRequestID + common/AccountCommands.pyc). A fresh login's
 //     first base calls are therefore 221, 222, 223, ... — the
 //     "fixed" opener IDs are just the first allocations of a fixed
 //     call order, not constants.
 //   - requestToken calls allocate from TokenRequester's CLASS-level
-//     generator (0 to 32767, shared across token types AND with
-//     pre-lobby users), so the opener's token IDs depend on prior
+//     generator (0..sequenceIDHighBound, shared across token types
+//     AND with pre-lobby users), so the opener's token IDs depend on prior
 //     in-session allocations (Oct-01: (1,1) then (2,5); Oct-05:
 //     (3,1) then (4,5) after two earlier allocations).
 //   - chat tails allocate from the per-ClientChat generator (also
-//     0 to 32767), so the sync bundles' (1,22,…) then (2,0,0,2,0,…)
+//     0..sequenceIDHighBound), so the sync bundles' (1,22,…) then (2,0,0,2,0,…)
 //     are its first two allocations.
 type RequestSequence struct {
 	cur   uint16
@@ -223,18 +209,18 @@ func (s *RequestSequence) next() uint16 {
 // NewBaseRequestIDs starts the shared account-repository sequence
 // (first allocation 221).
 func NewBaseRequestIDs() *RequestSequence {
-	return &RequestSequence{cur: 220, max: 30000, reset: 220}
+	return &RequestSequence{cur: RequestIDUnreservedMin, max: RequestIDUnreservedMax, reset: RequestIDUnreservedMin}
 }
 
 // NewTokenRequestIDs starts the shared TokenRequester sequence
 // (first allocation 1).
 func NewTokenRequestIDs() *RequestSequence {
-	return &RequestSequence{cur: 0, max: 32767, reset: 0}
+	return &RequestSequence{cur: 0, max: sequenceIDHighBound, reset: 0}
 }
 
 // NewChatRequestIDs starts a ClientChat sequence (first allocation 1).
 func NewChatRequestIDs() *RequestSequence {
-	return &RequestSequence{cur: 0, max: 32767, reset: 0}
+	return &RequestSequence{cur: 0, max: sequenceIDHighBound, reset: 0}
 }
 
 // NextBaseID allocates one account-repository request ID.

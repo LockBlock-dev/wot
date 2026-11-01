@@ -11,7 +11,7 @@ import (
 
 func TestDoCmdInt3Poll(t *testing.T) {
 	// Game vector shape: the 5s poll is (202, 501, 0, 0, 0), 31B app.
-	app := DoCmdInt3(202, 501, 0, 0, 0)
+	app := DoCmdInt3(RequestIDNoResponse, CmdReqServerStats, 0, 0, 0)
 	if len(app) != 31 {
 		t.Fatalf("len=%d", len(app))
 	}
@@ -29,7 +29,7 @@ func TestDoCmdInt3Poll(t *testing.T) {
 }
 
 func TestDoCmdInt2Shape(t *testing.T) {
-	app := DoCmdInt2(225, 121, 7, 9)
+	app := DoCmdInt2(225, CmdSetActiveVehSeason, 7, 9)
 	if len(app) != 23 {
 		t.Fatalf("len=%d", len(app))
 	}
@@ -39,7 +39,7 @@ func TestDoCmdInt2Shape(t *testing.T) {
 }
 
 func TestDoCmdInt4Shape(t *testing.T) {
-	app := DoCmdInt4(202, 501, 1, 2, 3, 4)
+	app := DoCmdInt4(RequestIDNoResponse, CmdReqServerStats, 1, 2, 3, 4)
 	if len(app) != 39 {
 		t.Fatalf("len=%d", len(app))
 	}
@@ -50,7 +50,7 @@ func TestDoCmdInt4Shape(t *testing.T) {
 }
 
 func TestDoCmdStrShape(t *testing.T) {
-	app := DoCmdStr(221, 100, []byte{1, 2, 3})
+	app := DoCmdStr(221, CmdSyncData, []byte{1, 2, 3})
 	// 1 + 2 + 2+2 + 1+3 = 11 (packed-int string length).
 	if len(app) != 11 {
 		t.Fatalf("len=%d", len(app))
@@ -71,7 +71,7 @@ func TestRequestTokenShape(t *testing.T) {
 }
 
 func TestLobbyBundleConcat(t *testing.T) {
-	a := DoCmdInt3(202, 501, 0, 0, 0)
+	a := DoCmdInt3(RequestIDNoResponse, CmdReqServerStats, 0, 0, 0)
 	b := BuildRequestToken(1, 1)
 	bun := BuildLobbyBundle(0x01020304, a, b)
 	if len(bun) != 5+31+6 {
@@ -119,7 +119,7 @@ func TestDoCmdIntArrEnqueue(t *testing.T) {
 	// Byte-exact genuine vector: lobby #2 52B battle-queue join
 	// (enqueueRandom: RANDOMS=1, vehInvID, gameplays, arena, flags).
 	vec, _ := hex.DecodeString("9e1900ca00bc02050100000053010000430000000000000002000000")
-	got := DoCmdIntArr(202, 700, []int32{1, 339, 67, 0, 2})
+	got := DoCmdIntArr(RequestIDNoResponse, CmdEnqueueInBattleQueue, []int32{1, 339, 67, 0, 2})
 	if !bytes.Equal(got, vec) {
 		t.Fatalf("got %x want %x", got, vec)
 	}
@@ -128,7 +128,7 @@ func TestDoCmdIntArrEnqueue(t *testing.T) {
 func TestDoCmdIntArrLongCount(t *testing.T) {
 	// Packed-int extended form: 255 elements → FF + 3 LE bytes.
 	vals := make([]int32, 255)
-	app := DoCmdIntArr(202, 700, vals)
+	app := DoCmdIntArr(RequestIDNoResponse, CmdEnqueueInBattleQueue, vals)
 	// 1 + 2 + (2+2+4+255*4) = 1031.
 	if len(app) != 1031 {
 		t.Fatalf("len=%d", len(app))

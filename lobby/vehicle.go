@@ -26,12 +26,26 @@ import "fmt"
 // tables: the caller supplies the turret count (1 nearly always;
 // multi-turret Carousel vehicles take 2+).
 const (
+	// compactItemVehicle is ITEM_TYPES.vehicle (shipped
+	// common/items/__init__.pyc ITEM_TYPE_NAMES index 1);
+	// compactExtFlag is EXTENDED_VEHICLE_TYPE_ID_FLAG (shipped
+	// common/items/vehicles.pyc).
 	compactItemVehicle = 1
 	compactExtFlag     = 2
-	compactFlagEnh     = 16
-	compactFlagEmb     = 32
-	compactFlagSkip    = 64
-	compactFlagCamo    = 128
+
+	// Header field layout. The game spells these inline as `& 15`
+	// and `>> 4 & 15` (common/items/__init__.pyc
+	// parseIntCompactDescr, common/items/vehicles.pyc
+	// parseVehicleCompactDescr) with no named constant, so the names
+	// are local.
+	compactItemTypeMask = 15
+	compactNationShift  = 4
+	compactNationMask   = 15
+
+	compactFlagEnh  = 16
+	compactFlagEmb  = 32
+	compactFlagSkip = 64
+	compactFlagCamo = 128
 )
 
 // Nation names by header hi4 (nations.pyc NAMES order).
@@ -52,8 +66,8 @@ func ParseIntDescr(b []byte) (itemType, nation uint8, id uint16, err error) {
 	if ext && len(b) < 3 {
 		return 0, 0, 0, fmt.Errorf("lobby: extended compactDescr truncated")
 	}
-	itemType = uint8(head & 15)
-	nation = uint8(head >> 4 & 15)
+	itemType = uint8(head & compactItemTypeMask)
+	nation = uint8(head >> compactNationShift & compactNationMask)
 	id = uint16(b[1])
 	if ext {
 		id |= uint16(b[2]) << 8
@@ -108,7 +122,7 @@ func SectionCompactDescr(b []byte, turrets int) (CompactSections, error) {
 	if b[0]&compactExtFlag != 0 {
 		off = 3
 	}
-	s.ItemType = b[0] & 15
+	s.ItemType = b[0] & compactItemTypeMask
 	s.Nation = nation
 	s.TypeID = id
 	if turrets < 1 {

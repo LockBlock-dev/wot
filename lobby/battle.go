@@ -643,19 +643,19 @@ func ParseBattleVehicles(bulk []byte) map[uint32]VehicleRef {
 				continue
 			}
 			cd := binary.LittleEndian.Uint16(bulk[rend+1:])
-			if cd&15 != 1 {
+			if cd&compactItemTypeMask != compactItemVehicle {
 				continue
 			}
-			nation, id = uint8(cd>>4&15), cd>>8
+			nation, id = uint8(cd>>compactNationShift&compactNationMask), cd>>8
 		case 0x10:
 			if rend+4 > len(bulk) {
 				continue
 			}
 			b0 := bulk[rend+1]
-			if lo := b0 & 15; lo != 1 && lo != 3 {
+			if lo := b0 & compactItemTypeMask; lo != compactItemVehicle && lo != compactItemVehicle|compactExtFlag {
 				continue
 			}
-			nation, id = uint8(b0>>4&15), uint16(bulk[rend+2])|uint16(bulk[rend+3])<<8
+			nation, id = uint8(b0>>compactNationShift&compactNationMask), uint16(bulk[rend+2])|uint16(bulk[rend+3])<<8
 		default:
 			continue
 		}
@@ -713,19 +713,19 @@ func ParseBattleMounts(bulk []byte, tab ComponentTable) map[uint32]MountedModule
 				continue
 			}
 			b0 := bulk[rend+1]
-			if b0&15 != 1 || b0&compactExtFlag != 0 {
+			if b0&compactItemTypeMask != compactItemVehicle || b0&compactExtFlag != 0 {
 				continue
 			}
-			nation, id, hlen = uint8(b0>>4&15), uint16(bulk[rend+2]), 2
+			nation, id, hlen = uint8(b0>>compactNationShift&compactNationMask), uint16(bulk[rend+2]), 2
 		case 0x10:
 			if rend+4 > len(bulk) {
 				continue
 			}
 			b0 := bulk[rend+1]
-			if lo := b0 & 15; lo != 1|compactExtFlag {
+			if lo := b0 & compactItemTypeMask; lo != compactItemVehicle|compactExtFlag {
 				continue
 			}
-			nation, id, hlen = uint8(b0>>4&15), uint16(bulk[rend+2])|uint16(bulk[rend+3])<<8, 3
+			nation, id, hlen = uint8(b0>>compactNationShift&compactNationMask), uint16(bulk[rend+2])|uint16(bulk[rend+3])<<8, 3
 		default:
 			continue
 		}
