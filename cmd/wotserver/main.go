@@ -119,7 +119,16 @@ func main() {
 		base, s1conn, s2conn = startBaseApp(*s1, *s2, *flood, *floodKey, *verbose)
 		// LoginApp→BaseApp handoff: every finished login feeds the
 		// stage-1 pending record (SessionKey, BlockKey, Name).
-		cfg.OnLoggedOn = base.Admit
+		// Every finished login feeds stage-1; the account's free XP
+		// rides along so the 1a/69 stats small is per-account.
+		cfg.OnLoggedOn = func(sess login.LoggedOnSession) {
+			if sess.AccountID > 0 {
+				if st, err := core.State(context.Background(), sess.AccountID); err == nil {
+					sess.FreeXP = st.FreeXP
+				}
+			}
+			base.Admit(sess)
+		}
 		if cfg.Advertise == nil {
 			// The record shows the ADDRESS a client should dial, so an
 			// unspecified bind host (0.0.0.0) rides 127.0.0.1 like the

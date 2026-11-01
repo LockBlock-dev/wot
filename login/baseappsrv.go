@@ -83,6 +83,9 @@ type LoggedOnSession struct {
 	// AccountID is the stored account behind this login (0 when the
 	// LoginApp runs without an account store).
 	AccountID int64
+	// FreeXP is the account's free experience, served in the 1a/69
+	// stats small. Zero means "not known": the capture's value replays.
+	FreeXP int64
 }
 
 // BaseAppConfig configures the server. Redirect is required: the
@@ -140,10 +143,11 @@ type BaseAppServer struct {
 	// extracted from the genuine triple-small frame — the 1a/73 clan
 	// block and the 1a/79 lobby offer it rode with stay v1-cut; the
 	// offer's stale redirect target must not re-enter our wire).
-	infoApp []byte // [02 0a 01 00 3f 8b 23 00 13 3f] app (10B)
-	descTpl []byte // 61B companion clear body (78 04 ...)
-	dictTpl []byte // `1a 76 9c 00` + 156B body (9b + 155B proto-2 pickle)
-	preOK   bool
+	infoApp  []byte // [02 0a 01 00 3f 8b 23 00 13 3f] app (10B)
+	descTpl  []byte
+	statsTpl []byte // 61B companion clear body (78 04 ...)
+	dictTpl  []byte // `1a 76 9c 00` + 156B body (9b + 155B proto-2 pickle)
+	preOK    bool
 
 	mu sync.Mutex
 	// pending is sessions awaiting their stage-1 handshake, keyed by
@@ -163,6 +167,7 @@ type clientState struct {
 	blockKey   string       // LogOnParams key (set once at admit)
 	name       string       // login username (future per-session smalls)
 	accountID  int64        // stored account behind the login (0 = none)
+	freeXP     int64        // account free XP for the 1a/69 stats small
 	sessionKey uint32       // login-minted
 	stageKey   uint32       // our stage-1 rotation (0 = none yet)
 	stage2Key  uint32       // our stage-2 rotation (0 = none yet)
@@ -242,6 +247,7 @@ func (s *BaseAppServer) Admit(sess LoggedOnSession) {
 		blockKey:   sess.BlockKey,
 		name:       sess.Name,
 		accountID:  sess.AccountID,
+		freeXP:     sess.FreeXP,
 		sessionKey: sess.SessionKey,
 		admittedAt: time.Now(),
 	}
@@ -430,6 +436,21 @@ func (s *BaseAppServer) loadPre() error {
 			if clear[2] == 0x02 && clear[3] == 0x0a && clear[4] == 0x01 && clear[5] == 0x00 {
 				s.infoApp = append([]byte(nil), clear[2:12]...)
 			}
+		case 92:
+			// The 1a/69 stats small: {stats:{freeXP:N},prevRev,cache,rev}.
+			// It is the only per-account field confirmed on the wire.
+			if s.statsTpl != nil {
+				continue
+			}
+			clear, err := decryptBlowfish(key, d.Data[4:])
+			if err != nil || len(clear) < 8 || clear[2] != 0x1a || clear[3] != 0x69 {
+				continue
+			}
+			tr := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
+			if len(clear) < 2+tr {
+				continue
+			}
+			s.statsTpl = append([]byte(nil), clear[2:len(clear)-tr]...)
 		case 76:
 			if s.descTpl != nil {
 				continue
@@ -528,6 +549,61 @@ func patchPickleValue(body []byte, key string, op byte, n int) ([]byte, error) {
 		return nil, fmt.Errorf("wotserver: session dict: key %q: expected BINPUT+%#02x, got % x", key, op, body[j:j+3])
 	}
 	return body[j+3 : j+3+n], nil
+}
+
+// patchPickleInt rewrites the integer stored under key in a proto-2
+// dict, keeping the original opcode width. It fails loud when the value
+// does not fit, so a shape change is never silently truncated.
+func patchPickleInt(body []byte, key string, v int64) error {
+	i := bytes.Index(body, []byte(key))
+	if i < 0 {
+		return fmt.Errorf("wotserver: pickle int: key %q not found", key)
+	}
+	j := i + len(key)
+	// Skip the memo put: BINPUT (0x71 + 1B) or LONG_BINPUT (0x72 + 4B).
+	switch {
+	case j < len(body) && body[j] == 0x71:
+		j += 2
+	case j+4 < len(body) && body[j] == 0x72:
+		j += 5
+	default:
+		return fmt.Errorf("wotserver: pickle int: key %q: no memo put", key)
+	}
+	if j >= len(body) {
+		return fmt.Errorf("wotserver: pickle int: key %q truncated", key)
+	}
+	switch body[j] {
+	case 0x4b: // BININT1
+		if v < 0 || v > 0xff {
+			return fmt.Errorf("wotserver: pickle int: %d does not fit BININT1", v)
+		}
+		body[j+1] = byte(v)
+	case 0x4d: // BININT2
+		if v < 0 || v > 0xffff {
+			return fmt.Errorf("wotserver: pickle int: %d does not fit BININT2", v)
+		}
+		binary.LittleEndian.PutUint16(body[j+1:], uint16(v))
+	case 0x4a: // BININT
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return fmt.Errorf("wotserver: pickle int: %d does not fit BININT", v)
+		}
+		binary.LittleEndian.PutUint32(body[j+1:], uint32(int32(v)))
+	default:
+		return fmt.Errorf("wotserver: pickle int: key %q: unsupported opcode %#02x", key, body[j])
+	}
+	return nil
+}
+
+// statsFrame mints the 1a/69 stats small with the account's free XP.
+// freeXP <= 0 replays the capture's value.
+func statsFrame(tpl []byte, freeXP int64) ([]byte, error) {
+	app := append([]byte(nil), tpl...)
+	if freeXP > 0 {
+		if err := patchPickleInt(app, "freeXP", freeXP); err != nil {
+			return nil, err
+		}
+	}
+	return app, nil
 }
 
 // dictApp mints the session-dict frame APP: [13][40] + the 1a/76 small
@@ -996,7 +1072,25 @@ func (s *BaseAppServer) sendPre(conn Transport, to *net.UDPAddr, st *clientState
 	if err != nil {
 		return err
 	}
-	s.logf("stage2 %s: info %dB + descriptor %dB wire (name %dB)", to, len(info), descWire, len(st.name))
+	// 1a/69 stats small: the account's free XP. Optional — a carrier
+	// without one (flows3-s2) simply does not send it.
+	statsNote := ""
+	if s.statsTpl != nil {
+		statsApp, err := statsFrame(s.statsTpl, st.freeXP)
+		if err != nil {
+			return err
+		}
+		statsPkt, err := buildChannelPacket(st.blockKey, flagsRel, statsApp, nil, 2, 0)
+		if err != nil {
+			return err
+		}
+		if _, err := conn.WriteToUDP(statsPkt, to); err != nil {
+			return err
+		}
+		statsNote = fmt.Sprintf(" + 1a/69 stats %dB (freeXP %d)", len(statsApp), st.freeXP)
+	}
+	s.logf("stage2 %s: info %dB + descriptor %dB wire (name %dB)%s",
+		to, len(info), descWire, len(st.name), statsNote)
 	return nil
 }
 
