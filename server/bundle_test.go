@@ -65,14 +65,7 @@ func TestBundleRoundTripCapture(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 	if !bytes.Equal(out, raw) {
-		// KNOWN GAP: the bundle is an unclosed stream (its outer dict
-		// never gets SETITEMS), and the encoder currently re-emits
-		// 229 129 of the 245 370 decoded bytes. Mutation works — see
-		// TestBundleMutationCapture — but byte-identical round-trip
-		// does not yet. Skipped rather than left red so the gap is
-		// visible without masking real failures.
-		t.Skipf("round-trip not yet byte-identical: %d out, %d in (%d decoded)",
-			len(out), len(raw), len(raw)-len(b.Tail))
+		t.Fatalf("round-trip differs: %d out, %d in", len(out), len(raw))
 	}
 	t.Logf("bundle round-trip: %d bytes, %d objects, byte-identical", len(raw), len(b.Stack))
 }

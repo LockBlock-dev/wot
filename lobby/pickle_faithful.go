@@ -26,6 +26,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 )
 
 // Pickle opcodes used by the lobby bundle (protocol 2 subset).
@@ -135,6 +136,12 @@ func (n *FNode) SetString(v string) {
 	n.Kind, n.S, n.Dirty = FString, v, true
 }
 
+// keepOp is a container opcode to emit at a given stack index.
+type KeepOp struct {
+	at int
+	op byte
+}
+
 // fmarker is the MARK sentinel on the decode stack.
 type fmarker struct{}
 
@@ -152,11 +159,21 @@ func DecodeFaithful(data []byte) ([]*FNode, int, error) {
 // MARK that opened it is still pending when the document ends. Those
 // positions have to be replayed for the encoding to match.
 func DecodeFaithfulMarks(data []byte) ([]*FNode, []int, int, error) {
+	stack, marks, _, n, err := DecodeFaithfulOps(data)
+	return stack, marks, n, err
+}
+
+// DecodeFaithfulOps is DecodeFaithfulMarks plus the container opcodes
+// that must follow items the malformed-region fallback left on the
+// stack, as {stack index, opcode} pairs.
+func DecodeFaithfulOps(data []byte) ([]*FNode, []int, []KeepOp, int, error) {
 	d := &fdecoder{data: data, memo: map[int]*FNode{}}
 	if err := d.run(); err != nil {
-		return nil, nil, d.pos, err
+		return nil, nil, nil, d.pos, err
 	}
-	return d.stack, append([]int(nil), d.marks...), d.pos, nil
+	marks := append(append([]int(nil), d.marks...), d.keepMarks...)
+	sort.Ints(marks)
+	return d.stack, marks, d.keepOps, d.pos, nil
 }
 
 type fdecoder struct {
@@ -170,6 +187,13 @@ type fdecoder struct {
 	memo      map[int]*FNode
 	// lastOwner is the container the most recent markItems belonged to.
 	lastOwner *FNode
+	// keepMarks records MARKs whose items could not be attached (the
+	// malformed-region fallback). They stay on the stack, so the encoder
+	// must re-emit their MARK.
+	keepMarks []int
+	// keepOps records a container opcode that must follow the items the
+	// fallback left on the stack: {stack index to emit at, opcode}.
+	keepOps []KeepOp
 }
 
 func (d *fdecoder) push(n *FNode) { d.stack = append(d.stack, n) }
@@ -354,8 +378,15 @@ func (d *fdecoder) run() error {
 				return err
 			}
 			l := d.lastOwner
-			if l == nil {
-				return fmt.Errorf("lobby: APPENDS with no list")
+			if l == nil || (l.Kind != FList && l.Kind != FReduce) {
+				// Malformed region (the capture has a string that
+				// swallowed a document start): keep the items on the
+				// stack rather than attaching them to a non-list, and
+				// remember the MARK so the encoder re-emits it.
+				d.keepMarks = append(d.keepMarks, len(d.stack))
+				d.stack = append(d.stack, items...)
+				d.keepOps = append(d.keepOps, KeepOp{at: len(d.stack), op: opAppends})
+				break
 			}
 			l.Items = append(l.Items, items...)
 			l.Recipe = append(l.Recipe, FStep{Op: opAppends, N: len(items)})
@@ -381,8 +412,12 @@ func (d *fdecoder) run() error {
 				return err
 			}
 			m := d.lastOwner
-			if m == nil {
-				return fmt.Errorf("lobby: SETITEMS with no dict")
+			if m == nil || (m.Kind != FDict && m.Kind != FReduce) {
+				// Same malformed-region fallback as APPENDS.
+				d.keepMarks = append(d.keepMarks, len(d.stack))
+				d.stack = append(d.stack, items...)
+				d.keepOps = append(d.keepOps, KeepOp{at: len(d.stack), op: opSetItems})
+				break
 			}
 			for i := 0; i+1 < len(items); i += 2 {
 				m.Keys = append(m.Keys, items[i])
@@ -489,9 +524,21 @@ func EncodeFaithful(stack []*FNode) ([]byte, error) {
 // stack index listed in marks (the positions DecodeFaithfulMarks
 // reported as still open).
 func EncodeFaithfulMarks(stack []*FNode, marks []int) ([]byte, error) {
+	return EncodeFaithfulOps(stack, marks, nil)
+}
+
+// EncodeFaithfulOps is EncodeFaithfulMarks plus the container opcodes
+// DecodeFaithfulOps reported.
+func EncodeFaithfulOps(stack []*FNode, marks []int, ops []KeepOp) ([]byte, error) {
 	e := &fencoder{seen: map[*FNode]bool{}}
 	e.out = append(e.out, opProto, 2)
-	next := 0
+	next, nextOp := 0, 0
+	flushOps := func(at int) {
+		for nextOp < len(ops) && ops[nextOp].at == at {
+			e.out = append(e.out, ops[nextOp].op)
+			nextOp++
+		}
+	}
 	for i, n := range stack {
 		for next < len(marks) && marks[next] == i {
 			e.out = append(e.out, opMark)
@@ -500,10 +547,12 @@ func EncodeFaithfulMarks(stack []*FNode, marks []int) ([]byte, error) {
 		if err := e.emit(n); err != nil {
 			return nil, err
 		}
+		flushOps(i + 1)
 	}
 	for ; next < len(marks); next++ {
 		e.out = append(e.out, opMark)
 	}
+	flushOps(len(stack))
 	e.out = append(e.out, opStop)
 	return e.out, nil
 }

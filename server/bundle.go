@@ -24,6 +24,9 @@ type Bundle struct {
 	Stack []*lobby.FNode
 	// Raw is the reassembled bundle these nodes came from.
 	Raw []byte
+	// ops are container opcodes that follow items the decoder left on
+	// the stack (malformed-region fallback).
+	ops []lobby.KeepOp
 	// Marks are the stack indices where a MARK is still open at STOP.
 	// The lobby bundle is a stream whose outer dict is never closed, so
 	// these must be replayed for the encoding to match.
@@ -36,17 +39,17 @@ type Bundle struct {
 
 // DecodeBundle parses a reassembled lobby bundle.
 func DecodeBundle(raw []byte) (*Bundle, error) {
-	stack, marks, n, err := lobby.DecodeFaithfulMarks(raw)
+	stack, marks, ops, n, err := lobby.DecodeFaithfulOps(raw)
 	if err != nil {
 		return nil, fmt.Errorf("server: bundle decode: %w", err)
 	}
-	return &Bundle{Stack: stack, Marks: marks, Raw: raw, Tail: raw[n:]}, nil
+	return &Bundle{Stack: stack, Marks: marks, ops: ops, Raw: raw, Tail: raw[n:]}, nil
 }
 
 // Encode re-serialises the bundle. Untouched nodes replay verbatim, so
 // an unmodified bundle encodes back to its input bytes.
 func (b *Bundle) Encode() ([]byte, error) {
-	out, err := lobby.EncodeFaithfulMarks(b.Stack, b.Marks)
+	out, err := lobby.EncodeFaithfulOps(b.Stack, b.Marks, b.ops)
 	if err != nil {
 		return nil, fmt.Errorf("server: bundle encode: %w", err)
 	}
