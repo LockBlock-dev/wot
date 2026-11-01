@@ -19,6 +19,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,7 +32,14 @@ import (
 const (
 	genuineRotationRaw = "5804ff080000006eae000088ae6a690000000000000000"
 	genuineTickRaw     = "5804133e0200000001000000"
-	genuineRedirectRaw = "5804133f445cdf14d4804c0000010400000001000000"
+	// Stage-1 info (52B frame, flows3 flow 14 seq 1) and space (44B
+	// frame, seq 3) — the two frames the client needs between the
+	// rotation and the redirect. The info carries the account id as an
+	// ASCII string; the space names the space to enter.
+	genuineStage1InfoPrefix = "5804020a01003e8b2300133e051200f1f72b000b000009"
+	genuineStage1InfoSuffix = "000100000001000000"
+	genuineStage1SpaceRaw   = "5804133e1a500d0764656661756c74048002 4e2e0300000001000000"
+	genuineRedirectRaw      = "5804133f445cdf14d4804c0000010400000001000000"
 
 	// Post-flood chain heads (flows3-s2 tail, key3.txt decrypt):
 	// the first tail tick [13][7a] seq=503 cumul=3, and the rev answer
@@ -377,11 +385,33 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if !ok {
 		t.Fatalf("stage-1 rotation unreadable: %x", rot)
 	}
-	// tick then redirect: the sweep fires ~300 ms after the rotation.
+	// info rides with the rotation: the genuine 52B, account id spliced
+	// in as 9 ASCII digits (accountIDFor always yields 9).
+	info1 := readDatagram(t, c1, 3*time.Second)
+	clearInfo1 := decryptTest(t, blockKey, info1)
+	prefix, _ := hex.DecodeString(genuineStage1InfoPrefix)
+	suffix, _ := hex.DecodeString(genuineStage1InfoSuffix)
+	if len(clearInfo1) != len(prefix)+9+len(suffix) {
+		t.Fatalf("stage-1 info clear %x: %d B, want %d", clearInfo1, len(clearInfo1), len(prefix)+9+len(suffix))
+	}
+	if !bytes.Equal(clearInfo1[:len(prefix)], prefix) || !bytes.Equal(clearInfo1[len(prefix)+9:], suffix) {
+		t.Fatalf("stage-1 info clear %x: prefix/suffix do not match the capture", clearInfo1)
+	}
+	for _, c := range clearInfo1[len(prefix) : len(prefix)+9] {
+		if c < '0' || c > '9' {
+			t.Fatalf("stage-1 info account id %q is not 9 digits", clearInfo1[len(prefix):len(prefix)+9])
+		}
+	}
+	// tick, space, then redirect: the sweep fires ~300 ms after the rotation.
 	tick := readDatagram(t, c1, 3*time.Second)
 	clearTick := decryptTest(t, blockKey, tick)
 	if wantTick, _ := hex.DecodeString(genuineTickRaw); !bytes.Equal(clearTick, wantTick) {
 		t.Fatalf("tick clear %x want %x", clearTick, wantTick)
+	}
+	space := readDatagram(t, c1, 3*time.Second)
+	clearSpace := decryptTest(t, blockKey, space)
+	if wantSpace, _ := hex.DecodeString(strings.Replace(genuineStage1SpaceRaw, " ", "", -1)); !bytes.Equal(clearSpace, wantSpace) {
+		t.Fatalf("stage-1 space clear %x want %x", clearSpace, wantSpace)
 	}
 	red := readDatagram(t, c1, 3*time.Second)
 	clearRed := decryptTest(t, blockKey, red)

@@ -101,6 +101,11 @@ type LoggedOnSession struct {
 type BaseAppConfig struct {
 	Redirect *net.UDPAddr
 
+	// Stage1Space is the space name the stage-1 1a/50 small announces
+	// (the genuine capture carries "default"). The client enters this
+	// space after the redirect; an empty value falls back to "default".
+	Stage1Space string
+
 	// Flood carrier: a wotproxy-style dump of a genuine stage-2
 	// window plus its hex block key (ReadKeyFile format). 1252B S>C
 	// frames are channel-decrypted once at load and re-encrypted per
@@ -290,6 +295,9 @@ type clientState struct {
 
 // NewBaseAppServer validates the config and preloads the bulk carrier.
 func NewBaseAppServer(cfg BaseAppConfig) (*BaseAppServer, error) {
+	if cfg.Stage1Space == "" {
+		cfg.Stage1Space = "default"
+	}
 	if cfg.Redirect == nil {
 		return nil, fmt.Errorf("wotserver: baseapp needs the stage-2 endpoint (the [44] redirect target)")
 	}
@@ -1154,6 +1162,20 @@ func (s *BaseAppServer) handleStage1(conn Transport, from *net.UDPAddr, pkt []by
 		return err
 	}
 	s.logf("stage1 %s: 22B rid=%d mtu=%d att=%d → rotation %dB", from, rq.rid, rq.mtu, rq.attempts, len(rot))
+	// The genuine order is rotation · info(52) · tick(28) · space(44) ·
+	// redirect(36). The info rides with the rotation; the rest is the
+	// tail, so a lost rotation is re-signaled without replaying it.
+	s.mu.Lock()
+	acct, name := st.accountID, st.name
+	s.mu.Unlock()
+	info, err := buildChannelPacket(st.blockKey, flagsRel, stage1InfoApp(accountIDFor(acct, name)), nil, 1, 1)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.WriteToUDP(info, from); err != nil {
+		return err
+	}
+	s.logf("stage1 %s: info %dB (account %d)", from, len(info), accountIDFor(acct, name))
 	return nil
 }
 
@@ -1196,6 +1218,18 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 			s.logf("stage1 tail: %v", err)
 			continue
 		}
+		// space: genuine 44B `5804 133e 1a50 0d 07 "default" …` — the
+		// 1a/50 small naming the space to enter. The client stalls after
+		// the redirect without it.
+		space, err := buildChannelPacket(j.blockKey, flagsRel, stage1SpaceApp(s.cfg.Stage1Space), nil, 3, 1)
+		if err != nil {
+			s.logf("stage1 tail: %v", err)
+			continue
+		}
+		if _, err := conn.WriteToUDP(space, j.addr); err != nil {
+			s.logf("stage1 tail: %v", err)
+			continue
+		}
 		red, err := redirectPacket(j.blockKey, s.cfg.Redirect)
 		if err != nil {
 			s.logf("stage1 tail: %v", err)
@@ -1205,7 +1239,8 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 			s.logf("stage1 tail: %v", err)
 			continue
 		}
-		s.logf("stage1 %s: tick %dB + redirect %dB → %s", j.addr, len(tick), len(red), s.cfg.Redirect)
+		s.logf("stage1 %s: tick %dB + space %dB (%q) + redirect %dB → %s",
+			j.addr, len(tick), len(space), s.cfg.Stage1Space, len(red), s.cfg.Redirect)
 	}
 }
 
@@ -1214,6 +1249,38 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 // + footers (flows3 s1_srv_4 decrypts to exactly that; the 0x13 head
 // is the piggy-backed tick, the 0x44 core trails 7 B, cumul 1 acks
 // the client's reliable auth1 seq 0).
+// stage1InfoApp mints the 52B stage-1 info app: the same
+// [02 0a 01 00 …] info the stage-2 pre-flood sends (infoApp), plus the
+// account id as an ASCII string. Captured verbatim from the paired EU2
+// login (flows3 flow 14, seq 1, decrypts to
+// `58 04 02 0a 01 00 3e 8b 23 00 13 3e 05 12 00 f1 f7 2b 00 0b 00 00
+//
+//	09 "123456789" 00 01 00 00 00 01 00 00 00`). The id is substituted
+//
+// per session; it is always 9 digits (accountIDFor), so the length byte
+// and the frame size never move.
+func stage1InfoApp(accountID uint64) []byte {
+	app := []byte{
+		0x02, 0x0a, 0x01, 0x00, 0x3e, 0x8b, 0x23, 0x00, 0x13, 0x3e,
+		0x05, 0x12, 0x00, 0xf1, 0xf7, 0x2b, 0x00, 0x0b, 0x00, 0x00,
+		0x09,
+	}
+	app = append(app, []byte(fmt.Sprintf("%09d", accountID))...)
+	return append(app, 0x00)
+}
+
+// stage1SpaceApp mints the 44B stage-1 space app: tickSync(0x3e) + the
+// 1a/50 small carrying the space name (flows3 flow 14, seq 3, decrypts
+// to `58 04 13 3e 1a 50 0d 07 "default" 04 80 02 4e 2e 03 00 00 00
+// 01 00 00 00`). Without it the client never learns which space to
+// enter and stalls after the redirect.
+func stage1SpaceApp(space string) []byte {
+	app := append(EncodeTickSync(0x3e), 0x1a, 0x50, byte(len(space)+6))
+	app = append(app, byte(len(space)))
+	app = append(app, []byte(space)...)
+	return append(app, 0x04, 0x80, 0x02, 0x4e, 0x2e)
+}
+
 func redirectApp(target *net.UDPAddr) ([]byte, error) {
 	ip := target.IP.To4()
 	if ip == nil {
