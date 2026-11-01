@@ -54,9 +54,10 @@ const (
 	// (log_on_status.hpp; the 64/70 body texts are live-recorded in
 	// NETWORK_PROTOCOL.md §5.4; 65's exact server wording is
 	// unobserved — ours, and labeled).
-	statusMalformed  = 64
-	statusBadVersion = 65
-	statusBadDigest  = 70
+	statusMalformed   = 64
+	statusBadVersion  = 65
+	statusBadPassword = 68
+	statusBadDigest   = 70
 
 	// LoginInterface members the server must recognize beyond the
 	// client half's login(0x00)/challengeResponse(0x03): wire table
@@ -74,6 +75,10 @@ const (
 	textBadParams   = "Bad login parameters."
 	textBadVersion  = "Bad protocol version."
 	textBadDigest   = "Defs digest mismatch"
+	// textBadPassword is the live server's short 68 wording (the long
+	// form, "Invalid login/password for basic authentication", is the
+	// basic-auth variant; §5.4).
+	textBadPassword = "Invalid password."
 )
 
 // DefaultMaxNonce is the genuine 2.4.0 challenge bound (every pinned
@@ -112,7 +117,17 @@ type ServerConfig struct {
 	// keyed by SessionKey — the 22B handshake carries it). nil = no
 	// BaseApp (clients park on the record).
 	OnLoggedOn func(LoggedOnSession)
-	Verbose    bool
+	// VerifyCredentials authenticates a login. It receives the plain
+	// account name (extracted from the client's JSON identity document)
+	// and the password, both already peeled out of the RSA layer. A
+	// non-nil error refuses the login with status 68 and the error's
+	// text as the server message; nil admits it. nil hook = accept
+	// anything, the pre-account behaviour.
+	//
+	// The check runs after the digest gate, so a version/defs mismatch
+	// still reports 70 rather than 68.
+	VerifyCredentials func(username, password string) error
+	Verbose           bool
 }
 
 // pendingChallenge is the live per-client PoW state (one at a time; a
@@ -532,6 +547,21 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 	if !s.acceptDigest(params.Digest) {
 		s.logf("%s: digest %x rejected", from, params.Digest)
 		return refusePacket(req.rid, statusBadDigest, textBadDigest)
+	}
+	if s.cfg.VerifyCredentials != nil {
+		// params.Username is the client's JSON identity document
+		// ({"login": …, "auth_realm": …, "auth_method": …}); the hook
+		// gets the plain account name, not the blob.
+		if err := s.cfg.VerifyCredentials(userNameOf(params.Username), params.Password); err != nil {
+			// Never log the password or the account name: lengths only.
+			s.logf("%s: login rid=%d credentials rejected (user len %d)",
+				from, req.rid, len(params.Username))
+			text := err.Error()
+			if text == "" {
+				text = textBadPassword
+			}
+			return refusePacket(req.rid, statusBadPassword, text)
+		}
 	}
 	return s.loggedOn(from, listen, req.rid, params)
 }

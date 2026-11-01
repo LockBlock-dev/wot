@@ -50,6 +50,7 @@ import (
 	"syscall"
 
 	"github.com/LockBlock-dev/wot/login"
+	"github.com/LockBlock-dev/wot/server"
 )
 
 func main() {
@@ -65,16 +66,42 @@ func main() {
 	anyVersion := flag.Bool("any-version", false, "accept any client protocol version")
 	digest := flag.String("digest", "", `"any" disables the entity-defs gate (default: the pinned client truths)`)
 	verbose := flag.Bool("verbose", false, "per-datagram diagnostics to stderr")
+	dbPath := flag.String("db", "wotserver.db", "SQLite database path (accounts + player state)")
+	defUser := flag.String("user", "admin", "default account provisioned on startup when absent")
+	defPass := flag.String("pass", "admin", "password for the default account")
 	flag.Parse()
 
 	priv, err := login.LoadRSAPrivateKey(*privkey)
 	if err != nil {
 		fatal(err)
 	}
+
+	// Application layer: accounts, sessions, player state. The store is
+	// the only thing that knows SQL; swapping it for PostgreSQL means
+	// another server.Store implementation.
+	store, err := server.OpenSQLite(*dbPath)
+	if err != nil {
+		fatal(err)
+	}
+	defer store.Close()
+	core := server.New(store, server.Config{
+		DefaultUser:     *defUser,
+		DefaultPassword: *defPass,
+	})
+	if err := core.Provision(context.Background()); err != nil {
+		fatal(err)
+	}
+
 	cfg := login.ServerConfig{
 		MaxNonce:   uint64(*maxnonce),
 		AnyVersion: *anyVersion,
 		Verbose:    *verbose,
+		// Every login is checked against the account store; a refusal
+		// rides status 68 with the error's text.
+		VerifyCredentials: func(user, pass string) error {
+			_, err := core.Authenticate(context.Background(), user, pass)
+			return err
+		},
 	}
 	if *digest == "any" {
 		cfg.AcceptAnyDigest = true
@@ -121,6 +148,9 @@ func main() {
 	fmt.Printf("wotserver: LoginApp on %s (key %d bits, maxNonce %d, digest gate %s, record %s)\n",
 		conn.LocalAddr(), priv.PublicKey.N.BitLen(), cfg.MaxNonce,
 		digestGateName(cfg), recordName(cfg))
+	// Account name and DB path are not secrets; the password never
+	// gets a line.
+	fmt.Printf("wotserver: accounts in %s, default account %q\n", *dbPath, server.NormalizeName(*defUser))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

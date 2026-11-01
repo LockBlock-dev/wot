@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -606,5 +607,74 @@ func runTestServer(t *testing.T) (*net.UDPAddr, func()) {
 			t.Errorf("server did not stop")
 		}
 		conn.Close()
+	}
+}
+
+// TestLoginAppCredentialGate proves the VerifyCredentials hook is wired
+// into the login path: it sees the account name and password the client
+// sent, a non-nil error refuses with status 68 and that error's text,
+// and nil admits the login.
+func TestLoginAppCredentialGate(t *testing.T) {
+	var gotUser, gotPass string
+	reject := true
+	srv, err := NewLoginAppServer(ServerConfig{
+		MaxNonce: serverTestMaxNonce,
+		Digests:  [][16]byte{testDigestA},
+		VerifyCredentials: func(user, pass string) error {
+			gotUser, gotPass = user, pass
+			if reject {
+				return errors.New(textBadPassword)
+			}
+			return nil
+		},
+	}, testRSAKey(t))
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40005}
+	listen := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 20016}
+
+	// Refusal leg: correct digest, rejected credentials → 68.
+	pkt, err := srv.handlePacket(loginOneDatagram(t, 41, true), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#1: %v", err)
+	}
+	ch := challengeOf(t, pkt, 41)
+	pkt, err = srv.handlePacket(loginTwoDatagram(t, 42, ch, testDigestA, nil), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#2: %v", err)
+	}
+	rid, status, rest, err := parseReply(pkt)
+	if err != nil {
+		t.Fatalf("reply parse: %v", err)
+	}
+	if rid != 42 || status != statusBadPassword {
+		t.Fatalf("rid=%d status=%d, want 68", rid, status)
+	}
+	if text, _, _ := consumePackedString(rest); text != textBadPassword {
+		t.Fatalf("refusal text %q, want %q", text, textBadPassword)
+	}
+	if gotUser != "ExampleUser" || gotPass != "loginapp-test-password" {
+		t.Fatalf("hook saw user=%q pass len=%d, want the client's own values",
+			gotUser, len(gotPass))
+	}
+
+	// Acceptance leg: same credentials, hook admits → LOGGED_ON.
+	reject = false
+	pkt, err = srv.handlePacket(loginOneDatagram(t, 43, true), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#3: %v", err)
+	}
+	ch = challengeOf(t, pkt, 43)
+	pkt, err = srv.handlePacket(loginTwoDatagram(t, 44, ch, testDigestA, nil), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#4: %v", err)
+	}
+	rid, status, _, err = parseReply(pkt)
+	if err != nil {
+		t.Fatalf("reply parse: %v", err)
+	}
+	if rid != 44 || status != statusLoggedOn {
+		t.Fatalf("rid=%d status=%d, want 1", rid, status)
 	}
 }
