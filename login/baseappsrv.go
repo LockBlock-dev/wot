@@ -535,11 +535,9 @@ func (s *BaseAppServer) splitBulkFrames() ([]bulkFrame, error) {
 		if n < 2+tr {
 			continue
 		}
-		first := binary.LittleEndian.Uint32(clear[n-8 : n-4])
-		seq := first
-		if flags&chFlagFragment != 0 && tr >= 12 {
-			first = binary.LittleEndian.Uint32(clear[n-12 : n-8])
-			seq = binary.LittleEndian.Uint32(clear[n-4:])
+		first, _, seq, ok := fragRange(clear)
+		if !ok {
+			continue
 		}
 		pay := clear[2 : n-tr]
 		out = append(out, bulkFrame{clear: clear, pay: pay, first: first, rel: seq - first, order: len(out)})
@@ -599,7 +597,7 @@ func (s *BaseAppServer) applyBulk() error {
 	// A capture can hold fragments of more than one bundle (a flow that
 	// spans a reconnect). Keep the bundle with the most fragments and
 	// drop the rest, or the client never accepts the burst.
-	frames = keepLargestBundle(frames)
+	frames = keepBundleChain(frames)
 	frames = keepBundleChain(frames)
 	// Chain order: by chain id, then position inside the chain.
 	order := make([]int, len(frames))
@@ -613,9 +611,38 @@ func (s *BaseAppServer) applyBulk() error {
 		}
 		return fa.rel < fb.rel
 	})
+	// The bundle starts at the fragment that carries its header
+	// (ff + u24 total length), not at the chain's lowest seq: the chain
+	// can open with a fragment of another message (the info app rides
+	// seq 1 in the live capture), and starting the stream there feeds
+	// the decoder a non-bundle byte (unsupported pickle opcode 0x13).
+	start := 0
+	for k, i := range order {
+		if len(frames[i].pay) >= 4 && frames[i].pay[0] == 0xFF {
+			start = k
+			break
+		}
+	}
+	order = order[start:]
+	// The chain header rides on the frame the stream starts at, not on
+	// the chain's lowest seq.
+	if len(order) > 0 {
+		frames[order[0]].head = chainHeadLen(frames[order[0]].pay)
+	}
 	var stream []byte
 	for _, i := range order {
 		stream = append(stream, frames[i].pay[frames[i].head:]...)
+	}
+	// The header's u24 is the bundle's exact length; the last fragment
+	// carries padding past it (5 B in the live capture). Trim, or the
+	// client walks a message into the padding.
+	if len(order) > 0 {
+		h := frames[order[0]].pay
+		if len(h) >= 4 && h[0] == 0xFF {
+			if n := int(h[1]) | int(h[2])<<8 | int(h[3])<<16; n > 0 && n <= len(stream) {
+				stream = stream[:n]
+			}
+		}
 	}
 	if s.cfg.VerifyBulk != nil {
 		if err := s.cfg.VerifyBulk(stream); err != nil {
@@ -661,28 +688,51 @@ func (s *BaseAppServer) applyBulk() error {
 	return nil
 }
 
+// fragRange reads a fragment frame's [first,last] range and its seq.
+// The trailer is [first][last][seq][cumul], so the range sits at n-tr
+// and the seq is the 4 bytes before cumul when CUMUL is set.
+func fragRange(clear []byte) (first, last, seq uint32, ok bool) {
+	n := len(clear)
+	if n < 14 {
+		return 0, 0, 0, false
+	}
+	flags := binary.LittleEndian.Uint16(clear[0:2])
+	if flags&chFlagFragment == 0 {
+		return 0, 0, 0, false
+	}
+	tr := ChannelTrailerLen(flags)
+	if n < 2+tr || tr < 12 {
+		return 0, 0, 0, false
+	}
+	first = binary.LittleEndian.Uint32(clear[n-tr : n-tr+4])
+	last = binary.LittleEndian.Uint32(clear[n-tr+4 : n-tr+8])
+	if flags&chFlagCumulAck != 0 {
+		seq = binary.LittleEndian.Uint32(clear[n-8 : n-4])
+	} else {
+		seq = binary.LittleEndian.Uint32(clear[n-4:])
+	}
+	return first, last, seq, true
+}
+
 // keepBundleChain keeps the bundle's fragment chain plus its tail.
 //
-// The chain's fragments carry the range [first,last] in their footer, but
-// the LAST fragment declares its own range [last,last] — it is a
-// single-fragment chain by the footer's own rule. Grouping strictly by
-// the range therefore drops the tail, and the client assembles a bundle
-// that is short by exactly those bytes:
+// The chain's fragments carry [first,last] in the footer, but the LAST
+// fragment declares [last,last] — a single-fragment chain by the
+// footer's own rule — and its seq counts from 1. The client keys a
+// bundle by that pair, so it files the tail in a bundle of its own and
+// the real one stays short by exactly those bytes:
 //
-//   BundleDataPos::advance: Ran out of packets.
-//   MF_ASSERT_DEV FAILED: tailAdvanceSuccess
+//	BundleDataPos::advance: Ran out of packets.
+//	MF_ASSERT_DEV FAILED: tailAdvanceSuccess
 //
-// The bundle header (ff + u24 length on the first fragment) gives the
-// total, so the tail is the frame whose range starts where the chain
-// ends.
+// The tail is rewritten into the chain: range [first,last], seq = last.
 func keepBundleChain(frames []bulkFrame) []bulkFrame {
 	counts := map[uint32]int{}
 	last := map[uint32]uint32{}
 	for _, fr := range frames {
 		counts[fr.first]++
-		n := len(fr.clear)
-		if n >= 12 {
-			if l := binary.LittleEndian.Uint32(fr.clear[n-8 : n-4]); l > last[fr.first] {
+		if _, _, _, ok := fragRange(fr.clear); ok {
+			if l := binary.LittleEndian.Uint32(fr.clear[len(fr.clear)-ChannelTrailerLen(binary.LittleEndian.Uint16(fr.clear[0:2]))+4:]); l > last[fr.first] {
 				last[fr.first] = l
 			}
 		}
@@ -697,11 +747,29 @@ func keepBundleChain(frames []bulkFrame) []bulkFrame {
 		}
 	}
 	tail := last[best]
-	out := frames[:0]
-	for _, fr := range frames {
-		if fr.first == best || fr.first == tail {
+	out := make([]bulkFrame, 0, len(frames))
+	for i := range frames {
+		fr := frames[i]
+		if fr.first == best {
 			out = append(out, fr)
+			continue
 		}
+		if fr.first != tail {
+			continue
+		}
+		n := len(fr.clear)
+		tr := ChannelTrailerLen(binary.LittleEndian.Uint16(fr.clear[0:2]))
+		if n >= 2+tr && tr >= 12 {
+			binary.LittleEndian.PutUint32(fr.clear[n-tr:], best)
+			binary.LittleEndian.PutUint32(fr.clear[n-tr+4:], tail)
+			if binary.LittleEndian.Uint16(fr.clear[0:2])&chFlagCumulAck != 0 {
+				binary.LittleEndian.PutUint32(fr.clear[n-8:], tail)
+			} else {
+				binary.LittleEndian.PutUint32(fr.clear[n-4:], tail)
+			}
+			fr.first, fr.rel = best, tail-best
+		}
+		out = append(out, fr)
 	}
 	return out
 }
