@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -22,6 +23,10 @@ type Config struct {
 
 	// SessionTTL is how long a minted session stays valid.
 	SessionTTL time.Duration
+
+	// Logger receives structured lifecycle events (provisioning, auth
+	// outcomes, session minting, sweeps). Nil means silent.
+	Logger *slog.Logger
 }
 
 // Server ties the store, the session manager and the provisioning
@@ -57,8 +62,10 @@ func (s *Server) Provision(ctx context.Context) error {
 	case err == nil:
 		// Already there: make sure it has state, then stop.
 		if _, err := s.Store.LoadState(ctx, acct.ID); errors.Is(err, ErrNotFound) {
+			s.log().Info("account state provisioned", "account", acct.Name, "account_id", acct.ID)
 			return s.Store.SaveState(ctx, acct.ID, DefaultPlayerState(acct.ID))
 		}
+		s.log().Debug("default account present", "account", acct.Name, "account_id", acct.ID)
 		return nil
 	case !errors.Is(err, ErrNotFound):
 		return fmt.Errorf("server: provision lookup: %w", err)
@@ -75,6 +82,7 @@ func (s *Server) Provision(ctx context.Context) error {
 	if err := s.Store.SaveState(ctx, acct.ID, DefaultPlayerState(acct.ID)); err != nil {
 		return fmt.Errorf("server: provision state: %w", err)
 	}
+	s.log().Info("default account created", "account", acct.Name, "account_id", acct.ID)
 	return nil
 }
 
@@ -85,12 +93,14 @@ func (s *Server) Provision(ctx context.Context) error {
 func (s *Server) Authenticate(ctx context.Context, user, pass string) (*Account, error) {
 	acct, err := s.Store.AccountByName(ctx, user)
 	if errors.Is(err, ErrNotFound) {
+		s.log().Warn("login refused", "account", NormalizeName(user), "reason", "unknown account")
 		return nil, ErrBadCredentials
 	}
 	if err != nil {
 		return nil, fmt.Errorf("server: authenticate: %w", err)
 	}
 	if !acct.CheckPassword(pass) {
+		s.log().Warn("login refused", "account", acct.Name, "account_id", acct.ID, "reason", "bad password")
 		return nil, ErrBadCredentials
 	}
 	return acct, nil
@@ -107,7 +117,33 @@ func (s *Server) BeginSession(ctx context.Context, user, pass string) (*Account,
 	if err != nil {
 		return nil, nil, err
 	}
+	// The session key is a wire value, not a credential: it is logged so
+	// a BaseApp-side event can be tied back to the login that made it.
+	s.log().Info("session issued",
+		"account", acct.Name, "account_id", acct.ID,
+		"session", fmt.Sprintf("%08x", sess.Key), "expires", sess.Expires)
 	return acct, sess, nil
+}
+
+// SweepLoop drops expired sessions every interval until ctx is done.
+// Sessions are in-memory only, so without this they accumulate for the
+// life of the process.
+func (s *Server) SweepLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n := s.Sessions.Sweep(); n > 0 {
+				s.log().Info("sessions swept", "dropped", n, "live", s.Sessions.Len())
+			}
+		}
+	}
 }
 
 // State loads an account's player state, provisioning a default one if
@@ -119,6 +155,7 @@ func (s *Server) State(ctx context.Context, accountID int64) (*PlayerState, erro
 		if err := s.Store.SaveState(ctx, accountID, st); err != nil {
 			return nil, err
 		}
+		s.log().Info("player state provisioned", "account_id", accountID)
 		return st, nil
 	}
 	return st, err

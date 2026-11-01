@@ -48,6 +48,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -126,9 +127,17 @@ func main() {
 		fatal(err)
 	}
 	defer store.Close()
+	// Structured lifecycle events go to stderr as text; -verbose drops
+	// the level to Debug so per-step detail is available on demand.
+	level := slog.LevelInfo
+	if *flagVerbose {
+		level = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	core := server.New(store, server.Config{
 		DefaultUser:     *flagUser,
 		DefaultPassword: *flagPass,
+		Logger:          logger,
 	})
 	if err := core.Provision(context.Background()); err != nil {
 		fatal(err)
