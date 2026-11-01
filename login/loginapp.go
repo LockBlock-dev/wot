@@ -121,12 +121,13 @@ type ServerConfig struct {
 	// account name (extracted from the client's JSON identity document)
 	// and the password, both already peeled out of the RSA layer. A
 	// non-nil error refuses the login with status 68 and the error's
-	// text as the server message; nil admits it. nil hook = accept
-	// anything, the pre-account behaviour.
+	// text as the server message; nil admits it and the returned id
+	// becomes the session's account (0 = anonymous, the pre-account
+	// behaviour). nil hook = accept anything.
 	//
 	// The check runs after the digest gate, so a version/defs mismatch
 	// still reports 70 rather than 68.
-	VerifyCredentials func(username, password string) error
+	VerifyCredentials func(username, password string) (accountID int64, err error)
 	Verbose           bool
 }
 
@@ -548,11 +549,13 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		s.logf("%s: digest %x rejected", from, params.Digest)
 		return refusePacket(req.rid, statusBadDigest, textBadDigest)
 	}
+	var accountID int64
 	if s.cfg.VerifyCredentials != nil {
 		// params.Username is the client's JSON identity document
 		// ({"login": …, "auth_realm": …, "auth_method": …}); the hook
 		// gets the plain account name, not the blob.
-		if err := s.cfg.VerifyCredentials(userNameOf(params.Username), params.Password); err != nil {
+		id, err := s.cfg.VerifyCredentials(userNameOf(params.Username), params.Password)
+		if err != nil {
 			// Never log the password or the account name: lengths only.
 			s.logf("%s: login rid=%d credentials rejected (user len %d)",
 				from, req.rid, len(params.Username))
@@ -562,8 +565,9 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 			}
 			return refusePacket(req.rid, statusBadPassword, text)
 		}
+		accountID = id
 	}
-	return s.loggedOn(from, listen, req.rid, params)
+	return s.loggedOn(from, listen, req.rid, params, accountID)
 }
 
 // issueChallenge mints the PoW state and answers status 66 (55 B for
@@ -628,9 +632,9 @@ func (s *LoginAppServer) acceptDigest(d [16]byte) bool {
 // (genuine 216 B plaintext). Record endpoint mirrors the operator
 // choice; salt stays 0 (its semantics are unobserved — our reader
 // skips it). session_id/token2/account id are SYNTHESIZED shapes.
-func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, params LogOnParams) ([]byte, error) {
+func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, params LogOnParams, accountID int64) ([]byte, error) {
 	name := userNameOf(params.Username)
-	token2, err := randToken2(pseudoAccountID(name))
+	token2, err := randToken2(accountIDFor(accountID, name))
 	if err != nil {
 		return nil, fmt.Errorf("wotserver: token2 mint: %w", err)
 	}
@@ -656,7 +660,7 @@ func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, params 
 		return nil, fmt.Errorf("wotserver: reply encrypt: %w", err)
 	}
 	if s.cfg.OnLoggedOn != nil {
-		s.cfg.OnLoggedOn(LoggedOnSession{SessionKey: key, BlockKey: params.EncKey, Name: name})
+		s.cfg.OnLoggedOn(LoggedOnSession{SessionKey: key, BlockKey: params.EncKey, Name: name, AccountID: accountID})
 	}
 	s.logf("%s: LOGGED_ON rid=%d %s:%d plain %d B msg %d B", from, rid, net.IP(ip[:]), port, len(plain), len(msg))
 	return buildReplyPacket(rid, statusLoggedOn, body)
@@ -796,10 +800,20 @@ func userNameOf(usernameJSON string) string {
 	return usernameJSON
 }
 
+// accountIDFor maps a stored account id into the 9-digit space the
+// token2 head and the session dict's databaseID use (§5.4). The real id
+// is authoritative, so two accounts always differ; id 0 (no account
+// store, the pre-account behaviour) falls back to the name hash.
+func accountIDFor(accountID int64, name string) uint64 {
+	if accountID > 0 {
+		return 100000000 + uint64(accountID)
+	}
+	return pseudoAccountID(name)
+}
+
 // pseudoAccountID mints the token2 account id from the name: FNV-1a64
 // floor-biased into [1e8, 1e9) → always 9 digits (the genuine token2
-// head; §5.4). The value is ours — live ids come from account
-// databases.
+// head; §5.4). Only used when no account store is configured.
 func pseudoAccountID(name string) uint64 {
 	h := fnv.New64a()
 	h.Write([]byte(name))

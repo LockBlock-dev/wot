@@ -80,6 +80,9 @@ type LoggedOnSession struct {
 	SessionKey uint32
 	BlockKey   string
 	Name       string
+	// AccountID is the stored account behind this login (0 when the
+	// LoginApp runs without an account store).
+	AccountID int64
 }
 
 // BaseAppConfig configures the server. Redirect is required: the
@@ -159,6 +162,7 @@ type BaseAppServer struct {
 type clientState struct {
 	blockKey   string       // LogOnParams key (set once at admit)
 	name       string       // login username (future per-session smalls)
+	accountID  int64        // stored account behind the login (0 = none)
 	sessionKey uint32       // login-minted
 	stageKey   uint32       // our stage-1 rotation (0 = none yet)
 	stage2Key  uint32       // our stage-2 rotation (0 = none yet)
@@ -237,6 +241,7 @@ func (s *BaseAppServer) Admit(sess LoggedOnSession) {
 	s.pending[sess.SessionKey] = &clientState{
 		blockKey:   sess.BlockKey,
 		name:       sess.Name,
+		accountID:  sess.AccountID,
 		sessionKey: sess.SessionKey,
 		admittedAt: time.Now(),
 	}
@@ -453,7 +458,7 @@ func (s *BaseAppServer) loadPre() error {
 					// values (the mint re-patches per send anyway;
 					// a mutated template would hide shape drift at
 					// load — caught by TestBaseAppPostFloodCarrier).
-					if _, err := patchDict(append([]byte(nil), tpl...), "probe", time.Unix(1789681556, 0), time.Unix(1789681556, 0)); err == nil {
+					if _, err := patchDict(append([]byte(nil), tpl...), "probe", 0, time.Unix(1789681556, 0), time.Unix(1789681556, 0)); err == nil {
 						s.dictTpl = tpl
 					}
 				}
@@ -476,7 +481,7 @@ func (s *BaseAppServer) loadPre() error {
 // sessionStartedAt are BININT (4a + 4B LITTLE-endian signed; capture
 // 123456789 / 1789681556). started = the session's admission time,
 // now = mint time.
-func patchDict(tpl []byte, name string, started, now time.Time) ([]byte, error) {
+func patchDict(tpl []byte, name string, accountID int64, started, now time.Time) ([]byte, error) {
 	utc := float64(now.UnixNano()) / 1e9
 	f, err := patchPickleValue(tpl, "serverUTC", 0x47, 8)
 	if err != nil {
@@ -499,9 +504,10 @@ func patchDict(tpl []byte, name string, started, now time.Time) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	// Same FNV-1a pseudo-account the LoginApp token2 head carries (9
-	// digits, fits the int32 slot).
-	binary.LittleEndian.PutUint32(f, uint32(int32(pseudoAccountID(name))))
+	// Same account id the LoginApp token2 head carries (9 digits, fits
+	// the int32 slot): the stored account when there is one, else the
+	// FNV-1a name hash.
+	binary.LittleEndian.PutUint32(f, uint32(int32(accountIDFor(accountID, name))))
 	return tpl, nil
 }
 
@@ -529,8 +535,8 @@ func patchPickleValue(body []byte, key string, op byte, n int) ([]byte, error) {
 // values (isAogasEnabled=T, collectUiStats=T, logUXEvents=F — the
 // playtime-telemetry flags; our server runs no telemetry scheduler, so
 // replaying the capture's gate state is honest structure either way).
-func dictApp(tpl []byte, name string, started, now time.Time) ([]byte, error) {
-	body, err := patchDict(append([]byte(nil), tpl...), name, started, now)
+func dictApp(tpl []byte, name string, accountID int64, started, now time.Time) ([]byte, error) {
+	body, err := patchDict(append([]byte(nil), tpl...), name, accountID, started, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1236,7 +1242,7 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 		if dictCumul < 1 {
 			dictCumul = 1 // the auth itself is a reliable seq-0 send
 		}
-		app, err := dictApp(s.dictTpl, st.name, st.admittedAt, time.Now())
+		app, err := dictApp(s.dictTpl, st.name, st.accountID, st.admittedAt, time.Now())
 		if err != nil {
 			return err
 		}

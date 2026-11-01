@@ -620,12 +620,12 @@ func TestLoginAppCredentialGate(t *testing.T) {
 	srv, err := NewLoginAppServer(ServerConfig{
 		MaxNonce: serverTestMaxNonce,
 		Digests:  [][16]byte{testDigestA},
-		VerifyCredentials: func(user, pass string) error {
+		VerifyCredentials: func(user, pass string) (int64, error) {
 			gotUser, gotPass = user, pass
 			if reject {
-				return errors.New(textBadPassword)
+				return 0, errors.New(textBadPassword)
 			}
-			return nil
+			return 7, nil
 		},
 	}, testRSAKey(t))
 	if err != nil {
@@ -676,5 +676,34 @@ func TestLoginAppCredentialGate(t *testing.T) {
 	}
 	if rid != 44 || status != statusLoggedOn {
 		t.Fatalf("rid=%d status=%d, want 1", rid, status)
+	}
+}
+
+// TestAccountIDFor proves the stored account id is authoritative: two
+// accounts always map to different 9-digit ids, and id 0 (no account
+// store) falls back to the name hash.
+func TestAccountIDFor(t *testing.T) {
+	if got := accountIDFor(1, "alice"); got != 100000001 {
+		t.Fatalf("accountIDFor(1) = %d, want 100000001", got)
+	}
+	if got := accountIDFor(2, "alice"); got != 100000002 {
+		t.Fatalf("accountIDFor(2) = %d, want 100000002", got)
+	}
+	// Same name, different accounts: the id must follow the account,
+	// not the name.
+	if accountIDFor(1, "alice") == accountIDFor(2, "alice") {
+		t.Fatal("distinct accounts collided on the same id")
+	}
+	// No account store: the name hash is the fallback.
+	if got, want := accountIDFor(0, "alice"), pseudoAccountID("alice"); got != want {
+		t.Fatalf("accountIDFor(0) = %d, want the name hash %d", got, want)
+	}
+	// Always 9 digits, which is what the token2 head and the session
+	// dict's int32 databaseID slot expect.
+	for _, id := range []int64{0, 1, 42, 99999999} {
+		got := accountIDFor(id, "alice")
+		if got < 100000000 || got >= 1000000000 {
+			t.Fatalf("accountIDFor(%d) = %d, not 9 digits", id, got)
+		}
 	}
 }

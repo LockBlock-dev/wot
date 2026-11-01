@@ -98,9 +98,12 @@ func main() {
 		Verbose:    *verbose,
 		// Every login is checked against the account store; a refusal
 		// rides status 68 with the error's text.
-		VerifyCredentials: func(user, pass string) error {
-			_, err := core.Authenticate(context.Background(), user, pass)
-			return err
+		VerifyCredentials: func(user, pass string) (int64, error) {
+			acct, err := core.Authenticate(context.Background(), user, pass)
+			if err != nil {
+				return 0, err
+			}
+			return acct.ID, nil
 		},
 	}
 	if *digest == "any" {
