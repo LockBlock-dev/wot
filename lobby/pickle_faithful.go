@@ -131,11 +131,22 @@ type fmarker struct{}
 // DecodeFaithful decodes one pickle document into its final stack. It
 // returns the stack and the number of bytes consumed (through STOP).
 func DecodeFaithful(data []byte) ([]*FNode, int, error) {
+	stack, _, n, err := DecodeFaithfulMarks(data)
+	return stack, n, err
+}
+
+// DecodeFaithfulMarks is DecodeFaithful plus the stack indices where a
+// MARK is still open at STOP.
+//
+// The lobby bundle is a *stream*: its outer dict is never closed, so the
+// MARK that opened it is still pending when the document ends. Those
+// positions have to be replayed for the encoding to match.
+func DecodeFaithfulMarks(data []byte) ([]*FNode, []int, int, error) {
 	d := &fdecoder{data: data, memo: map[int]*FNode{}}
 	if err := d.run(); err != nil {
-		return nil, d.pos, err
+		return nil, nil, d.pos, err
 	}
-	return d.stack, d.pos, nil
+	return d.stack, append([]int(nil), d.marks...), d.pos, nil
 }
 
 type fdecoder struct {
@@ -203,7 +214,7 @@ func (d *fdecoder) markItems() ([]*FNode, error) {
 	}
 	mi := d.marks[len(d.marks)-1]
 	d.marks = d.marks[:len(d.marks)-1]
-	items := append([]*FNode(nil), d.stack[mi+1:]...)
+	items := append([]*FNode(nil), d.stack[mi:]...)
 	d.stack = d.stack[:mi]
 	return items, nil
 }
@@ -223,8 +234,10 @@ func (d *fdecoder) run() error {
 		case opStop:
 			return nil
 		case opMark:
+			// A MARK is a stack delimiter, not a value: record the
+			// current depth and push nothing, so no sentinel can leak
+			// into the decoded stack.
 			d.marks = append(d.marks, len(d.stack))
-			d.stack = append(d.stack, &FNode{Memo: -1, Kind: FNone})
 		case opNone:
 			d.push(&FNode{Memo: -1, Kind: FNone, Raw: d.data[start:d.pos]})
 		case opNewTrue:
@@ -443,12 +456,27 @@ func (d *fdecoder) run() error {
 // canonically. The result is byte-identical to the input when nothing was
 // mutated.
 func EncodeFaithful(stack []*FNode) ([]byte, error) {
+	return EncodeFaithfulMarks(stack, nil)
+}
+
+// EncodeFaithfulMarks re-encodes a stack, emitting a MARK before each
+// stack index listed in marks (the positions DecodeFaithfulMarks
+// reported as still open).
+func EncodeFaithfulMarks(stack []*FNode, marks []int) ([]byte, error) {
 	e := &fencoder{seen: map[*FNode]int{}}
 	e.out = append(e.out, opProto, 2)
-	for _, n := range stack {
+	next := 0
+	for i, n := range stack {
+		for next < len(marks) && marks[next] == i {
+			e.out = append(e.out, opMark)
+			next++
+		}
 		if err := e.emit(n); err != nil {
 			return nil, err
 		}
+	}
+	for ; next < len(marks); next++ {
+		e.out = append(e.out, opMark)
 	}
 	e.out = append(e.out, opStop)
 	return e.out, nil
