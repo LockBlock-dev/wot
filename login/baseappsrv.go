@@ -747,10 +747,33 @@ func keepBundleChain(frames []bulkFrame) []bulkFrame {
 		}
 	}
 	tail := last[best]
+	// The bundle's first fragment is the one carrying its header
+	// (ff + u24 length); the chain can open with a fragment of another
+	// message (the info app rides seq 1 in the live capture). The client
+	// counts every fragment of the range, so the range is renumbered to
+	// start there and the earlier frames are dropped — otherwise the
+	// client assembles info-app bytes in front of the bundle and walks
+	// off its end (BundleDataPos::advance: Ran out of packets).
+	start := best
+	for _, fr := range frames {
+		if fr.first == best && len(fr.pay) >= 4 && fr.pay[0] == 0xFF {
+			start = best + fr.rel
+			break
+		}
+	}
 	out := make([]bulkFrame, 0, len(frames))
 	for i := range frames {
 		fr := frames[i]
 		if fr.first == best {
+			if fr.rel < start-best {
+				continue
+			}
+			n := len(fr.clear)
+			tr := ChannelTrailerLen(binary.LittleEndian.Uint16(fr.clear[0:2]))
+			if n >= 2+tr && tr >= 12 {
+				binary.LittleEndian.PutUint32(fr.clear[n-tr:], start)
+			}
+			fr.first, fr.rel = start, fr.rel-(start-best)
 			out = append(out, fr)
 			continue
 		}
@@ -760,14 +783,14 @@ func keepBundleChain(frames []bulkFrame) []bulkFrame {
 		n := len(fr.clear)
 		tr := ChannelTrailerLen(binary.LittleEndian.Uint16(fr.clear[0:2]))
 		if n >= 2+tr && tr >= 12 {
-			binary.LittleEndian.PutUint32(fr.clear[n-tr:], best)
+			binary.LittleEndian.PutUint32(fr.clear[n-tr:], start)
 			binary.LittleEndian.PutUint32(fr.clear[n-tr+4:], tail)
 			if binary.LittleEndian.Uint16(fr.clear[0:2])&chFlagCumulAck != 0 {
 				binary.LittleEndian.PutUint32(fr.clear[n-8:], tail)
 			} else {
 				binary.LittleEndian.PutUint32(fr.clear[n-4:], tail)
 			}
-			fr.first, fr.rel = best, tail-best
+			fr.first, fr.rel = start, tail-start
 		}
 		out = append(out, fr)
 	}
