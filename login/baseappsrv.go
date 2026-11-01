@@ -209,8 +209,13 @@ type BaseAppServer struct {
 	infoApp  []byte // [02 0a 01 00 3f 8b 23 00 13 3f] app (10B)
 	descTpl  []byte
 	statsTpl []byte // 61B companion clear body (78 04 ...)
-	dictTpl  []byte // `1a 76 9c 00` + 156B body (9b + 155B proto-2 pickle)
-	preOK    bool
+	// statsPrevRev/statsRev are the client's cache counters, read off the
+	// carrier's 1a/69 once at load. They are not ours to invent: the
+	// client compares them against its own cache.
+	statsPrevRev int64
+	statsRev     int64
+	dictTpl      []byte // `1a 76 9c 00` + 156B body (9b + 155B proto-2 pickle)
+	preOK        bool
 
 	mu sync.Mutex
 	// pending is sessions awaiting their stage-1 handshake, keyed by
@@ -759,6 +764,9 @@ func (s *BaseAppServer) loadPre() error {
 				continue
 			}
 			s.statsTpl = append([]byte(nil), clear[2:len(clear)-tr]...)
+			if _, prev, rev, perr := ParseStatsSmall(s.statsTpl); perr == nil {
+				s.statsPrevRev, s.statsRev = prev, rev
+			}
 		case 76:
 			if s.descTpl != nil {
 				continue
@@ -859,59 +867,12 @@ func patchPickleValue(body []byte, key string, op byte, n int) ([]byte, error) {
 	return body[j+3 : j+3+n], nil
 }
 
-// patchPickleInt rewrites the integer stored under key in a proto-2
-// dict, keeping the original opcode width. It fails loud when the value
-// does not fit, so a shape change is never silently truncated.
-func patchPickleInt(body []byte, key string, v int64) error {
-	i := bytes.Index(body, []byte(key))
-	if i < 0 {
-		return fmt.Errorf("wotserver: pickle int: key %q not found", key)
-	}
-	j := i + len(key)
-	// Skip the memo put: BINPUT (0x71 + 1B) or LONG_BINPUT (0x72 + 4B).
-	switch {
-	case j < len(body) && body[j] == 0x71:
-		j += 2
-	case j+4 < len(body) && body[j] == 0x72:
-		j += 5
-	default:
-		return fmt.Errorf("wotserver: pickle int: key %q: no memo put", key)
-	}
-	if j >= len(body) {
-		return fmt.Errorf("wotserver: pickle int: key %q truncated", key)
-	}
-	switch body[j] {
-	case 0x4b: // BININT1
-		if v < 0 || v > 0xff {
-			return fmt.Errorf("wotserver: pickle int: %d does not fit BININT1", v)
-		}
-		body[j+1] = byte(v)
-	case 0x4d: // BININT2
-		if v < 0 || v > 0xffff {
-			return fmt.Errorf("wotserver: pickle int: %d does not fit BININT2", v)
-		}
-		binary.LittleEndian.PutUint16(body[j+1:], uint16(v))
-	case 0x4a: // BININT
-		if v < math.MinInt32 || v > math.MaxInt32 {
-			return fmt.Errorf("wotserver: pickle int: %d does not fit BININT", v)
-		}
-		binary.LittleEndian.PutUint32(body[j+1:], uint32(int32(v)))
-	default:
-		return fmt.Errorf("wotserver: pickle int: key %q: unsupported opcode %#02x", key, body[j])
-	}
-	return nil
-}
-
 // statsFrame mints the 1a/69 stats small with the account's free XP.
 // freeXP <= 0 replays the capture's value.
-func statsFrame(tpl []byte, freeXP int64) ([]byte, error) {
-	app := append([]byte(nil), tpl...)
-	if freeXP > 0 {
-		if err := patchPickleInt(app, "freeXP", freeXP); err != nil {
-			return nil, err
-		}
-	}
-	return app, nil
+// statsFrame builds the 1a/69 stats small for an account. The structure
+// comes from the builder; only the revisions come from the carrier.
+func statsFrame(prevRev, rev, freeXP int64) ([]byte, error) {
+	return BuildStatsSmall(freeXP, prevRev, rev)
 }
 
 // dictApp mints the session-dict frame APP: [13][40] + the 1a/76 small
@@ -1424,7 +1385,7 @@ func (s *BaseAppServer) sendPre(conn Transport, to *net.UDPAddr, st *clientState
 	// without one (flows3-s2) simply does not send it.
 	statsNote := ""
 	if s.statsTpl != nil {
-		statsApp, err := statsFrame(s.statsTpl, st.freeXP)
+		statsApp, err := statsFrame(s.statsPrevRev, s.statsRev, st.freeXP)
 		if err != nil {
 			return err
 		}
