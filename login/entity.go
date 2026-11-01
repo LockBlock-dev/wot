@@ -13,9 +13,11 @@ import (
 // per method: a client method call is ENTITY_METHOD_BASE + method id, and
 // a property update is ENTITY_PROPERTY_BASE + property index.
 const (
-	elCreateBasePlayer = 0x05 // VAR 2
-	elCreateCellPlayer = 0x06 // VAR 2
-	elTickSync         = 0x13 // FIXED 1
+	elCreateBasePlayer   = 0x05 // VAR 2
+	elCreateCellPlayer   = 0x06 // VAR 2
+	elTickSync           = 0x13 // FIXED 1
+	elSelectPlayerEntity = 0x1A // FIXED 0
+	elEnableEntities     = 0x0B // FIXED 0
 
 	entityMethodBase   = 0x4E // 0x4E..0xA6
 	entityPropertyBase = 0xA7 // 0xA7..0xFE
@@ -89,6 +91,16 @@ func (e *Entity) encodeProps(props []entdef.PropertyDef, only map[string]bool) (
 // into the entity's own tables, and the dynamic ones replicate over NRL
 // rather than here.
 func EncodeCreateBasePlayer(e *Entity) ([]byte, error) {
+	return EncodeCreateBasePlayerWithComponents(e, 0)
+}
+
+// EncodeCreateBasePlayerWithComponents is EncodeCreateBasePlayer with an
+// explicit dynamic-component count.
+//
+// The count is not zero in practice — the reference's capture shows 19 for
+// Account — but no component data follows it: the element ends right after
+// the byte. The components themselves replicate over NRL, not here.
+func EncodeCreateBasePlayerWithComponents(e *Entity, components uint8) ([]byte, error) {
 	if e == nil || e.Type == nil {
 		return nil, fmt.Errorf("wotlogin: CreateBasePlayer: no entity type")
 	}
@@ -104,7 +116,7 @@ func EncodeCreateBasePlayer(e *Entity) ([]byte, error) {
 	body.Write(tmp[:2])
 	body.WriteByte(0) // the unknown blob, empty in every capture
 	body.Write(data)
-	body.WriteByte(0) // dynamic component count
+	body.WriteByte(components)
 	return element(elCreateBasePlayer, body.Bytes())
 }
 
@@ -126,7 +138,7 @@ func EncodeClientMethodCall(e *Entity, method string, args []entdef.Value) ([]by
 	}
 	m := &e.Type.ClientMethods[id]
 	var buf bytes.Buffer
-	if err := m.WriteArgs(&buf, entdef.NewCodec(), args); err != nil {
+	if err := m.WriteArgs(&buf, args); err != nil {
 		return nil, err
 	}
 	return element(byte(entityMethodBase+id), buf.Bytes())
@@ -158,6 +170,13 @@ func EncodePropertyUpdate(e *Entity, name string) ([]byte, error) {
 		return nil, fmt.Errorf("wotlogin: %s.%s: %w", e.Type.Name, name, err)
 	}
 	return element(byte(entityPropertyBase+idx), buf.Bytes())
+}
+
+// EncodeSelectPlayerEntity builds the SelectPlayerEntity element: FIXED 0,
+// no payload. It tells the client which entity is its player, and follows
+// CreateBasePlayer.
+func EncodeSelectPlayerEntity() []byte {
+	return []byte{elSelectPlayerEntity}
 }
 
 // EncodeTickSync builds a TICK_SYNC element, the one-byte message head the

@@ -156,6 +156,13 @@ type BaseAppConfig struct {
 	// here is a choice, not an observation: the client authenticates, the
 	// entity is created, then the lobby data arrives.
 	CreateBasePlayer bool
+	// AccountComponents is the dynamic-component count CreateBasePlayer
+	// carries. The reference's capture shows 19 for Account, and no
+	// component data follows it — the element ends right after the count.
+	AccountComponents uint8
+	// ShowGUIArg is the STRING showGUI takes. The reference replays the
+	// capture's; we have none, so it is empty by default.
+	ShowGUIArg string
 
 	// Queue lets the application layer own the matchmaking queue. nil =
 	// the queue commands are recognised and left unanswered, and the
@@ -253,6 +260,7 @@ type clientState struct {
 	freeXP     int64        // account free XP for the 1a/69 stats small
 	version    string       // client build the login identified
 	entityID   uint32       // the player entity id we mint for CreateBasePlayer
+	entered    bool         // the Account entity has been created
 	sessionKey uint32       // login-minted
 	stageKey   uint32       // our stage-1 rotation (0 = none yet)
 	stage2Key  uint32       // our stage-2 rotation (0 = none yet)
@@ -287,6 +295,12 @@ func NewBaseAppServer(cfg BaseAppConfig) (*BaseAppServer, error) {
 	}
 	if cfg.BulkFragSize == 0 {
 		cfg.BulkFragSize = 1252
+	}
+	if cfg.AccountComponents == 0 {
+		// The reference's capture shows 19 for Account. Zero is the
+		// "unset" value here, so a carrier that really wanted zero would
+		// have to say so explicitly — which no capture does.
+		cfg.AccountComponents = 19
 	}
 	s := &BaseAppServer{
 		cfg:        cfg,
@@ -1439,6 +1453,69 @@ type QueueHooks struct {
 	Census func() (players int, classes []int)
 }
 
+// enterAccount brings a client that enabled entities to its account, the
+// way the reference's capture shows: the Account entity, then
+// SelectPlayerEntity, then showGUI. showGUI is what makes the hangar
+// appear; without it the entity exists but nothing is shown.
+//
+// The trigger is the client's own enableEntities element, not a point in
+// the flood: the client says it is ready for entities, and only then does
+// the server create one.
+func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clientState) error {
+	if !s.cfg.CreateBasePlayer || s.cfg.Dispatch == nil {
+		return nil
+	}
+	s.mu.Lock()
+	done := st.entered
+	st.entered = true
+	cumul := st.postCumul
+	s.mu.Unlock()
+	if done {
+		return nil // a repeated enableEntities is not a second entity
+	}
+
+	app, err := s.createBasePlayerApp(st)
+	if err != nil {
+		return fmt.Errorf("CreateBasePlayer: %w", err)
+	}
+	if err := s.sendReliable(conn, from, st, app, 3, cumul); err != nil {
+		return err
+	}
+	s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, Account, %d components)",
+		from, len(app), st.entityID, s.cfg.AccountComponents)
+
+	// SelectPlayerEntity: FIXED 0, no payload.
+	if err := s.sendReliable(conn, from, st, EncodeSelectPlayerEntity(), 4, cumul); err != nil {
+		return err
+	}
+	s.logf("stage2 %s: SelectPlayerEntity (entity %d)", from, st.entityID)
+
+	// showGUI: the Account client method that shows the hangar.
+	call, err := s.accountCall("showGUI", entdef.Value{Kind: entdef.VString, Str: s.cfg.ShowGUIArg})
+	if err != nil {
+		return fmt.Errorf("showGUI: %w", err)
+	}
+	if err := s.sendReliable(conn, from, st, call, 5, cumul); err != nil {
+		return err
+	}
+	s.logf("stage2 %s: showGUI %dB (arg %dB)", from, len(call), len(s.cfg.ShowGUIArg))
+	return nil
+}
+
+// sendReliable frames an app as a reliable packet, sends it, and tracks it
+// for retransmission.
+func (s *BaseAppServer) sendReliable(conn Transport, to *net.UDPAddr, st *clientState, app []byte, seq, cumul uint32) error {
+	pkt, err := buildChannelPacket(st.blockKey, flagsRel, app, nil, seq, cumul)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.WriteToUDP(pkt, to); err != nil {
+		return err
+	}
+	s.resend.track(to.String(), seq, pkt)
+	return nil
+}
+
 // createBasePlayerApp builds the CreateBasePlayer element for a session:
 // the Account entity with its four base-hosted client-visible properties.
 //
@@ -1462,7 +1539,7 @@ func (s *BaseAppServer) createBasePlayerApp(st *clientState) ([]byte, error) {
 		SetString("requiredVersion_2400", "2.4.0.0").
 		SetString("name", st.name).
 		Set("initialServerSettings", entdef.Value{Kind: entdef.VString, Str: ""})
-	return EncodeCreateBasePlayer(e)
+	return EncodeCreateBasePlayerWithComponents(e, s.cfg.AccountComponents)
 }
 
 // argAt returns args[i], or 0 when the call is shorter.
@@ -1564,7 +1641,7 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 						m.Name, elemID, argLen, m.Length.Size)
 					return postCall{}, false
 				}
-				args, err := m.ReadArgs(bytes.NewReader(body), entdef.NewCodec())
+				args, err := m.ReadArgs(bytes.NewReader(body))
 				if err != nil {
 					s.logf("post-flood %s: %v", m.Name, err)
 					return postCall{}, false
@@ -1608,6 +1685,15 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 // the [13][tag] head, the footers (seq; cumul = the live client
 // watermark), and the 1a/5e error small's req echo are minted.
 func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *clientState, clear []byte) error {
+	// The client's enableEntities is the trigger for creating its entity:
+	// it says it is ready, and only then does the server create one. It
+	// is FIXED 0, so the element is a single byte.
+	if app, err := frameApp(clear); err == nil && len(app) > 0 && app[0] == elEnableEntities {
+		if err := s.enterAccount(conn, from, st); err != nil {
+			s.logf("stage2 %s: enterAccount: %v", from, err)
+		}
+		return nil
+	}
 	// Chat rides its own A1 tag (0x98), not a doCmd* base call, so it is
 	// checked first. The client sends initAck and requestLastSysMessages
 	// here; we name them and stay silent (no chat backend yet).
@@ -1963,25 +2049,6 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 			return err
 		}
 		s.logf("stage2 %s: session dict %dB (seq %d cumul %d, databaseID/UTC patched)", from, len(pkt), 2, dictCumul)
-	}
-	// The player's entity, so client method calls have a target. Sent
-	// after the session dict and before the flood: the client has
-	// authenticated, the entity exists, then the lobby data arrives.
-	if s.cfg.CreateBasePlayer && s.cfg.Dispatch != nil {
-		app, err := s.createBasePlayerApp(st)
-		if err != nil {
-			s.logf("stage2 %s: CreateBasePlayer skipped: %v", from, err)
-		} else {
-			pkt, err := buildChannelPacket(st.blockKey, flagsRel, app, nil, 3, dictCumul)
-			if err != nil {
-				return err
-			}
-			if _, err := conn.WriteToUDP(pkt, from); err != nil {
-				return err
-			}
-			s.resend.track(from.String(), 3, pkt)
-			s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, Account)", from, len(pkt), st.entityID)
-		}
 	}
 	var pfx [4]byte
 	for _, clear := range s.bulk {

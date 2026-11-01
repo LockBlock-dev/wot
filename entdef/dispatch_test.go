@@ -78,13 +78,12 @@ func TestDecodeRealDoCmdInt3(t *testing.T) {
 		// A CMD_REQ_SERVER_STATS (501) call.
 		{"poll", "ca00f501000000000000000000000000000000000000000000000000", 202, 501},
 	}
-	c := NewCodec()
 	for _, tc := range cases {
 		raw, err := hex.DecodeString(tc.hex)
 		if err != nil {
 			t.Fatal(err)
 		}
-		args, err := m.ReadArgs(bytes.NewReader(raw), c)
+		args, err := m.ReadArgs(bytes.NewReader(raw))
 		if err != nil {
 			t.Fatalf("%s: ReadArgs: %v", tc.name, err)
 		}
@@ -99,7 +98,7 @@ func TestDecodeRealDoCmdInt3(t *testing.T) {
 		}
 		// Re-encoding must reproduce the capture's bytes exactly.
 		var out bytes.Buffer
-		if err := m.WriteArgs(&out, c, args); err != nil {
+		if err := m.WriteArgs(&out, args); err != nil {
 			t.Fatalf("%s: WriteArgs: %v", tc.name, err)
 		}
 		if !bytes.Equal(out.Bytes(), raw) {

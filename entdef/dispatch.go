@@ -50,8 +50,20 @@ type MethodDef struct {
 	Length   ElementLength
 }
 
+// Codec is the value codec this method's arguments use. The
+// variable-length header width belongs to the method, not to the caller:
+// showGUI's STRING arg is a 2-byte header, and encoding it with the
+// default 1-byte one produces a call the client misreads.
+func (m *MethodDef) Codec() Codec {
+	if m.Length.Fixed {
+		return NewCodec()
+	}
+	return Codec{VarLen: m.Length.Var}
+}
+
 // ReadArgs decodes this method's arguments, in declared order.
-func (m *MethodDef) ReadArgs(r io.Reader, c Codec) ([]Value, error) {
+func (m *MethodDef) ReadArgs(r io.Reader) ([]Value, error) {
+	c := m.Codec()
 	out := make([]Value, len(m.Args))
 	for i, dt := range m.Args {
 		v, err := c.Read(r, dt)
@@ -64,10 +76,11 @@ func (m *MethodDef) ReadArgs(r io.Reader, c Codec) ([]Value, error) {
 }
 
 // WriteArgs encodes this method's arguments, in declared order.
-func (m *MethodDef) WriteArgs(w io.Writer, c Codec, args []Value) error {
+func (m *MethodDef) WriteArgs(w io.Writer, args []Value) error {
 	if len(args) != len(m.Args) {
 		return fmt.Errorf("entdef: %s takes %d args, got %d", m.Name, len(m.Args), len(args))
 	}
+	c := m.Codec()
 	for i, dt := range m.Args {
 		if err := c.Write(w, dt, args[i]); err != nil {
 			return fmt.Errorf("entdef: %s arg %d (%s): %w", m.Name, i, dt.Describe(), err)

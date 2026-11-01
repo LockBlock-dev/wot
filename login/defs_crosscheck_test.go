@@ -40,7 +40,6 @@ func TestDefsAgreeWithPostDoCmd(t *testing.T) {
 	if acct == nil {
 		t.Fatal("no Account")
 	}
-	codec := entdef.NewCodec()
 
 	f, err := os.Open(dump)
 	if err != nil {
@@ -85,7 +84,7 @@ func TestDefsAgreeWithPostDoCmd(t *testing.T) {
 		if m == nil {
 			t.Fatalf("no base method at id %d", id)
 		}
-		args, err := m.ReadArgs(bytes.NewReader(clear[10:]), codec)
+		args, err := m.ReadArgs(bytes.NewReader(clear[10:]))
 		if err != nil {
 			t.Fatalf("%s: ReadArgs: %v", m.Name, err)
 		}
