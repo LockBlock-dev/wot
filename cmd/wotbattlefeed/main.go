@@ -439,6 +439,30 @@ func main() {
 			m.t.Format("15:04:05.000"), el/60, el%60, m.ctr, s, nm, tank)
 	}
 
+	// Battle chat, both directions: the S>C relay names the speaker
+	// from the roster, the C>S submit is our own and carries no
+	// sender. Auto-spot callouts ride the same relay.
+	type chatRow struct {
+		t time.Time
+		c lobby.BattleChat
+	}
+	var chats []chatRow
+	for _, p := range pkts {
+		var cs []lobby.BattleChat
+		if p.dir == "C>S" {
+			cs = lobby.ScanBattleChatC2S(p.app)
+		} else {
+			cs = lobby.ScanBattleChatS2C(p.app)
+		}
+		for _, c := range cs {
+			chats = append(chats, chatRow{p.ts, c})
+		}
+	}
+	fmt.Printf("chat messages=%d\n", len(chats))
+	for _, r := range chats {
+		fmt.Println(obs.ObserveChat(r.t, r.c))
+	}
+
 	// Presence per snapshot token (counts/times only — names open).
 	pr := lobby.NewPresence()
 	for _, p := range pkts {

@@ -1246,22 +1246,13 @@ func BuildShootTrigger(key4 [BattleKeyLen]byte, entity, nonce uint32, speed, x, 
 	app = append(app, key4[:]...)
 	app = append(app, BattleSubShoot, BattleShootArgsLen, 0x00)
 	app = append(app, 0x00, 0x00, 0x00, 0x00)
-	app = append(app, BattleTrailerTag, 0x1a, 0x00)
-	var tmp [4]byte
-	binary.LittleEndian.PutUint32(tmp[:], entity)
-	app = append(app, tmp[:]...)
-	binary.LittleEndian.PutUint32(tmp[:], nonce)
-	app = append(app, tmp[:]...)
-	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(speed))
-	app = append(app, tmp[:]...)
-	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(x))
-	app = append(app, tmp[:]...)
-	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(y))
-	app = append(app, tmp[:]...)
-	binary.LittleEndian.PutUint32(tmp[:], math.Float32bits(z))
-	app = append(app, tmp[:]...)
-	app = append(app, tail[0], tail[1])
-	return app
+	return appendTrailer(app, Trailer{
+		Entity:       entity,
+		Nonce:        nonce,
+		Speed:        speed,
+		AvatarUpdate: AvatarUpdate{X: x, Y: y, Z: z},
+		Tail:         tail,
+	})
 }
 
 // FindShootTrigger reports whether app carries the shoot-trigger
