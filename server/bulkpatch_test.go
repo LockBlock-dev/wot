@@ -156,3 +156,37 @@ func TestBundleRoundTripAccountCapture(t *testing.T) {
 	t.Logf("two-document round-trip: %d bytes, %d documents, %d objects, byte-identical",
 		len(raw), len(b.Docs), len(b.Stack))
 }
+
+// TestServedFieldsIsHonest pins the account model's wire inventory: the
+// fields claimed as served must be the ones ApplyState actually writes,
+// and the unserved list must not overlap them.
+func TestServedFieldsIsHonest(t *testing.T) {
+	served := ServedFields()
+	for _, want := range []string{"Credits", "FreeXP"} {
+		if _, ok := served[want]; !ok {
+			t.Errorf("%s is not listed as served", want)
+		}
+	}
+	for _, f := range UnservedFields() {
+		if _, ok := served[f]; ok {
+			t.Errorf("%s is listed as both served and unserved", f)
+		}
+	}
+	// ApplyState must write exactly the served economy fields.
+	raw := loadAccountBundle(t)
+	b, err := DecodeBundle(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyState(b, &PlayerState{Credits: 500000, FreeXP: 12345}); err != nil {
+		t.Fatalf("ApplyState: %v", err)
+	}
+	stats := b.Docs[b.AccountDoc()].pair("stats")
+	got := map[string]int64{}
+	for i, k := range stats.Keys {
+		got[k.S] = stats.Items[i].I
+	}
+	if got["credits"] != 500000 || got["freeXP"] != 12345 {
+		t.Errorf("stats = %v, want credits 500000 / freeXP 12345", got)
+	}
+}

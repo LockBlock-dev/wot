@@ -42,6 +42,27 @@ type GarageVehicle struct {
 	Locked bool `json:"locked,omitempty"`
 }
 
+// ServedFields names the PlayerState fields that reach the client, and
+// the wire slot each one rides.
+//
+// It is the honest inventory of the account model. The rest of the struct
+// is stored and settable through wotaccounts but has no slot in any
+// capture: the account document the flood carries holds `stats.credits`,
+// `stats.freeXP`, `piggyBank.credits`, an empty `inventory` and
+// `account.globalRating` — no gold, no garage list, no research.
+func ServedFields() map[string]string {
+	return map[string]string{
+		"FreeXP":  "1a/69 stats small + bundle stats.freeXP",
+		"Credits": "bundle stats.credits",
+	}
+}
+
+// UnservedFields names the PlayerState fields with no wire slot, so an
+// operator is not surprised when setting them changes nothing in game.
+func UnservedFields() []string {
+	return []string{"Gold", "Garage", "Research"}
+}
+
 // DefaultPlayerState is the state a freshly provisioned account starts
 // with. The garage is left empty on purpose: seeding it needs real
 // compact descriptors from the vehicle table, which is a later step.

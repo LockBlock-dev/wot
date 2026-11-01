@@ -52,6 +52,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -241,6 +242,16 @@ func main() {
 	// Account name and DB path are not secrets; the password never
 	// gets a line.
 	fmt.Printf("wotserver: accounts in %s, default account %q\n", *flagDB, server.NormalizeName(*flagUser))
+	// Say which account fields actually reach the client: the rest are
+	// stored and settable but have no wire slot in any capture.
+	served := server.ServedFields()
+	names := make([]string, 0, len(served))
+	for k := range served {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	fmt.Printf("wotserver: player state served: %s; stored only: %s\n",
+		strings.Join(names, ", "), strings.Join(server.UnservedFields(), ", "))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

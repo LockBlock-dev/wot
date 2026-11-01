@@ -112,7 +112,10 @@ func ApplyState(b *Bundle, st *PlayerState) error {
 	}
 	doc := b.AccountDoc()
 	if doc < 0 {
-		return fmt.Errorf("bulk: no account document in the bundle")
+		// A carrier without the account document (the config-only
+		// captures) has nothing to patch: the client keeps whatever the
+		// bundle already says.
+		return nil
 	}
 	stats := b.Docs[doc].pair("stats")
 	if stats == nil || stats.Kind != lobby.FDict {
