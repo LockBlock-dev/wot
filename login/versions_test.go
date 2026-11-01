@@ -2,6 +2,7 @@ package login
 
 import (
 	"encoding/hex"
+	"net"
 	"testing"
 
 	"github.com/LockBlock-dev/wot/entdef"
@@ -107,5 +108,40 @@ func TestServerAcceptsBothBuilds(t *testing.T) {
 	srv.cfg.AcceptAnyDigest = true
 	if !srv.acceptDigest([4]byte{1, 2, 3, 4}, [16]byte{0xde}) {
 		t.Error("AcceptAnyDigest did not disable the gate")
+	}
+}
+
+// TestLoggedOnCarriesVersion checks the identified build reaches the
+// BaseApp handoff, so an admission can say which client it is serving.
+func TestLoggedOnCarriesVersion(t *testing.T) {
+	var got LoggedOnSession
+	srv, err := NewLoginAppServer(ServerConfig{
+		MaxNonce:   serverTestMaxNonce,
+		Versions:   testVersions(),
+		OnLoggedOn: func(s LoggedOnSession) { got = s },
+	}, testRSAKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	listen := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 20016}
+
+	pkt, err := srv.handlePacket(loginOneDatagram(t, 71, true), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#1: %v", err)
+	}
+	ch := challengeOf(t, pkt, 71)
+	pkt, err = srv.handlePacket(loginTwoDatagram(t, 72, ch, testDigestA, nil), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#2: %v", err)
+	}
+	if _, status, _, err := parseReply(pkt); err != nil || status != statusLoggedOn {
+		t.Fatalf("status=%d err=%v, want LOGGED_ON", status, err)
+	}
+	if got.Version != "test" {
+		t.Errorf("LoggedOnSession.Version = %q, want %q", got.Version, "test")
+	}
+	if got.SessionKey == 0 {
+		t.Error("no session key on the handoff")
 	}
 }

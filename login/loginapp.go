@@ -538,7 +538,7 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		}
 		accountID = id
 	}
-	return s.loggedOn(from, listen, req.rid, params, accountID)
+	return s.loggedOn(from, listen, req.rid, req.version, params, accountID)
 }
 
 // issueChallenge mints the PoW state and answers status 66 (55 B for
@@ -595,6 +595,15 @@ func (s *LoginAppServer) acceptDigest(proto [4]byte, d [16]byte) bool {
 	return ok
 }
 
+// versionName labels the build behind a login, or "unknown" when the
+// gates are off and the pair matches nothing.
+func (s *LoginAppServer) versionName(proto [4]byte, digest [16]byte) string {
+	if v, ok := Identify(s.cfg.Versions, proto, digest); ok {
+		return v.Name
+	}
+	return "unknown"
+}
+
 // versionNames renders the known builds for a log line.
 func versionNames(versions []ClientVersion) string {
 	if len(versions) == 0 {
@@ -617,7 +626,7 @@ func versionNames(versions []ClientVersion) string {
 // (genuine 216 B plaintext). Record endpoint mirrors the operator
 // choice; salt stays 0 (its semantics are unobserved — our reader
 // skips it). session_id/token2/account id are SYNTHESIZED shapes.
-func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, params LogOnParams, accountID int64) ([]byte, error) {
+func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, proto [4]byte, params LogOnParams, accountID int64) ([]byte, error) {
 	name := userNameOf(params.Username)
 	token2, err := randToken2(accountIDFor(accountID, name))
 	if err != nil {
@@ -645,7 +654,10 @@ func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, params 
 		return nil, fmt.Errorf("wotserver: reply encrypt: %w", err)
 	}
 	if s.cfg.OnLoggedOn != nil {
-		s.cfg.OnLoggedOn(LoggedOnSession{SessionKey: key, BlockKey: params.EncKey, Name: name, AccountID: accountID})
+		s.cfg.OnLoggedOn(LoggedOnSession{
+			SessionKey: key, BlockKey: params.EncKey, Name: name,
+			AccountID: accountID, Version: s.versionName(proto, params.Digest),
+		})
 	}
 	s.logf("%s: LOGGED_ON rid=%d %s:%d plain %d B msg %d B", from, rid, net.IP(ip[:]), port, len(plain), len(msg))
 	return buildReplyPacket(rid, statusLoggedOn, body)

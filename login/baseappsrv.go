@@ -86,6 +86,10 @@ type LoggedOnSession struct {
 	// FreeXP is the account's free experience, served in the 1a/69
 	// stats small. Zero means "not known": the capture's value replays.
 	FreeXP int64
+	// Version is the client build the login identified ("2.4.0",
+	// "2.4.1", or "unknown" when the gates are off). The lobby content
+	// is still the capture's, so this is informational for now.
+	Version string
 }
 
 // BaseAppConfig configures the server. Redirect is required: the
@@ -168,6 +172,7 @@ type clientState struct {
 	name       string       // login username (future per-session smalls)
 	accountID  int64        // stored account behind the login (0 = none)
 	freeXP     int64        // account free XP for the 1a/69 stats small
+	version    string       // client build the login identified
 	sessionKey uint32       // login-minted
 	stageKey   uint32       // our stage-1 rotation (0 = none yet)
 	stage2Key  uint32       // our stage-2 rotation (0 = none yet)
@@ -248,11 +253,21 @@ func (s *BaseAppServer) Admit(sess LoggedOnSession) {
 		name:       sess.Name,
 		accountID:  sess.AccountID,
 		freeXP:     sess.FreeXP,
+		version:    sess.Version,
 		sessionKey: sess.SessionKey,
 		admittedAt: time.Now(),
 	}
-	s.logf("admitted session key %08x (name %dB, blockKey %dB)",
-		sess.SessionKey, len(sess.Name), len(sess.BlockKey))
+	s.logf("admitted session key %08x (name %dB, blockKey %dB, client %s)",
+		sess.SessionKey, len(sess.Name), len(sess.BlockKey), versionOrUnknown(sess.Version))
+}
+
+// versionOrUnknown labels a session whose build the login could not
+// identify (the gates were off).
+func versionOrUnknown(v string) string {
+	if v == "" {
+		return "unknown"
+	}
+	return v
 }
 
 // loadBulk keeps every flood frame's DECRYPTED body for verbatim
