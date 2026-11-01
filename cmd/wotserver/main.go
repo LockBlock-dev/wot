@@ -70,6 +70,7 @@ var (
 	flagS2         *string
 	flagFlood      *string
 	flagFloodKey   *string
+	flagFloodFlow  *string
 	flagBaseApp    *string
 	flagMaxNonce   *int64
 	flagAnyVersion *bool
@@ -89,6 +90,7 @@ func main() {
 	flagS2 = flag.String("s2", "127.0.0.1:32851", "BaseApp stage-2 listener host:port (the [44] redirect target; bind inside 32810-32999)")
 	flagFlood = flag.String("flood", "../captures/flows3-s2.txt", "wotproxy-style stage-2 dump for the bulk carrier (\"\" = no carrier)")
 	flagFloodKey = flag.String("floodkey", "../captures/key3.txt", "hex block key file for the carrier dump")
+	flagFloodFlow = flag.String("floodflow", "", "flow substring to select from a multi-flow carrier dump (\"\" = single-flow dump)")
 	flagBaseApp = flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
 	flagMaxNonce = flag.Int64("maxnonce", int64(login.DefaultMaxNonce), "PoW easiness bound announced in challenges")
 	flagAnyVersion = flag.Bool("any-version", false, "accept any client protocol version")
@@ -168,7 +170,7 @@ func main() {
 	var base *login.BaseAppServer
 	var s1conn, s2conn *net.UDPConn
 	if *flagS1 != "" {
-		base, s1conn, s2conn = startBaseApp(*flagS1, *flagS2, *flagFlood, *flagFloodKey, *flagVerbose)
+		base, s1conn, s2conn = startBaseApp(*flagS1, *flagS2, *flagFlood, *flagFloodKey, *flagFloodFlow, *flagVerbose)
 		// LoginApp→BaseApp handoff: every finished login feeds the
 		// stage-1 pending record (SessionKey, BlockKey, Name).
 		// Every finished login feeds stage-1; the account's free XP
@@ -252,7 +254,7 @@ func main() {
 // the [44] redirect target, so the ADVERTISED address must carry a
 // dialed IP (an unspecified bind host advertises 127.0.0.1; a real IP
 // verbatim) and must sit in the manager window for our own client.
-func startBaseApp(s1arg, s2arg, flood, floodKey string, verbose bool) (*login.BaseAppServer, *net.UDPConn, *net.UDPConn) {
+func startBaseApp(s1arg, s2arg, flood, floodKey, floodFlow string, verbose bool) (*login.BaseAppServer, *net.UDPConn, *net.UDPConn) {
 	l1, err := net.ResolveUDPAddr("udp", s1arg)
 	if err != nil {
 		fatal(fmt.Errorf("wotserver: -s1 resolve: %w", err))
@@ -274,6 +276,7 @@ func startBaseApp(s1arg, s2arg, flood, floodKey string, verbose bool) (*login.Ba
 		Redirect:     redirect,
 		FloodPath:    flood,
 		FloodKeyPath: floodKey,
+		FloodFlow:    floodFlow,
 		Verbose:      verbose,
 	})
 	if err != nil {

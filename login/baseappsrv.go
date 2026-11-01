@@ -45,6 +45,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,13 @@ type BaseAppConfig struct {
 	// the dance but errors on the flood (loud, not a silent half-lobby).
 	FloodPath    string
 	FloodKeyPath string
+	// FloodFlow selects one flow out of a multi-flow dump (a substring
+	// of the addr column, e.g. "35708->"). Empty means the dump holds a
+	// single flow, which is the case for the flows3-s2 text dump. A
+	// multi-flow capture interleaves flows in arrival order, so without
+	// this the post-flood matcher would pair one flow's terminator with
+	// another flow's ticks.
+	FloodFlow string
 
 	// BulkFragSize is the flood datagram size the carrier selects
 	// (1252 in every genuine capture).
@@ -270,6 +278,11 @@ func versionOrUnknown(v string) string {
 	return v
 }
 
+// inFlow reports whether a dump record belongs to the selected flow.
+func (s *BaseAppServer) inFlow(addr string) bool {
+	return s.cfg.FloodFlow == "" || strings.Contains(addr, s.cfg.FloodFlow)
+}
+
 // loadBulk keeps every flood frame's DECRYPTED body for verbatim
 // re-keyed replay (fresh prefix + session-key encryption at serve
 // time). Bytes stay in memory (never logged): the carrier frames are
@@ -289,7 +302,7 @@ func (s *BaseAppServer) loadBulk() (int, error) {
 		return 0, err
 	}
 	for _, d := range dump {
-		if d.Dir != "S>C" || len(d.Data) != s.cfg.BulkFragSize {
+		if d.Dir != "S>C" || len(d.Data) != s.cfg.BulkFragSize || !s.inFlow(d.Addr) {
 			continue
 		}
 		clear, err := decryptBlowfish(key, d.Data[4:])
@@ -340,7 +353,7 @@ func (s *BaseAppServer) loadPost() error {
 	// dump in arrival order and only accept ticks past the last 332B.
 	sawTerm := false
 	for _, d := range dump {
-		if d.Dir != "S>C" {
+		if d.Dir != "S>C" || !s.inFlow(d.Addr) {
 			continue
 		}
 		switch len(d.Data) {
@@ -436,7 +449,7 @@ func (s *BaseAppServer) loadPre() error {
 		return err
 	}
 	for _, d := range dump {
-		if d.Dir != "S>C" {
+		if d.Dir != "S>C" || !s.inFlow(d.Addr) {
 			continue
 		}
 		switch len(d.Data) {

@@ -16,6 +16,7 @@ type fileConfig struct {
 	S2         *string `json:"s2"`
 	Flood      *string `json:"flood"`
 	FloodKey   *string `json:"floodkey"`
+	FloodFlow  *string `json:"floodflow"`
 	BaseApp    *string `json:"baseapp"`
 	MaxNonce   *int64  `json:"maxnonce"`
 	AnyVersion *bool   `json:"any_version"`
@@ -66,6 +67,7 @@ func (c *fileConfig) apply(set func(name string) bool) {
 	str("s2", flagS2, c.S2)
 	str("flood", flagFlood, c.Flood)
 	str("floodkey", flagFloodKey, c.FloodKey)
+	str("floodflow", flagFloodFlow, c.FloodFlow)
 	str("baseapp", flagBaseApp, c.BaseApp)
 	num("maxnonce", flagMaxNonce, c.MaxNonce)
 	boolean("any-version", flagAnyVersion, c.AnyVersion)
