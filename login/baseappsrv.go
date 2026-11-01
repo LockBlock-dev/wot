@@ -619,10 +619,19 @@ func (s *BaseAppServer) applyBulk() error {
 			}
 		}
 	}
-	// Serve in arrival order, as the capture did.
+	// Serve in CHAIN order, not arrival order. A capture can interleave
+	// fragments of several chains (a flow that spans a reconnect, or a
+	// session that received two bundles); the client assembles one chain
+	// at a time and rejects a fragment whose footer names another:
+	//
+	//   FragmentedBundle::addPacket: Mangled fragment footers on packet
+	//   #162, got [1,185], expecting [2,174]
+	//
+	// Chain order keeps every chain contiguous, which is also the order
+	// the stream above is built in.
 	s.bulk = s.bulk[:0]
-	for _, fr := range frames {
-		s.bulk = append(s.bulk, fr.clear)
+	for _, i := range order {
+		s.bulk = append(s.bulk, frames[i].clear)
 	}
 	return nil
 }
