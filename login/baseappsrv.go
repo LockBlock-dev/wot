@@ -175,6 +175,7 @@ type BaseAppServer struct {
 	term     []byte // 332B terminator clear body
 	revReply []byte // [13][7b] rev-sync answer clear body
 	pollAns  []byte // [13][a4] 1a/5b stats answer clear body
+	queueAns []byte // [13][tag] 1a/67 queue-info answer clear body
 	tickSeed []byte // 12B plain-tick clear body: tag/seq/cumul seeds
 	postOK   bool
 
@@ -603,6 +604,15 @@ func (s *BaseAppServer) loadPost() error {
 			if clear, err := decryptBlowfish(key, d.Data[4:]); err == nil && len(clear) == 51 && isTickHead(clear, 0x7b) {
 				s.revReply = clear
 			}
+		case 76:
+			if s.queueAns != nil {
+				continue
+			}
+			// 1a/67 {players, classes}: the answer to a 502
+			// CMD_REQ_QUEUE_INFO. Server-wide, not per-account.
+			if clear, err := decryptBlowfish(key, d.Data[4:]); err == nil && len(clear) >= 8 && hasSmall(clear, 0x1a, 0x67) {
+				s.queueAns = clear
+			}
 		case 36:
 			if s.pollAns != nil {
 				continue
@@ -619,12 +629,51 @@ func (s *BaseAppServer) loadPost() error {
 		s.postSeq = binary.LittleEndian.Uint32(s.tickSeed[4:8])
 		s.postCumul = binary.LittleEndian.Uint32(s.tickSeed[8:12])
 	}
+	// The queue-info template (1a/67) is server-wide and rides its own
+	// frame, so it is often in the bulk capture rather than the tail one.
+	// Fall back to the flood source when the post source has none.
+	if s.queueAns == nil && path != s.cfg.FloodPath {
+		if err := s.loadQueueTemplate(); err != nil {
+			s.logf("queue-info template unavailable: %v", err)
+		}
+	}
 	if s.term == nil || s.revReply == nil || s.pollAns == nil || s.tickSeed == nil {
 		return fmt.Errorf("post-flood chain frames missing (term=%v rev=%v poll=%v tick=%v) in %s",
 			s.term != nil, s.revReply != nil, s.pollAns != nil, s.tickSeed != nil, path)
 	}
 	s.postOK = true
 	return nil
+}
+
+// loadQueueTemplate finds the 1a/67 queue-info answer in the flood
+// source. It is the answer to a 502 CMD_REQ_QUEUE_INFO and is
+// server-wide, so any capture that saw one carries it.
+func (s *BaseAppServer) loadQueueTemplate() error {
+	key, err := ReadAnyKeyFile(s.cfg.FloodKeyPath)
+	if err != nil {
+		return fmt.Errorf("key file: %w", err)
+	}
+	f, err := os.Open(s.cfg.FloodPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	dump, err := ParseWotproxyDump(f)
+	if err != nil {
+		return err
+	}
+	for _, d := range dump {
+		if d.Dir != "S>C" || len(d.Data) != 76 || !s.inFlow(d.Addr) {
+			continue
+		}
+		clear, err := decryptBlowfish(key, d.Data[4:])
+		if err != nil || len(clear) < 8 || !hasSmall(clear, 0x1a, 0x67) {
+			continue
+		}
+		s.queueAns = clear
+		return nil
+	}
+	return fmt.Errorf("no 76B 1a/67 frame in %s", s.cfg.FloodPath)
 }
 
 // loadPre keeps the pre-flood per-session smalls' TEMPLATES from the
@@ -1418,6 +1467,21 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			return err
 		}
 		s.logf("stage2 %s: post-flood poll → 1a/5b stats answer (minted)", from)
+	case lobby.CmdReqQueueInfo:
+		// 1a/67 {players, classes}: the queue census. Server-wide, so the
+		// carrier's body replays verbatim; only the [13][tag] head and the
+		// footers are minted. Absent from a carrier that never saw a 502
+		// (the flows3-s2 tail has none) — then stay silent, as the client
+		// tolerates.
+		if s.queueAns == nil {
+			s.logf("stage2 %s: post-flood %s — no carrier template", from, cmdLabel(cmd))
+			return nil
+		}
+		app := append([]byte{0x13, 0}, s.queueAns[4:len(s.queueAns)-8]...)
+		if err := s.mintPost(conn, from, st, app); err != nil {
+			return err
+		}
+		s.logf("stage2 %s: post-flood queue info → 1a/67 census (minted)", from)
 	case lobby.CmdSetActiveVehSeason:
 		// We hold no garage, so answer the genuine failure small the
 		// capture shows (~22 ms after the 52B season bundle, flows3-s2

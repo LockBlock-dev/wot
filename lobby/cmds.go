@@ -18,7 +18,12 @@ const (
 	CmdSetActiveVehSeason = 121 // CMD_SET_ACTIVE_VEH_SEASON
 	CmdSyncShop           = 300 // CMD_SYNC_SHOP
 	CmdReqServerStats     = 501 // CMD_REQ_SERVER_STATS
-	CmdSyncDossiers       = 600 // CMD_SYNC_DOSSIERS
+	// CmdReqQueueInfo is CMD_REQ_QUEUE_INFO: the client asks for the
+	// matchmaker queue census and the server answers with the 1a/67
+	// small, {players: <int>, classes: <tuple>}. Server-wide, not
+	// per-account.
+	CmdReqQueueInfo = 502
+	CmdSyncDossiers = 600 // CMD_SYNC_DOSSIERS
 
 	// CmdEnqueueInBattleQueue is CMD_ENQUEUE_IN_BATTLE_QUEUE, sent
 	// with doCmdIntArr as [QUEUE_TYPE.RANDOMS, vehInvID,
