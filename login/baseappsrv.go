@@ -147,6 +147,16 @@ type BaseAppConfig struct {
 	// `stats.freeXP` (see server.ApplyState).
 	PatchBulk func(stream []byte) ([]byte, error)
 
+	// CreateBasePlayer sends the Account entity to the client after the
+	// session dict and before the flood, so client method calls
+	// (onEnqueued, receiveServerStats, …) have a target. It needs the
+	// defs: without them the element cannot be built.
+	//
+	// No capture shows this element in a lobby session, so its position
+	// here is a choice, not an observation: the client authenticates, the
+	// entity is created, then the lobby data arrives.
+	CreateBasePlayer bool
+
 	// Queue lets the application layer own the matchmaking queue. nil =
 	// the queue commands are recognised and left unanswered, and the
 	// census replays the carrier's.
@@ -242,6 +252,7 @@ type clientState struct {
 	accountID  int64        // stored account behind the login (0 = none)
 	freeXP     int64        // account free XP for the 1a/69 stats small
 	version    string       // client build the login identified
+	entityID   uint32       // the player entity id we mint for CreateBasePlayer
 	sessionKey uint32       // login-minted
 	stageKey   uint32       // our stage-1 rotation (0 = none yet)
 	stage2Key  uint32       // our stage-2 rotation (0 = none yet)
@@ -320,6 +331,7 @@ func (s *BaseAppServer) Admit(sess LoggedOnSession) {
 		return
 	}
 	s.pending[sess.SessionKey] = &clientState{
+		entityID:   sess.SessionKey, // unique per session, never zero
 		blockKey:   sess.BlockKey,
 		name:       sess.Name,
 		accountID:  sess.AccountID,
@@ -1427,6 +1439,32 @@ type QueueHooks struct {
 	Census func() (players int, classes []int)
 }
 
+// createBasePlayerApp builds the CreateBasePlayer element for a session:
+// the Account entity with its four base-hosted client-visible properties.
+//
+// incarnationID identifies this incarnation of the entity, so it is fresh
+// per session; the version string is the client's own; the server settings
+// blob is empty (the capture's is a Python dict we do not model).
+func (s *BaseAppServer) createBasePlayerApp(st *clientState) ([]byte, error) {
+	if s.cfg.Dispatch == nil {
+		return nil, fmt.Errorf("CreateBasePlayer needs the defs")
+	}
+	acct := s.cfg.Dispatch.Entity("Account")
+	if acct == nil {
+		return nil, fmt.Errorf("no Account entity in the defs")
+	}
+	var incarnation uint64
+	if err := binary.Read(rand.Reader, binary.LittleEndian, &incarnation); err != nil {
+		return nil, fmt.Errorf("incarnation id: %w", err)
+	}
+	e := NewEntity(st.entityID, acct).
+		SetUint("incarnationID", incarnation).
+		SetString("requiredVersion_2400", "2.4.0.0").
+		SetString("name", st.name).
+		Set("initialServerSettings", entdef.Value{Kind: entdef.VString, Str: ""})
+	return EncodeCreateBasePlayer(e)
+}
+
 // argAt returns args[i], or 0 when the call is shorter.
 func argAt(args []int32, i int) int32 {
 	if i < 0 || i >= len(args) {
@@ -1925,6 +1963,25 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 			return err
 		}
 		s.logf("stage2 %s: session dict %dB (seq %d cumul %d, databaseID/UTC patched)", from, len(pkt), 2, dictCumul)
+	}
+	// The player's entity, so client method calls have a target. Sent
+	// after the session dict and before the flood: the client has
+	// authenticated, the entity exists, then the lobby data arrives.
+	if s.cfg.CreateBasePlayer && s.cfg.Dispatch != nil {
+		app, err := s.createBasePlayerApp(st)
+		if err != nil {
+			s.logf("stage2 %s: CreateBasePlayer skipped: %v", from, err)
+		} else {
+			pkt, err := buildChannelPacket(st.blockKey, flagsRel, app, nil, 3, dictCumul)
+			if err != nil {
+				return err
+			}
+			if _, err := conn.WriteToUDP(pkt, from); err != nil {
+				return err
+			}
+			s.resend.track(from.String(), 3, pkt)
+			s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, Account)", from, len(pkt), st.entityID)
+		}
 	}
 	var pfx [4]byte
 	for _, clear := range s.bulk {

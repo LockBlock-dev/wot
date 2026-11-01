@@ -77,6 +77,7 @@ var (
 	flagPostKey    *string
 	flagPostFlow   *string
 	flagDefs       *string
+	flagCBP        *bool
 	flagBaseApp    *string
 	flagMaxNonce   *int64
 	flagAnyVersion *bool
@@ -102,6 +103,8 @@ func main() {
 	flagPostFlow = flag.String("postflow", "", "flow substring for -post (\"\" = same as -floodflow)")
 	flagDefs = flag.String("defs", "../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs",
 		"scripts/entity_defs directory: decodes post-flood client calls from the defs (\"\" = hand-written reader)")
+	flagCBP = flag.Bool("createbaseplayer", true,
+		"send the Account entity (CreateBasePlayer) so client method calls have a target; needs -defs")
 	flagBaseApp = flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
 	flagMaxNonce = flag.Int64("maxnonce", int64(login.DefaultMaxNonce), "PoW easiness bound announced in challenges")
 	flagAnyVersion = flag.Bool("any-version", false, "accept any client protocol version")
@@ -228,6 +231,7 @@ func main() {
 			flood: *flagFlood, floodKey: *flagFloodKey, floodFlow: *flagFloodFlow,
 			post: *flagPost, postKey: *flagPostKey, postFlow: *flagPostFlow,
 			defs:    *flagDefs,
+			cbp:     *flagCBP,
 			queue:   queueHooks,
 			patch:   patch,
 			verbose: *flagVerbose,
@@ -336,6 +340,7 @@ type baseAppArgs struct {
 	postKey   string
 	postFlow  string
 	defs      string
+	cbp       bool
 	queue     *login.QueueHooks
 	patch     func([]byte) ([]byte, error)
 	verbose   bool
@@ -373,11 +378,12 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 		// No account field lives in the bundle (see server.StatePatches),
 		// so the re-encode is byte-identical and the frames replay
 		// verbatim.
-		VerifyBulk: server.VerifyBundle,
-		PatchBulk:  a.patch,
-		Dispatch:   loadDispatch(a.defs),
-		Queue:      a.queue,
-		Verbose:    verbose,
+		VerifyBulk:       server.VerifyBundle,
+		PatchBulk:        a.patch,
+		Dispatch:         loadDispatch(a.defs),
+		CreateBasePlayer: a.cbp,
+		Queue:            a.queue,
+		Verbose:          verbose,
 	})
 	if err != nil {
 		fatal(err)
