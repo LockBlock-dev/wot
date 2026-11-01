@@ -56,7 +56,14 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `pickle.go` (hand-rolled proto 0-2 decoder, triple-verified vs
   CPython execution + independent emulator on 3 captures; LONG1/4
   sign fix Sep 28; `DecodeAt`/`DecodePrefix`/`Inventory` resync +
-  `Frag`), `lobby_state.go` (prefix salvage → plain maps/slices),
+  `Frag`), `pickle_faithful.go` (second codec: decode to a node tree
+  that remembers HOW each value was encoded — exact opcode per scalar,
+  str vs unicode, container build recipes, memo index + BINPUT/
+  LONG_BINPUT choice — so `EncodeFaithful` reproduces the input
+  byte-for-byte; `SetInt`/`SetString` mark a node dirty for canonical
+  re-encoding. This is the private server's bundle mutator and its
+  round-trip oracle; `pickle.go` stays the salvage/census decoder),
+  `lobby_state.go` (prefix salvage → plain maps/slices),
   `lobbycalls.go` (C>S base-call builders: doCmdInt2/3/4/Str,
   requestToken, primeBundle prefix, chat tails), `battle.go` (avatar
   position parser), `battlechat.go` (battle chat both directions:
