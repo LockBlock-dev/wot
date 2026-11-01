@@ -35,21 +35,25 @@ type Bundle struct {
 	// trailing bytes after the document; they are not ours to interpret,
 	// so they ride along verbatim.
 	Tail []byte
+	// stopped records whether the document ended at STOP. The flood's
+	// later chunks carry channel-framed packets, so a stream can end
+	// early; the encoder must then not add a STOP of its own.
+	stopped bool
 }
 
 // DecodeBundle parses a reassembled lobby bundle.
 func DecodeBundle(raw []byte) (*Bundle, error) {
-	stack, marks, ops, n, err := lobby.DecodeFaithfulOps(raw)
+	stack, marks, ops, n, stopped, err := lobby.DecodeFaithfulStream(raw)
 	if err != nil {
 		return nil, fmt.Errorf("server: bundle decode: %w", err)
 	}
-	return &Bundle{Stack: stack, Marks: marks, ops: ops, Raw: raw, Tail: raw[n:]}, nil
+	return &Bundle{Stack: stack, Marks: marks, ops: ops, Raw: raw, Tail: raw[n:], stopped: stopped}, nil
 }
 
 // Encode re-serialises the bundle. Untouched nodes replay verbatim, so
 // an unmodified bundle encodes back to its input bytes.
 func (b *Bundle) Encode() ([]byte, error) {
-	out, err := lobby.EncodeFaithfulOps(b.Stack, b.Marks, b.ops)
+	out, err := lobby.EncodeFaithfulOpsStop(b.Stack, b.Marks, b.ops, b.stopped)
 	if err != nil {
 		return nil, fmt.Errorf("server: bundle encode: %w", err)
 	}

@@ -8,16 +8,21 @@ import (
 	"github.com/LockBlock-dev/wot/login"
 )
 
-// loadCaptureBundle reassembles the stage-2 flood of a real capture.
-// proxy-20261014-1713 flow 39725-> is the one capture whose bundle
+// loadCaptureBundle reassembles the stage-2 flood of the 2.4.0 capture.
+// proxy-20261014-1713 flow 39725-> is the one 2.4.0 capture whose bundle
 // decodes completely (245 370 of 250 687 bytes, 375 objects).
 func loadCaptureBundle(t *testing.T) []byte {
 	t.Helper()
+	return loadCaptureFlow(t, "../../captures/proxy-20261014-1713.hex", "39725->")
+}
+
+// loadCaptureFlow reassembles one flow's stage-2 flood, recovering the
+// block key from the capture's own login.
+func loadCaptureFlow(t *testing.T, dump, flow string) []byte {
+	t.Helper()
 	const (
-		dump = "../../captures/proxy-20261014-1713.hex"
 		priv = "../../mitm/loginapp_mitm.privkey"
 		pub  = "../../World_of_Tanks_EU/2.4.0.0/res/loginapp_wot.pubkey"
-		flow = "39725->"
 	)
 	if _, err := os.Stat(dump); err != nil {
 		t.Skipf("capture unavailable: %v", err)
@@ -124,4 +129,30 @@ func TestBundleMutationCapture(t *testing.T) {
 		t.Fatalf("%q = %d not found after re-decode", key, before+1)
 	}
 	t.Logf("patched %q: %d -> %d, bundle %d -> %d bytes", key, before, before+1, len(raw), len(out))
+}
+
+// TestBundleRoundTrip241 is the same oracle against a 2.4.1.0 session:
+// the codec must not be pinned to one build's defs. The 2.4.1.0 capture
+// (proxy-20261031-1358, flow 35708->) carries the same 375-object
+// bundle shape as 2.4.0 — the protocol did not move, only the defs.
+func TestBundleRoundTrip241(t *testing.T) {
+	raw := loadCaptureFlow(t, "../../captures/proxy-20261031-1358.hex", "35708->")
+	if len(raw) == 0 {
+		t.Skip("2.4.1 capture unavailable")
+	}
+	b, err := DecodeBundle(raw)
+	if err != nil {
+		t.Fatalf("DecodeBundle: %v", err)
+	}
+	if len(b.Stack) < 100 {
+		t.Fatalf("stack has %d objects, expected hundreds", len(b.Stack))
+	}
+	out, err := b.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(out, raw) {
+		t.Fatalf("2.4.1 round-trip differs: in %d B, out %d B", len(raw), len(out))
+	}
+	t.Logf("2.4.1 bundle round-trip: %d bytes, %d objects, byte-identical", len(raw), len(b.Stack))
 }

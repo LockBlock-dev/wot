@@ -167,13 +167,27 @@ func DecodeFaithfulMarks(data []byte) ([]*FNode, []int, int, error) {
 // that must follow items the malformed-region fallback left on the
 // stack, as {stack index, opcode} pairs.
 func DecodeFaithfulOps(data []byte) ([]*FNode, []int, []KeepOp, int, error) {
-	d := &fdecoder{data: data, memo: map[int]*FNode{}}
+	stack, marks, ops, n, _, err := DecodeFaithfulStream(data)
+	return stack, marks, ops, n, err
+}
+
+// DecodeFaithfulStream is DecodeFaithfulOps plus whether the document
+// ended at STOP. A stream that continues with bytes that are not pickle
+// (the flood's later chunks carry channel-framed packets) ends early:
+// stopped is false, n points at the first unreadable byte, and the
+// caller keeps data[n:] verbatim. The encoder must then not emit a STOP
+// of its own, or the round-trip grows by a byte.
+func DecodeFaithfulStream(data []byte) (stack []*FNode, marks []int, ops []KeepOp, n int, stopped bool, err error) {
+	d := &fdecoder{data: data, memo: map[int]*FNode{}, end: -1}
 	if err := d.run(); err != nil {
-		return nil, nil, nil, d.pos, err
+		return nil, nil, nil, d.pos, false, err
 	}
-	marks := append(append([]int(nil), d.marks...), d.keepMarks...)
+	marks = append(append([]int(nil), d.marks...), d.keepMarks...)
 	sort.Ints(marks)
-	return d.stack, marks, d.keepOps, d.pos, nil
+	if d.end >= 0 {
+		return d.stack, marks, d.keepOps, d.end, false, nil
+	}
+	return d.stack, marks, d.keepOps, d.pos, true, nil
 }
 
 type fdecoder struct {
@@ -194,6 +208,12 @@ type fdecoder struct {
 	// keepOps records a container opcode that must follow the items the
 	// fallback left on the stack: {stack index to emit at, opcode}.
 	keepOps []KeepOp
+	// end is where the decoded document ends when the stream continues
+	// with bytes that are not pickle (-1 = the document ran to STOP).
+	// The flood's later chunks carry channel-framed packets after the
+	// first chunk's document, so the decoder stops at the first byte it
+	// cannot read as an opcode and the caller keeps the rest verbatim.
+	end int
 }
 
 func (d *fdecoder) push(n *FNode) { d.stack = append(d.stack, n) }
@@ -506,6 +526,14 @@ func (d *fdecoder) run() error {
 			}
 			d.push(&FNode{Kind: FReduce, Callable: call, Args: args, Raw: d.data[start:d.pos]})
 		default:
+			if len(d.stack) > 0 {
+				// Not pickle: the stream continues with a framed
+				// packet (the flood's later chunks). End the document
+				// here; the caller keeps the remainder verbatim, so a
+				// round-trip still reproduces the input exactly.
+				d.end = start
+				return nil
+			}
 			return fmt.Errorf("lobby: unsupported pickle opcode 0x%02x at %d", op, start)
 		}
 	}
@@ -530,6 +558,13 @@ func EncodeFaithfulMarks(stack []*FNode, marks []int) ([]byte, error) {
 // EncodeFaithfulOps is EncodeFaithfulMarks plus the container opcodes
 // DecodeFaithfulOps reported.
 func EncodeFaithfulOps(stack []*FNode, marks []int, ops []KeepOp) ([]byte, error) {
+	return EncodeFaithfulOpsStop(stack, marks, ops, true)
+}
+
+// EncodeFaithfulOpsStop is EncodeFaithfulOps with control over the
+// trailing STOP: a document that was cut short by non-pickle bytes must
+// not gain one.
+func EncodeFaithfulOpsStop(stack []*FNode, marks []int, ops []KeepOp, stop bool) ([]byte, error) {
 	e := &fencoder{seen: map[*FNode]bool{}}
 	e.out = append(e.out, opProto, 2)
 	next, nextOp := 0, 0
@@ -553,7 +588,9 @@ func EncodeFaithfulOps(stack []*FNode, marks []int, ops []KeepOp) ([]byte, error
 		e.out = append(e.out, opMark)
 	}
 	flushOps(len(stack))
-	e.out = append(e.out, opStop)
+	if stop {
+		e.out = append(e.out, opStop)
+	}
 	return e.out, nil
 }
 

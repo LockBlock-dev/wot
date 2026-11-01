@@ -157,3 +157,66 @@ func TestFaithfulRejectsGarbage(t *testing.T) {
 		t.Fatal("expected an error for a truncated pickle")
 	}
 }
+
+// TestDecodeStreamStopsAtNonPickle pins the flood's real shape: the
+// first chunk carries a document that never STOPs, and the next chunk
+// starts with a channel-framed packet. The decoder must end the document
+// at the first unreadable byte, report it, and the encoder must not add
+// a STOP of its own — otherwise the round-trip grows by a byte.
+func TestDecodeStreamStopsAtNonPickle(t *testing.T) {
+	// A dict with one entry, no STOP, then a framed packet.
+	doc := []byte{0x80, 0x02, '}', 'q', 0x00, 'U', 0x01, 'k', 'K', 0x07, 's'}
+	framed := []byte{0x00, 0x1a, 0x5f, 0xff, 0x4f}
+	raw := append(append([]byte(nil), doc...), framed...)
+
+	stack, marks, ops, n, stopped, err := DecodeFaithfulStream(raw)
+	if err != nil {
+		t.Fatalf("DecodeFaithfulStream: %v", err)
+	}
+	if stopped {
+		t.Error("stream reported a STOP it never saw")
+	}
+	if n != len(doc) {
+		t.Fatalf("n = %d, want %d (the first framed byte)", n, len(doc))
+	}
+	if len(stack) != 1 || stack[0].Kind != FDict {
+		t.Fatalf("stack = %d nodes, want one dict", len(stack))
+	}
+
+	out, err := EncodeFaithfulOpsStop(stack, marks, ops, stopped)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !bytes.Equal(out, doc) {
+		t.Fatalf("document re-encode = %x, want %x", out, doc)
+	}
+	// With the tail appended the whole stream round-trips.
+	if full := append(append([]byte(nil), out...), raw[n:]...); !bytes.Equal(full, raw) {
+		t.Fatalf("stream round-trip = %x, want %x", full, raw)
+	}
+
+	// A stream that does STOP still reports it, and still emits one.
+	withStop := append(append([]byte(nil), doc...), '.')
+	stack, marks, ops, n, stopped, err = DecodeFaithfulStream(withStop)
+	if err != nil {
+		t.Fatalf("DecodeFaithfulStream: %v", err)
+	}
+	if !stopped || n != len(withStop) {
+		t.Fatalf("stopped=%v n=%d, want true/%d", stopped, n, len(withStop))
+	}
+	out, err = EncodeFaithfulOpsStop(stack, marks, ops, stopped)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !bytes.Equal(out, withStop) {
+		t.Fatalf("re-encode = %x, want %x", out, withStop)
+	}
+}
+
+// TestDecodeStreamRejectsGarbageAtStart keeps the fallback from hiding a
+// stream that is not pickle at all.
+func TestDecodeStreamRejectsGarbageAtStart(t *testing.T) {
+	if _, _, _, _, _, err := DecodeFaithfulStream([]byte{0x00, 0x1a, 0x5f}); err == nil {
+		t.Fatal("garbage accepted as a document")
+	}
+}
