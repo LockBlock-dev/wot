@@ -22,6 +22,7 @@ type fileConfig struct {
 	PostFlow   *string `json:"postflow"`
 	Defs       *string `json:"defs"`
 	CBP        *bool   `json:"createbaseplayer"`
+	TokenAcct  *string `json:"token_account"`
 	BaseApp    *string `json:"baseapp"`
 	MaxNonce   *int64  `json:"maxnonce"`
 	AnyVersion *bool   `json:"any_version"`
@@ -78,6 +79,7 @@ func (c *fileConfig) apply(set func(name string) bool) {
 	str("postflow", flagPostFlow, c.PostFlow)
 	str("defs", flagDefs, c.Defs)
 	boolean("createbaseplayer", flagCBP, c.CBP)
+	str("token-account", flagTokenAcct, c.TokenAcct)
 	str("baseapp", flagBaseApp, c.BaseApp)
 	num("maxnonce", flagMaxNonce, c.MaxNonce)
 	boolean("any-version", flagAnyVersion, c.AnyVersion)

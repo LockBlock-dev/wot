@@ -78,6 +78,7 @@ var (
 	flagPostFlow   *string
 	flagDefs       *string
 	flagCBP        *bool
+	flagTokenAcct  *string
 	flagBaseApp    *string
 	flagMaxNonce   *int64
 	flagAnyVersion *bool
@@ -103,6 +104,8 @@ func main() {
 	flagPostFlow = flag.String("postflow", "", "flow substring for -post (\"\" = same as -floodflow)")
 	flagDefs = flag.String("defs", "../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs",
 		"scripts/entity_defs directory: decodes post-flood client calls from the defs (\"\" = hand-written reader)")
+	flagTokenAcct = flag.String("token-account", "",
+		"account a token login with no username lands on (\"\" = the default account; a Steam client always sends one)")
 	flagCBP = flag.Bool("createbaseplayer", true,
 		"send the Account entity (CreateBasePlayer) so client method calls have a target; needs -defs")
 	flagBaseApp = flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
@@ -160,10 +163,17 @@ func main() {
 		fatal(err)
 	}
 
+	// A Steam build authenticates with a token and leaves `login` empty,
+	// so there is no name to look up: land those logins on an account.
+	tokenAccount := *flagTokenAcct
+	if tokenAccount == "" {
+		tokenAccount = *flagUser
+	}
 	cfg := login.ServerConfig{
-		MaxNonce:   uint64(*flagMaxNonce),
-		AnyVersion: *flagAnyVersion,
-		Verbose:    *flagVerbose,
+		TokenAccount: tokenAccount,
+		MaxNonce:     uint64(*flagMaxNonce),
+		AnyVersion:   *flagAnyVersion,
+		Verbose:      *flagVerbose,
 		// Every login is checked against the account store; a refusal
 		// rides status 68 with the error's text.
 		VerifyCredentials: func(user, pass string) (int64, error) {

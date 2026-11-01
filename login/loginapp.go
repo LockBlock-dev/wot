@@ -112,6 +112,13 @@ type ServerConfig struct {
 	// keyed by SessionKey — the 22B handshake carries it). nil = no
 	// BaseApp (clients park on the record).
 	OnLoggedOn func(LoggedOnSession)
+	// TokenAccount is the account a token login maps to when the client
+	// sends no username. A Steam build always authenticates with a token
+	// and leaves `login` empty, so without this every such login is
+	// refused as an unknown account. Empty = no mapping (the login is
+	// refused as before).
+	TokenAccount string
+
 	// VerifyCredentials authenticates a login. It receives the plain
 	// account name (extracted from the client's JSON identity document)
 	// and the password, both already peeled out of the RSA layer. A
@@ -525,7 +532,14 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		// params.Username is the client's JSON identity document
 		// ({"login": …, "auth_realm": …, "auth_method": …}); the hook
 		// gets the plain account name, not the blob.
-		id, err := s.cfg.VerifyCredentials(userNameOf(params.Username), params.Password)
+		name := userNameOf(params.Username)
+		if mapped := tokenLoginName(params.Username, s.cfg.TokenAccount); mapped != "" {
+			// A token login with no username: land it on the account the
+			// operator named, so a Steam client can test the server.
+			s.logf("%s: login rid=%d token login (no username) → account %q", from, req.rid, mapped)
+			name = mapped
+		}
+		id, err := s.cfg.VerifyCredentials(name, params.Password)
 		if err != nil {
 			// Never log the password or the account name: lengths only.
 			s.logf("%s: login rid=%d credentials rejected (user len %d)",
@@ -795,6 +809,30 @@ func userNameOf(usernameJSON string) string {
 		}
 	}
 	return usernameJSON
+}
+
+// tokenLoginName returns the account a token login maps to, or "" when the
+// login carries a real username.
+//
+// A Steam build authenticates with a token and leaves `login` empty: the
+// identity document is {"auth_method": "token2", "token2": …, "login": ""}.
+// There is no name to look up, so the operator names the account such a
+// login lands on.
+func tokenLoginName(usernameJSON, fallback string) string {
+	if fallback == "" {
+		return ""
+	}
+	var doc map[string]string
+	if err := json.Unmarshal([]byte(usernameJSON), &doc); err != nil {
+		return ""
+	}
+	if doc["login"] != "" {
+		return ""
+	}
+	if doc["token2"] == "" && doc["token"] == "" {
+		return ""
+	}
+	return fallback
 }
 
 // accountIDFor maps a stored account id into the 9-digit space the
