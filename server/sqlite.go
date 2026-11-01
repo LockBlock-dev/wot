@@ -107,6 +107,28 @@ func (s *SQLiteStore) AccountByID(ctx context.Context, id int64) (*Account, erro
 	return scanAccount(row)
 }
 
+// ListAccounts returns every account, ordered by id.
+func (s *SQLiteStore) ListAccounts(ctx context.Context) ([]*Account, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, pass_hash, roles, created_at FROM accounts ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("server: list accounts: %w", err)
+	}
+	defer rows.Close()
+	var out []*Account
+	for rows.Next() {
+		a, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("server: list accounts: %w", err)
+	}
+	return out, nil
+}
+
 // UpdateAccount rewrites the mutable fields (password hash, roles).
 func (s *SQLiteStore) UpdateAccount(ctx context.Context, a *Account) error {
 	res, err := s.db.ExecContext(ctx,

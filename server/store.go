@@ -32,6 +32,10 @@ type Store interface {
 	// AccountByID looks an account up by its primary key.
 	AccountByID(ctx context.Context, id int64) (*Account, error)
 
+	// ListAccounts returns every account, ordered by id. It backs the
+	// operator CLI; the wire never needs it.
+	ListAccounts(ctx context.Context) ([]*Account, error)
+
 	// UpdateAccount rewrites the mutable account fields (password hash,
 	// roles). The name is immutable.
 	UpdateAccount(ctx context.Context, a *Account) error
