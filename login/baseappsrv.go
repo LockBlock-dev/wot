@@ -1658,7 +1658,7 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		if j.addr == nil {
 			continue
 		}
-		app := []byte{0x13, j.tag}
+		app := EncodeTickSync(j.tag)
 		pkt, err := buildChannelPacket(j.st.blockKey, flagsRel, app, nil, j.seq, j.cumul)
 		if err != nil {
 			continue
@@ -1809,4 +1809,4 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 // steps per epoch/stage (0x3e stage-1 here, 0x3f/0x40 at the stage-2
 // heads; parked runs walk it 0x00→0xfb) — semantics open, value copied
 // from the capture.
-var tickApp = []byte{0x13, 0x3e}
+var tickApp = EncodeTickSync(0x3e)

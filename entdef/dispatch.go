@@ -87,6 +87,10 @@ type PropertyDef struct {
 // ids the client uses as indexes.
 type EntityDispatch struct {
 	Name string
+	// TypeID is the entity's index in the load order (entities.xml, then
+	// each extension's own entities) — the id the wire carries in
+	// CreateBasePlayer.
+	TypeID int
 
 	// ClientMethods, BaseMethods and CellMethods are indexed by exposed
 	// id: the position in the slice IS the id the client sends.
@@ -96,6 +100,10 @@ type EntityDispatch struct {
 
 	// Properties is the client-server property table in wire order.
 	Properties []PropertyDef
+	// BaseProps is the subset of Properties that is base-hosted
+	// (DATA_BASE). CreateBasePlayer carries exactly these; the
+	// cell-hosted ones ride CreateCellPlayer instead.
+	BaseProps []PropertyDef
 }
 
 // MethodByID returns the method at an exposed id, or nil.
@@ -168,12 +176,17 @@ func NewDispatch(l *Loader, names []string) (*Dispatch, error) {
 			CellMethods:   methodTable(e.CellMethods, e.IfaceCellMethods),
 		}
 		for _, p := range e.CSPropsOrdered() {
-			ed.Properties = append(ed.Properties, PropertyDef{
+			def := PropertyDef{
 				Name:   p.Name,
 				Type:   p.Type,
 				Length: elementLength(p.StreamSize(), int(p.VarLen)),
-			})
+			}
+			ed.Properties = append(ed.Properties, def)
+			if p.Flags&flagBase != 0 {
+				ed.BaseProps = append(ed.BaseProps, def)
+			}
 		}
+		ed.TypeID = len(d.names)
 		d.byName[e.Name] = ed
 		d.names = append(d.names, e.Name)
 	}
