@@ -37,10 +37,17 @@ import (
 // (63B+) carry extra implicitly-framed records between args and
 // trailer (per-SUB sizes open). The shoot trigger is wire SUB 0x10
 // ([10][len 4][00000000], lead or chained inner — 9/9 own shots
-// 60–140 ms pre-tracer (Sep-29) and 8/8 at 49–118 ms (Oct-14 b2),
-// zero baseline both; behaviorally vehicle_shoot(), the only cell call
-// in the decompiled Avatar.shoot path; the doc index (own[27]) and
-// 0x1b never appear on wire).
+// 60–140 ms pre-tracer (Sep-29), 8/8 at 49–118 ms (Oct-14 b2), and
+// 203/203 at 37–148 ms on the Oct-31 nine-battle session: 86 own
+// shots in b2, 117 in b3, one 0x10 each, zero baseline in b1 where
+// the observer fired 0 times; behaviorally vehicle_shoot(), the only
+// cell call in the decompiled Avatar.shoot path). The doc index
+// (own[27]) is NOT the wire index: 0x1b does appear (3× in Oct-31 b1)
+// but carries another vehicle's ID and lands after the observer's
+// death, so it is a per-entity call, not the 0-arg own shoot. The
+// index space is the binary's registration order — it coincides with
+// the .def order for the vehicle_* block (0x1a/0x1c/0x1d = 26/28/29)
+// but not for the shoot (16 vs 27), still open statically.
 // S>C battle traffic is tick + opaque entity blobs (NOT lobby smalls:
 // the apparent `1a ba` is a misparse — neither body- nor
 // total-length framing fits; snapshots are 276/292B alternating with
@@ -65,10 +72,13 @@ const (
 	BattleSubTrackWorld    = 0x1c // 28 trackWorldPointWithGun(V3): medium
 	BattleSubTrackRelative = 0x1d // 29 trackRelativePointWithGun(V3): medium
 	// BattleSubShoot is the C>S shoot trigger SUB. It is NOT the doc
-	// index (own[27] vehicle_shoot; 0x1b never appears on wire over
-	// 7323 C>S despite 9 confirmed shots). Wire truth (Sep-29 Sweden,
-	// 9/9 own tracers paired 60–140 ms later, zero occurrences
-	// elsewhere in the battle): a bare [10][len 4][00000000] record,
+	// index (own[27] vehicle_shoot): 0x1b does appear on wire (3× in
+	// the Oct-31 b1) but carries another vehicle's ID after the
+	// observer's death, so it is a per-entity call, not this 0-arg
+	// own shoot. Wire truth (Sep-29 Sweden 9/9, Oct-14 b2 8/8, Oct-31
+	// b2+b3 203/203 — one record per own shot, 37–148 ms pre-tracer,
+	// zero baseline in battles where the observer never fired): a bare
+	// [10][len 4][00000000] record,
 	// either lead or chained-inner (inside 07/18-led bundles; records
 	// carry no family tag — the Oct-12 `[93][10]` reading was the flow
 	// key's low byte abutting a lead record, corrected Oct-14).
@@ -84,7 +94,8 @@ const (
 	// over; the index mismatch (16 vs 27) is open statically.
 	BattleSubShoot = 0x10
 	// BattleShootArgsLen is the trigger record's fixed arg length: 4
-	// zero bytes (9/9 identical on Sep-29 wire, 8/8 on Oct-14 b2).
+	// zero bytes (9/9 identical on Sep-29 wire, 8/8 on Oct-14 b2,
+	// 203/203 on Oct-31).
 	BattleShootArgsLen = 4
 	// BattleTrailerTag opens the position trailer ending every
 	// position-carrying call.
