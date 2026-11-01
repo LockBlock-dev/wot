@@ -13,6 +13,18 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 
 ## Layout
 
+- `server/` — private-server application layer (accounts, sessions,
+  player state). `store.go` is the persistence boundary (a domain-level
+  `Store` interface, not SQL); `sqlite.go` is the only implementation
+  (`modernc.org/sqlite`, pure Go, no cgo); `account.go` (bcrypt via
+  `x/crypto`, case-insensitive names), `session.go` (random non-zero u32
+  keys, TTL, in-memory only), `state.go` (credits/gold/free XP, garage,
+  research — stored as a JSON document so the model grows without
+  migrations), `server.go` (`Provision` one default account
+  idempotently, `Authenticate`, `BeginSession`). Wired into
+  `cmd/wotserver` via `login.ServerConfig.VerifyCredentials`; a refusal
+  rides status 68 with the live short wording. Scope and open problems:
+  `../docs/PRIVATE_SERVER.md`.
 - `login/` — framing builders/parsers + `Client.Login()` flow (pure where  possible; `SolveFunc` injected for tests; `Transport` interface over
   UDP so the handshake is script-testable offline): `client.go`
   (`Client`: config/auth-provider/solver/socket/peer/reply-ID sequence),
