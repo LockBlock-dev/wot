@@ -163,8 +163,13 @@ type fdecoder struct {
 	data  []byte
 	pos   int
 	stack []*FNode
-	marks []int // stack indices of MARK sentinels
-	memo  map[int]*FNode
+	marks []int // stack depths at each MARK
+	// markOwner[i] is the node that was on top when marks[i] was pushed:
+	// the container a following SETITEMS/APPENDS fills.
+	markOwner []*FNode
+	memo      map[int]*FNode
+	// lastOwner is the container the most recent markItems belonged to.
+	lastOwner *FNode
 }
 
 func (d *fdecoder) push(n *FNode) { d.stack = append(d.stack, n) }
@@ -224,8 +229,11 @@ func (d *fdecoder) markItems() ([]*FNode, error) {
 	}
 	mi := d.marks[len(d.marks)-1]
 	d.marks = d.marks[:len(d.marks)-1]
+	owner := d.markOwner[len(d.markOwner)-1]
+	d.markOwner = d.markOwner[:len(d.markOwner)-1]
 	items := append([]*FNode(nil), d.stack[mi:]...)
 	d.stack = d.stack[:mi]
+	d.lastOwner = owner
 	return items, nil
 }
 
@@ -246,8 +254,15 @@ func (d *fdecoder) run() error {
 		case opMark:
 			// A MARK is a stack delimiter, not a value: record the
 			// current depth and push nothing, so no sentinel can leak
-			// into the decoded stack.
+			// into the decoded stack. Remember the container on top —
+			// that is what a following SETITEMS/APPENDS fills, even if
+			// the stack has moved on by then.
 			d.marks = append(d.marks, len(d.stack))
+			var owner *FNode
+			if len(d.stack) > 0 {
+				owner = d.stack[len(d.stack)-1]
+			}
+			d.markOwner = append(d.markOwner, owner)
 		case opNone:
 			d.push(&FNode{Kind: FNone, Raw: d.data[start:d.pos]})
 		case opNewTrue:
@@ -338,10 +353,10 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			if len(d.stack) == 0 {
+			l := d.lastOwner
+			if l == nil {
 				return fmt.Errorf("lobby: APPENDS with no list")
 			}
-			l := d.stack[len(d.stack)-1]
 			l.Items = append(l.Items, items...)
 			l.Recipe = append(l.Recipe, FStep{Op: opAppends, N: len(items)})
 		case opSetItem:
@@ -365,10 +380,10 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			if len(d.stack) == 0 {
+			m := d.lastOwner
+			if m == nil {
 				return fmt.Errorf("lobby: SETITEMS with no dict")
 			}
-			m := d.stack[len(d.stack)-1]
 			for i := 0; i+1 < len(items); i += 2 {
 				m.Keys = append(m.Keys, items[i])
 				m.Items = append(m.Items, items[i+1])
