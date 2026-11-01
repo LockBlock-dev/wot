@@ -113,15 +113,23 @@ func (s *Server) BeginSession(ctx context.Context, user, pass string) (*Account,
 	if err != nil {
 		return nil, nil, err
 	}
-	sess, err := s.Sessions.Issue(acct.ID, acct.Name)
+	replaced, sess, err := s.Sessions.Issue(acct.ID, acct.Name)
 	if err != nil {
 		return nil, nil, err
 	}
 	// The session key is a wire value, not a credential: it is logged so
 	// a BaseApp-side event can be tied back to the login that made it.
-	s.log().Info("session issued",
+	attrs := []any{
 		"account", acct.Name, "account_id", acct.ID,
-		"session", fmt.Sprintf("%08x", sess.Key), "expires", sess.Expires)
+		"session", fmt.Sprintf("%08x", sess.Key), "expires", sess.Expires,
+	}
+	if replaced != nil {
+		// A reconnect: the client re-logged in and took over the account.
+		attrs = append(attrs, "replaced", fmt.Sprintf("%08x", replaced.Key))
+		s.log().Info("session reissued", attrs...)
+	} else {
+		s.log().Info("session issued", attrs...)
+	}
 	return acct, sess, nil
 }
 

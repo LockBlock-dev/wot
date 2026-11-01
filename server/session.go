@@ -29,32 +29,40 @@ func (s *Session) Expired(now time.Time) bool {
 // them, which is what the client already expects (it re-logs in). The
 // account state behind them is durable; the session is not.
 type SessionManager struct {
-	mu    sync.Mutex
-	byKey map[uint32]*Session
-	ttl   time.Duration
-	now   func() time.Time
+	mu        sync.Mutex
+	byKey     map[uint32]*Session
+	byAccount map[int64]uint32
+	ttl       time.Duration
+	now       func() time.Time
 }
 
 // NewSessionManager returns a manager whose sessions live for ttl.
 func NewSessionManager(ttl time.Duration) *SessionManager {
 	return &SessionManager{
-		byKey: make(map[uint32]*Session),
-		ttl:   ttl,
-		now:   time.Now,
+		byKey:     make(map[uint32]*Session),
+		byAccount: make(map[int64]uint32),
+		ttl:       ttl,
+		now:       time.Now,
 	}
 }
 
 // Issue mints a fresh session for the account. The key is random and
 // never zero, so it cannot collide with the "no session" sentinel the
 // wire uses.
-func (m *SessionManager) Issue(accountID int64, name string) (*Session, error) {
+//
+// An account holds at most one live session: a reconnect (the client
+// re-logs in after a drop, and the game allows one client per account)
+// replaces the previous one, whose key is returned so the caller can
+// report the takeover. Without this a client that reconnects in a loop
+// would accumulate sessions until the TTL expired.
+func (m *SessionManager) Issue(accountID int64, name string) (replaced, fresh *Session, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
 	for attempt := 0; attempt < 8; attempt++ {
 		var buf [4]byte
 		if _, err := rand.Read(buf[:]); err != nil {
-			return nil, fmt.Errorf("server: session key: %w", err)
+			return nil, nil, fmt.Errorf("server: session key: %w", err)
 		}
 		key := binary.LittleEndian.Uint32(buf[:])
 		if key == 0 {
@@ -70,10 +78,15 @@ func (m *SessionManager) Issue(accountID int64, name string) (*Session, error) {
 			Created:   now,
 			Expires:   now.Add(m.ttl),
 		}
+		if old, ok := m.byAccount[accountID]; ok {
+			replaced = m.byKey[old]
+			delete(m.byKey, old)
+		}
 		m.byKey[key] = s
-		return s, nil
+		m.byAccount[accountID] = key
+		return replaced, s, nil
 	}
-	return nil, fmt.Errorf("server: could not mint a unique session key")
+	return nil, nil, fmt.Errorf("server: could not mint a unique session key")
 }
 
 // Get returns the live session for key, or nil when it is unknown or
@@ -86,7 +99,7 @@ func (m *SessionManager) Get(key uint32) *Session {
 		return nil
 	}
 	if s.Expired(m.now()) {
-		delete(m.byKey, key)
+		m.dropLocked(key)
 		return nil
 	}
 	return s
@@ -96,7 +109,21 @@ func (m *SessionManager) Get(key uint32) *Session {
 func (m *SessionManager) Drop(key uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.dropLocked(key)
+}
+
+// dropLocked removes key from both indexes. The caller holds m.mu.
+func (m *SessionManager) dropLocked(key uint32) {
+	s, ok := m.byKey[key]
+	if !ok {
+		return
+	}
 	delete(m.byKey, key)
+	// Only clear the account index when it still points at this key: a
+	// reconnect may already have replaced it.
+	if cur, ok := m.byAccount[s.AccountID]; ok && cur == key {
+		delete(m.byAccount, s.AccountID)
+	}
 }
 
 // Sweep drops every expired session and reports how many went.
@@ -107,7 +134,7 @@ func (m *SessionManager) Sweep() int {
 	n := 0
 	for k, s := range m.byKey {
 		if s.Expired(now) {
-			delete(m.byKey, k)
+			m.dropLocked(k)
 			n++
 		}
 	}

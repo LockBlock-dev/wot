@@ -151,7 +151,7 @@ func TestSessionManager(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	m.now = func() time.Time { return now }
 
-	s, err := m.Issue(7, "playerone")
+	_, s, err := m.Issue(7, "playerone")
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestSessionManager(t *testing.T) {
 	// Keys are unique across issues.
 	seen := map[uint32]bool{s.Key: true}
 	for i := 0; i < 64; i++ {
-		o, err := m.Issue(int64(i), "x")
+		_, o, err := m.Issue(int64(i), "x")
 		if err != nil {
 			t.Fatalf("Issue: %v", err)
 		}
