@@ -36,6 +36,11 @@ const (
 	// ints; 2.4.1.0 drops the trailing randomFlags (four).
 	CmdEnqueueInBattleQueue = 700
 
+	// CmdDequeueFromBattleQueue is CMD_DEQUEUE_FROM_BATTLE_QUEUE: the
+	// player leaves the queue. The live server answers with
+	// Account.onDequeued(queueType).
+	CmdDequeueFromBattleQueue = 701
+
 	// Request IDs. The STREAM_ID_ACCOUNT_CMDS range is 200..30000
 	// (shipped scripts/common/streamIDs.pyc); the reserved low IDs
 	// are named in scripts/common/accountcommands.pyc as

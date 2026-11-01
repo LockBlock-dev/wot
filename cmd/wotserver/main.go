@@ -193,11 +193,42 @@ func main() {
 				})
 			}
 		}
+		// The matchmaking queue: the wire layer parses the client's call
+		// and answers with the client method the defs name; the queue
+		// itself lives here.
+		queue := server.NewQueue()
+		queueHooks := &login.QueueHooks{
+			Enqueue: func(accountID int64, name string, args []int32) bool {
+				e := server.QueueEntry{AccountID: accountID, Name: name}
+				if len(args) > 0 {
+					e.QueueType = uint8(args[0])
+				}
+				if len(args) > 1 {
+					e.VehicleID = args[1]
+				}
+				if len(args) > 2 {
+					e.GameplaysMask = args[2]
+				}
+				if len(args) > 3 {
+					e.ArenaTypeID = args[3]
+				}
+				if len(args) > 4 {
+					e.RandomFlags = args[4]
+				}
+				return queue.Enqueue(e)
+			},
+			Dequeue: func(accountID int64) bool {
+				_, ok := queue.Dequeue(accountID)
+				return ok
+			},
+			Census: queue.Census,
+		}
 		base, s1conn, s2conn = startBaseApp(baseAppArgs{
 			s1: *flagS1, s2: *flagS2,
 			flood: *flagFlood, floodKey: *flagFloodKey, floodFlow: *flagFloodFlow,
 			post: *flagPost, postKey: *flagPostKey, postFlow: *flagPostFlow,
 			defs:    *flagDefs,
+			queue:   queueHooks,
 			patch:   patch,
 			verbose: *flagVerbose,
 		})
@@ -304,6 +335,7 @@ type baseAppArgs struct {
 	postKey   string
 	postFlow  string
 	defs      string
+	queue     *login.QueueHooks
 	patch     func([]byte) ([]byte, error)
 	verbose   bool
 }
@@ -343,6 +375,7 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 		VerifyBulk: server.VerifyBundle,
 		PatchBulk:  a.patch,
 		Dispatch:   loadDispatch(a.defs),
+		Queue:      a.queue,
 		Verbose:    verbose,
 	})
 	if err != nil {

@@ -147,6 +147,11 @@ type BaseAppConfig struct {
 	// `stats.freeXP` (see server.ApplyState).
 	PatchBulk func(stream []byte) ([]byte, error)
 
+	// Queue lets the application layer own the matchmaking queue. nil =
+	// the queue commands are recognised and left unanswered, and the
+	// census replays the carrier's.
+	Queue *QueueHooks
+
 	// Dispatch is the script model's client-facing tables. When set, the
 	// post-flood client calls are decoded from the defs instead of the
 	// hand-written element reader: the element id maps to a base method
@@ -1404,6 +1409,56 @@ func (s *BaseAppServer) sendPre(conn Transport, to *net.UDPAddr, st *clientState
 	return nil
 }
 
+// QueueHooks is the matchmaking queue as the wire layer sees it: enqueue,
+// dequeue, and the census the client polls.
+//
+// The wire layer does not own the queue — it parses the client's call,
+// hands it over, and answers with the client method the defs name. Forming
+// a battle is out of scope: that needs a cell app and a space.
+type QueueHooks struct {
+	// Enqueue adds a player. args is the client's own selection, in its
+	// order: [queueType, vehInvID, gameplaysMask, arenaTypeID,
+	// randomFlags]. It reports false when the player is already queued.
+	Enqueue func(accountID int64, name string, args []int32) bool
+	// Dequeue removes a player, reporting whether it was there.
+	Dequeue func(accountID int64) bool
+	// Census is the 1a/67 answer: the total waiting and the per-class
+	// breakdown.
+	Census func() (players int, classes []int)
+}
+
+// argAt returns args[i], or 0 when the call is shorter.
+func argAt(args []int32, i int) int32 {
+	if i < 0 || i >= len(args) {
+		return 0
+	}
+	return args[i]
+}
+
+// int32Args pulls one ARRAY<INT32> argument out of a decoded call.
+func int32Args(args []entdef.Value, i int) []int32 {
+	if i < 0 || i >= len(args) || args[i].Kind != entdef.VSeq {
+		return nil
+	}
+	out := make([]int32, 0, len(args[i].Seq))
+	for _, v := range args[i].Seq {
+		out = append(out, int32(v.Int))
+	}
+	return out
+}
+
+// accountCall builds an Account client method call element from the defs.
+func (s *BaseAppServer) accountCall(method string, args ...entdef.Value) ([]byte, error) {
+	if s.cfg.Dispatch == nil {
+		return nil, fmt.Errorf("wotserver: %s needs the defs", method)
+	}
+	acct := s.cfg.Dispatch.Entity("Account")
+	if acct == nil {
+		return nil, fmt.Errorf("wotserver: no Account entity in the defs")
+	}
+	return EncodeClientMethodCall(NewEntity(0, acct), method, args)
+}
+
 // Element ids of entity method calls. The client sends base method N as
 // element 0x88+N and cell method N as 0x10+N, so the method id is the
 // element id minus the base — no table needed.
@@ -1563,19 +1618,72 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		// footers are minted. Absent from a carrier that never saw a 502
 		// (the flows3-s2 tail has none) — then stay silent, as the client
 		// tolerates.
-		if s.queueAns == nil {
-			s.logf("stage2 %s: post-flood %s — no carrier template", from, cmdLabel(cmd))
-			return nil
-		}
-		small, err := carrierSmall(s.queueAns)
-		if err != nil {
-			return err
+		// A live queue answers truthfully; without one the carrier's
+		// census replays.
+		var small []byte
+		if s.cfg.Queue != nil && s.cfg.Queue.Census != nil {
+			players, classes := s.cfg.Queue.Census()
+			built, err := BuildCensusSmall(players, classes)
+			if err != nil {
+				return err
+			}
+			small = built
+		} else {
+			if s.queueAns == nil {
+				s.logf("stage2 %s: post-flood %s — no carrier template", from, cmdLabel(cmd))
+				return nil
+			}
+			carried, err := carrierSmall(s.queueAns)
+			if err != nil {
+				return err
+			}
+			small = carried
 		}
 		app := answerApp(small)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}
 		s.logf("stage2 %s: post-flood queue info → 1a/67 census (minted)", from)
+	case lobby.CmdEnqueueInBattleQueue:
+		// doCmdIntArr: [queueType, vehInvID, gameplaysMask, arenaTypeID,
+		// randomFlags]. The answer is Account.onEnqueued(queueType), a
+		// client method the defs name.
+		if s.cfg.Queue == nil || s.cfg.Queue.Enqueue == nil {
+			s.logf("stage2 %s: post-flood enqueue — no queue configured", from)
+			return nil
+		}
+		args := int32Args(call.Args, 2)
+		if len(args) == 0 {
+			s.logf("stage2 %s: post-flood enqueue — no arguments", from)
+			return nil
+		}
+		added := s.cfg.Queue.Enqueue(st.accountID, st.name, args)
+		s.logf("stage2 %s: post-flood enqueue type %d veh %d (added %v)",
+			from, args[0], argAt(args, 1), added)
+		app, err := s.accountCall("onEnqueued", entdef.Value{Kind: entdef.VUint, Uint: uint64(uint8(args[0]))})
+		if err != nil {
+			s.logf("stage2 %s: onEnqueued: %v", from, err)
+			return nil
+		}
+		return s.mintPost(conn, from, st, app)
+	case lobby.CmdDequeueFromBattleQueue:
+		if s.cfg.Queue == nil || s.cfg.Queue.Dequeue == nil {
+			s.logf("stage2 %s: post-flood dequeue — no queue configured", from)
+			return nil
+		}
+		args := int32Args(call.Args, 2)
+		was := s.cfg.Queue.Dequeue(st.accountID)
+		s.logf("stage2 %s: post-flood dequeue (was queued %v)", from, was)
+		var qt uint8
+		if len(args) > 0 {
+			qt = uint8(args[0])
+		}
+		app, err := s.accountCall("onDequeued", entdef.Value{Kind: entdef.VUint, Uint: uint64(qt)})
+		if err != nil {
+			s.logf("stage2 %s: onDequeued: %v", from, err)
+			return nil
+		}
+		return s.mintPost(conn, from, st, app)
 	case lobby.CmdReqBattleResults:
 		// The live server answers with the 1a/5e error small, status 1
 		// (the season-select path uses status 0): `[13][tag][1a 5e 05]
