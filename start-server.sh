@@ -43,9 +43,19 @@ DEFS="${DEFS:-$ROOT/World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs}"
 
 # The bulk carrier: the only capture whose flood carries both the static
 # config and the account document.
-FLOOD="${FLOOD:-$ROOT/captures/proxy-20261014-1752.hex}"
-FLOODFLOW="${FLOODFLOW:-35493->}"
-FLOODKEY="${FLOODKEY:-$ROOT/captures/key-1752.txt}"
+# The live capture (a real login relayed through wotproxy) is the only
+# one whose bundle chain is complete: [1,203] plus its [203,203] tail.
+# The older captures lose the tail fragment, and the client then walks a
+# short bundle and asserts (BundleDataPos::advance: Ran out of packets).
+if [ -s "$ROOT/captures/live-flood.hex" ] && [ -s "$ROOT/captures/key-live.txt" ]; then
+	FLOOD="${FLOOD:-$ROOT/captures/live-flood.hex}"
+	FLOODFLOW="${FLOODFLOW:-52901->}"
+	FLOODKEY="${FLOODKEY:-$ROOT/captures/key-live.txt}"
+else
+	FLOOD="${FLOOD:-$ROOT/captures/proxy-20261014-1752.hex}"
+	FLOODFLOW="${FLOODFLOW:-35493->}"
+	FLOODKEY="${FLOODKEY:-$ROOT/captures/key-1752.txt}"
+fi
 # The post-flood chain and the pre-flood smalls: the only capture with the
 # 332B terminator, the rev answer, the poll answer and the seed tick.
 POST="${POST:-$ROOT/captures/flows3-s2.txt}"

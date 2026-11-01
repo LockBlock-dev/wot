@@ -600,6 +600,7 @@ func (s *BaseAppServer) applyBulk() error {
 	// spans a reconnect). Keep the bundle with the most fragments and
 	// drop the rest, or the client never accepts the burst.
 	frames = keepLargestBundle(frames)
+	frames = keepBundleChain(frames)
 	// Chain order: by chain id, then position inside the chain.
 	order := make([]int, len(frames))
 	for i := range order {
@@ -658,6 +659,51 @@ func (s *BaseAppServer) applyBulk() error {
 		s.bulk = append(s.bulk, frames[i].clear)
 	}
 	return nil
+}
+
+// keepBundleChain keeps the bundle's fragment chain plus its tail.
+//
+// The chain's fragments carry the range [first,last] in their footer, but
+// the LAST fragment declares its own range [last,last] — it is a
+// single-fragment chain by the footer's own rule. Grouping strictly by
+// the range therefore drops the tail, and the client assembles a bundle
+// that is short by exactly those bytes:
+//
+//   BundleDataPos::advance: Ran out of packets.
+//   MF_ASSERT_DEV FAILED: tailAdvanceSuccess
+//
+// The bundle header (ff + u24 length on the first fragment) gives the
+// total, so the tail is the frame whose range starts where the chain
+// ends.
+func keepBundleChain(frames []bulkFrame) []bulkFrame {
+	counts := map[uint32]int{}
+	last := map[uint32]uint32{}
+	for _, fr := range frames {
+		counts[fr.first]++
+		n := len(fr.clear)
+		if n >= 12 {
+			if l := binary.LittleEndian.Uint32(fr.clear[n-8 : n-4]); l > last[fr.first] {
+				last[fr.first] = l
+			}
+		}
+	}
+	if len(counts) < 2 {
+		return frames
+	}
+	var best uint32
+	for id, n := range counts {
+		if n > counts[best] {
+			best = id
+		}
+	}
+	tail := last[best]
+	out := frames[:0]
+	for _, fr := range frames {
+		if fr.first == best || fr.first == tail {
+			out = append(out, fr)
+		}
+	}
+	return out
 }
 
 // keepLargestBundle drops fragments that belong to a different bundle
