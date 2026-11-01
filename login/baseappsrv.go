@@ -168,6 +168,11 @@ type BaseAppConfig struct {
 type BaseAppServer struct {
 	cfg BaseAppConfig
 
+	// resend holds the reliable packets each peer has not acknowledged.
+	// UDP does not retransmit, so a lost answer would stall the client
+	// with no error on either side.
+	resend *resendQueue
+
 	bulk   [][]byte // flood frame CLEAR bodies (flags+app+trailers)
 	bulkOK bool
 	// bulkBytes is the reassembled bundle size the gate accepted.
@@ -264,6 +269,7 @@ func NewBaseAppServer(cfg BaseAppConfig) (*BaseAppServer, error) {
 	}
 	s := &BaseAppServer{
 		cfg:        cfg,
+		resend:     newResendQueue(resendTimeout, resendGiveUp),
 		pending:    map[uint32]*clientState{},
 		byStageKey: map[uint32]*clientState{},
 		byAddr:     map[string]*clientState{},
@@ -1327,6 +1333,7 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 		if _, err := conn.WriteToUDP(rot, from); err != nil {
 			return err
 		}
+		s.resend.track(from.String(), 0, rot)
 		s.logf("stage2 %s: 22B rid=%d → rotation-2 %dB", from, rq.rid, len(rot))
 		// The pre-flood smalls ride right behind the rotation in the
 		// genuine script (rotation → +10 ms info → +40 ms descriptor,
@@ -1385,7 +1392,10 @@ func (s *BaseAppServer) noteReliable(st *clientState, clear []byte) {
 	if wm := seq + 1; wm > st.postCumul {
 		st.postCumul = wm
 	}
+	wm := st.postCumul
 	s.mu.Unlock()
+	// The client's watermark acknowledges every reliable packet below it.
+	s.resend.ack(st.stage2Addr.String(), wm)
 }
 
 // sendPre emits the stage-2 pre-flood smalls: the 36B info (app
@@ -1401,6 +1411,7 @@ func (s *BaseAppServer) sendPre(conn Transport, to *net.UDPAddr, st *clientState
 	if _, err := conn.WriteToUDP(info, to); err != nil {
 		return err
 	}
+	s.resend.track(to.String(), 1, info)
 	desc, err := descriptorFrame(s.descTpl, st.name)
 	if err != nil {
 		return err
@@ -1424,6 +1435,7 @@ func (s *BaseAppServer) sendPre(conn Transport, to *net.UDPAddr, st *clientState
 		if _, err := conn.WriteToUDP(statsPkt, to); err != nil {
 			return err
 		}
+		s.resend.track(to.String(), 2, statsPkt)
 		statsNote = fmt.Sprintf(" + 1a/69 stats %dB (freeXP %d)", len(statsApp), st.freeXP)
 	}
 	s.logf("stage2 %s: info %dB + descriptor %dB wire (name %dB)%s",
@@ -1687,8 +1699,11 @@ func (s *BaseAppServer) mintPost(conn Transport, to *net.UDPAddr, st *clientStat
 	if err != nil {
 		return err
 	}
-	_, err = conn.WriteToUDP(pkt, to)
-	return err
+	if _, err := conn.WriteToUDP(pkt, to); err != nil {
+		return err
+	}
+	s.resend.track(to.String(), seq, pkt)
+	return nil
 }
 
 // sweepStage2 fires due post-flood ticks (genuine cadence 100 ms).
@@ -1725,6 +1740,20 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		if _, err := conn.WriteToUDP(pkt, j.addr); err != nil {
 			continue
 		}
+		s.resend.track(j.addr.String(), j.seq, pkt)
+	}
+	// Retransmit reliable packets the client has not acknowledged. This
+	// runs on the same sweep as the ticks, so a lost answer is repeated
+	// within one cadence of its timeout.
+	for _, job := range s.resend.due(now) {
+		addr, err := net.ResolveUDPAddr("udp", job.Addr)
+		if err != nil {
+			continue
+		}
+		if _, err := conn.WriteToUDP(job.Pkt, addr); err != nil {
+			continue
+		}
+		s.logf("stage2 %s: resent reliable seq %d (%dB)", addr, job.Seq, len(job.Pkt))
 	}
 }
 
