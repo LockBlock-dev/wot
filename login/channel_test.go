@@ -33,7 +33,7 @@ func TestChannelTrailerLen(t *testing.T) {
 // TestChannelTrailerLenAdditive checks the rule is a pure sum of the
 // individual bits, so an unseen flags word still gets a sane length.
 func TestChannelTrailerLenAdditive(t *testing.T) {
-	bits := []uint16{chFlagSequence, chFlagCumulAck, chFlagAux, chFlagRequests}
+	bits := []uint16{chFlagSequence, chFlagCumulAck, chFlagAux, chFlagFragment}
 	for _, b := range bits {
 		var sum uint16
 		for _, other := range bits {

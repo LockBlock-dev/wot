@@ -37,6 +37,7 @@ import (
 	"github.com/LockBlock-dev/wot/lobby"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -167,6 +168,17 @@ type FloodStats struct {
 // gap-filled from the missing indices in arrival order.
 // Continuation payloads append raw. Per-datagram trailer length comes
 // from ChannelTrailerLen.
+// part is one datagram of a fragment chain: its position within the
+// chain (seq - first) and its payload.
+//
+// A chain is identified by the FIRST sequence number in its range, and
+// arrival order is NOT chain order — the capture shows out-of-order
+// steps, and concatenating in arrival order scrambles the payload.
+type part struct {
+	rel uint32
+	pay []byte
+}
+
 func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, blockKey string) (frags []lobby.Frag, offsets []int, st FloodStats, err error) {
 	type group struct {
 		seq     uint32
@@ -174,9 +186,10 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 		shape   int    // 0=frag0 1=dd00 2=odd 3=unknown
 		ddNN    int    // explicit NN (frag0=1, dd00=pay[7])
 		oddB    int    // odd-shape pay[1] for base voting
+		parts   []part // datagrams of this chain, ordered by rel
 		payload []byte // stripped head + raw continuations
 	}
-	seen := map[uint32]int{} // seq -> group index
+	seen := map[uint32]int{} // chain first-seq -> group index
 	var groups []group
 	off := 0
 	for _, d := range dump {
@@ -189,19 +202,28 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 			continue
 		}
 		n := len(clear)
-		seq := binary.LittleEndian.Uint32(clear[n-8 : n-4])
-		tr := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
+		flags := binary.LittleEndian.Uint16(clear[0:2])
+		tr := ChannelTrailerLen(flags)
 		if len(clear) < 2+tr {
 			st.Skipped++
 			continue
 		}
+		// IS_FRAGMENT (0x0020) puts an 8-byte (first, last) sequence
+		// range at the front of the trailer, ahead of the packet's own
+		// seq. Without it the packet is its own single-fragment chain.
+		first := binary.LittleEndian.Uint32(clear[n-8 : n-4])
+		seq := first
+		if flags&chFlagFragment != 0 && tr >= 12 {
+			first = binary.LittleEndian.Uint32(clear[n-12 : n-8])
+			seq = binary.LittleEndian.Uint32(clear[n-4:])
+		}
 		pay := clear[2 : n-tr]
-		if fi, ok := seen[seq]; ok {
-			groups[fi].payload = append(groups[fi].payload, pay...)
+		if fi, ok := seen[first]; ok {
+			groups[fi].parts = append(groups[fi].parts, part{rel: seq - first, pay: pay})
 			st.Frags++
 			continue
 		}
-		g := group{seq: seq, shape: 3, head: append([]byte(nil), pay...)}
+		g := group{seq: first, shape: 3, parts: []part{{rel: seq - first, pay: pay}}}
 		switch {
 		case len(pay) >= 4 && pay[0] == 0xFF && pay[3] == 0x03:
 			g.shape, g.ddNN = 0, 1
@@ -219,7 +241,7 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 			g.shape = 2
 			g.oddB = int(pay[1])
 		}
-		seen[seq] = len(groups)
+		seen[first] = len(groups)
 		groups = append(groups, g)
 		st.Frags++
 	}
@@ -237,6 +259,17 @@ func ReassembleFrags(dump []DumpDatagram, flowSubstr string, fragSize int, block
 	for b, c := range votes {
 		if c > best {
 			base, best = b, c
+		}
+	}
+	// Order every chain by its fragment index, then take the head from
+	// the first fragment.
+	for i := range groups {
+		g := &groups[i]
+		sort.SliceStable(g.parts, func(a, b int) bool { return g.parts[a].rel < g.parts[b].rel })
+		g.head = g.parts[0].pay
+		g.payload = nil
+		for _, pt := range g.parts[1:] {
+			g.payload = append(g.payload, pt.pay...)
 		}
 	}
 	// Strip heads, fill NN gaps in arrival order.

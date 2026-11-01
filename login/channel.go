@@ -12,8 +12,9 @@ package login
 const (
 	chFlagOnChannel uint16 = 0x0008 // ON_CHANNEL
 	chFlagReliable  uint16 = 0x0010 // RELIABLE (fork: not HAS_SEQUENCE)
-	chFlagRequests  uint16 = 0x0020 // HAS_REQUESTS: 8B request/reply pair
+	chFlagFragment  uint16 = 0x0020 // IS_FRAGMENT: 8B (first,last) seq range
 	chFlagSequence  uint16 = 0x0040 // HAS_SEQUENCE (fork: not RELIABLE)
+	chFlagRequests  uint16 = 0x0001 // HAS_REQUESTS: 2B first-request offset
 	chFlagCumulAck  uint16 = 0x0400 // HAS_CUMULATIVE_ACK
 	chFlagAux       uint16 = 0x1000 // AUX: unreliable reliable-send counter
 )
@@ -26,7 +27,8 @@ const (
 //	4B  HAS_SEQUENCE
 //	4B  HAS_CUMULATIVE_ACK
 //	4B  AUX
-//	8B  HAS_REQUESTS
+//	8B  IS_FRAGMENT (first,last sequence range)
+//	2B  HAS_REQUESTS (first-request offset)
 //
 // Verified against every flags word observed in the Oct-31 EU2 battle
 // capture (2806 S>C + 216 C>S datagrams, seq monotonicity + message
@@ -34,8 +36,8 @@ const (
 //
 //	0x0458 ->  8   ON|REL|SEQ|CUMUL
 //	0x1448 -> 12   ON|SEQ|CUMUL|AUX
-//	0x0078 -> 12   ON|REL|SEQ|REQ
-//	0x0478 -> 16   ON|REL|SEQ|REQ|CUMUL
+//	0x0078 -> 12   ON|REL|SEQ|FRAG
+//	0x0478 -> 16   ON|REL|SEQ|FRAG|CUMUL
 //	0x0058 ->  4   ON|REL|SEQ
 //	0x045a ->  8   ON|REL|SEQ|CUMUL|0x02
 //	0x144c -> 12   ON|SEQ|CUMUL|AUX|0x04
@@ -57,7 +59,7 @@ func ChannelTrailerLen(flags uint16) int {
 	if flags&chFlagAux != 0 {
 		n += 4
 	}
-	if flags&chFlagRequests != 0 {
+	if flags&chFlagFragment != 0 {
 		n += 8
 	}
 	return n

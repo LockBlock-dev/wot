@@ -53,14 +53,14 @@ func TestCensusSmalls(t *testing.T) {
 func encSmall(t *testing.T, flags uint16, app []byte, seq, cumul uint32) []byte {
 	t.Helper()
 	// Trailer length and order follow ChannelTrailerLen:
-	// [requests 8B][aux 4B][seq 4B][cumul 4B].
+	// [fragment 8B][aux 4B][seq 4B][cumul 4B].
 	full := make([]byte, 2)
 	binary.LittleEndian.PutUint16(full, flags)
 	full = append(full, app...)
 	var s, c [4]byte
 	binary.LittleEndian.PutUint32(s[:], seq)
 	binary.LittleEndian.PutUint32(c[:], cumul)
-	if flags&chFlagRequests != 0 {
+	if flags&chFlagFragment != 0 {
 		full = append(full, s[:]...) // request id
 		full = append(full, c[:]...) // reply id
 	}
@@ -267,5 +267,51 @@ func TestParseEntityBurst(t *testing.T) {
 	// Off-step counter rejected.
 	if _, err := ParseEntityBurst([][]byte{mk(249), mk(260)}); err == nil {
 		t.Fatal("off-step must fail")
+	}
+}
+
+// encFragment builds one datagram of a fragment chain: flags 0x0078
+// (ON|RELIABLE|SEQ|FRAG) with the 12-byte trailer [first u32][last u32]
+// [seq u32] and the given payload.
+func encFragment(t *testing.T, first, last, seq uint32, pay []byte) []byte {
+	t.Helper()
+	full := make([]byte, 2)
+	binary.LittleEndian.PutUint16(full, 0x0078)
+	full = append(full, pay...)
+	var b [4]byte
+	for _, v := range []uint32{first, last, seq} {
+		binary.LittleEndian.PutUint32(b[:], v)
+		full = append(full, b[:]...)
+	}
+	enc, err := encryptBlowfish(floodTestKey, full)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	return append([]byte{9, 9, 9, 9}, enc...)
+}
+
+// TestReassembleFragsOrdersBySeq is the regression for the reassembly
+// bug: fragments must be concatenated in chain order (seq - first), not
+// arrival order. Arrival order scrambles the payload whenever the
+// network reorders, which is what corrupted every lobby bundle.
+func TestReassembleFragsOrdersBySeq(t *testing.T) {
+	// Three fragments of one chain, delivered 3rd, 1st, 2nd.
+	dd := []DumpDatagram{
+		{Dir: "S>C", Addr: "f->t", Data: encFragment(t, 10, 12, 12, []byte("CCC"))},
+		{Dir: "S>C", Addr: "f->t", Data: encFragment(t, 10, 12, 10, []byte("AAA"))},
+		{Dir: "S>C", Addr: "f->t", Data: encFragment(t, 10, 12, 11, []byte("BBB"))},
+	}
+	frags, _, _, err := ReassembleFrags(dd, "f->t", len(dd[0].Data), floodTestKey)
+	if err != nil {
+		t.Fatalf("ReassembleFrags: %v", err)
+	}
+	if len(frags) != 1 {
+		t.Fatalf("got %d chains, want 1", len(frags))
+	}
+	// Concatenation must follow seq order. Arrival order would give
+	// "CCCAAABBB"; the synthetic head carries no marker, so nothing is
+	// stripped.
+	if got := string(frags[0].Payload); got != "AAABBBCCC" {
+		t.Fatalf("payload = %q, want %q (arrival order would give %q)", got, "AAABBBCCC", "CCCAAABBB")
 	}
 }
