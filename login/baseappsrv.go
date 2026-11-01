@@ -960,13 +960,48 @@ func isTickHead(clear []byte, tag byte) bool {
 // hasSmall reports a decrypted frame carrying a [1a][type] smalls
 // record anywhere past the flags (the lobby smalls taxonomy: 1a/5b =
 // server-stats counters, 1a/5f = revisions).
+// hasSmall reports whether a decrypted frame carries a small of the given
+// family and type. It parses the frame's app and walks the smalls, so a
+// coincidental tag pair inside a payload cannot match.
 func hasSmall(clear []byte, fam, typ byte) bool {
-	for i := 2; i+3 < len(clear); i++ {
-		if clear[i] == fam && clear[i+1] == typ {
-			return true
-		}
+	app, err := frameApp(clear)
+	if err != nil {
+		return false
 	}
-	return false
+	return lobby.FindSmall(app, fam, typ) != nil
+}
+
+// frameApp returns a decrypted frame's app: everything between the flags
+// word and the channel trailers.
+func frameApp(clear []byte) ([]byte, error) {
+	if len(clear) < 2 {
+		return nil, fmt.Errorf("wotserver: frame too short")
+	}
+	tr := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
+	if len(clear) < 2+tr {
+		return nil, fmt.Errorf("wotserver: frame trailers overrun")
+	}
+	return clear[2 : len(clear)-tr], nil
+}
+
+// carrierSmall returns the small bytes a post-flood answer frame carries:
+// its app after the tick head, without the channel trailers. It replaces
+// slicing the carrier body by hand, and refuses a frame whose head is not
+// the tick it expects.
+func carrierSmall(clear []byte) ([]byte, error) {
+	app, err := frameApp(clear)
+	if err != nil {
+		return nil, err
+	}
+	if len(app) < 2 || app[0] != elTickSync {
+		return nil, fmt.Errorf("wotserver: carrier frame does not open with a tick")
+	}
+	return app[2:], nil
+}
+
+// answerApp builds a post-flood answer: the tick head, then a small.
+func answerApp(small []byte) []byte {
+	return append(EncodeTickSync(0), small...)
 }
 
 // Serve runs both listeners until ctx cancels.
@@ -1529,14 +1564,22 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		st.synced = true
 		s.mu.Unlock()
 		if !synced {
-			app := append(EncodeTickSync(0), s.revReply[4:len(s.revReply)-8]...)
+			small, err := carrierSmall(s.revReply)
+			if err != nil {
+				return err
+			}
+			app := answerApp(small)
 			if err := s.mintPost(conn, from, st, app); err != nil {
 				return err
 			}
 			s.logf("stage2 %s: post-flood sync → [13] rev answer (minted)", from)
 		}
 	case lobby.CmdReqServerStats:
-		app := append(EncodeTickSync(0), s.pollAns[4:len(s.pollAns)-8]...)
+		small, err := carrierSmall(s.pollAns)
+		if err != nil {
+			return err
+		}
+		app := answerApp(small)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}
@@ -1551,7 +1594,11 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			s.logf("stage2 %s: post-flood %s — no carrier template", from, cmdLabel(cmd))
 			return nil
 		}
-		app := append(EncodeTickSync(0), s.queueAns[4:len(s.queueAns)-8]...)
+		small, err := carrierSmall(s.queueAns)
+		if err != nil {
+			return err
+		}
+		app := answerApp(small)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}
@@ -1561,7 +1608,13 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		// (the season-select path uses status 0): `[13][tag][1a 5e 05]
 		// [req u16 LE][01 00 00]` + footers. We hold no battle history,
 		// so the error is the faithful answer, not a stub.
-		app := []byte{0x13, 0, 0x1a, 0x5e, 0x05, byte(req), byte(req >> 8), 0x01, 0x00, 0x00}
+		small, err := lobby.Small{Family: 0x1a, Type: 0x5e, Body: []byte{
+			byte(req), byte(req >> 8), 0x01, 0x00, 0x00,
+		}}.Encode()
+		if err != nil {
+			return err
+		}
+		app := answerApp(small)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}
@@ -1571,7 +1624,13 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		// capture shows (~22 ms after the 52B season bundle, flows3-s2
 		// idx 1209/1210): `[13][tag][1a 5e 05][req u16 LE][00 00 00]`
 		// + footers. req echoes the client's request id (genuine 225).
-		app := []byte{0x13, 0, 0x1a, 0x5e, 0x05, byte(req), byte(req >> 8), 0x00, 0x00, 0x00}
+		small, err := lobby.Small{Family: 0x1a, Type: 0x5e, Body: []byte{
+			byte(req), byte(req >> 8), 0x00, 0x00, 0x00,
+		}}.Encode()
+		if err != nil {
+			return err
+		}
+		app := answerApp(small)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}

@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/LockBlock-dev/wot/lobby"
 	"io"
@@ -568,6 +569,9 @@ type SmallMsg struct {
 // messages by ID. Trailer length comes from ChannelTrailerLen. Unknown
 // IDs stop the walk (returned as rest, not an error — the EU2-metal
 // taxonomy is still being mapped). Truncation of known framing errors.
+//
+// The framing itself lives in lobby.Small, so this walk and the server's
+// builder share one description of each family.
 func ClassifySmalls(pkt []byte, blockKey string) (msgs []SmallMsg, rest []byte, err error) {
 	if len(pkt) < 4+8 {
 		return nil, nil, fmt.Errorf("wotlogin: small too short (%d B)", len(pkt))
@@ -586,89 +590,41 @@ func ClassifySmalls(pkt []byte, blockKey string) (msgs []SmallMsg, rest []byte, 
 	body := clear[2 : len(clear)-trailer]
 	var out []SmallMsg
 	for len(body) > 0 {
-		id := body[0]
-		switch id {
-		case 0xFF: // reply: [len u32][rid u32][payload...]
-			if len(body) < 9 {
-				return out, body, fmt.Errorf("wotlogin: truncated ff head")
-			}
-			ln := int(binary.LittleEndian.Uint32(body[1:5]))
-			if len(body) < 5+ln {
-				return out, body, fmt.Errorf("wotlogin: truncated ff body")
-			}
-			out = append(out, SmallMsg{ID: id, Length: ln, Body: append([]byte(nil), body[5:5+ln]...)})
-			body = body[5+ln:]
-		case 0x13: // tick, FIXED-1
-			if len(body) < 2 {
-				return out, body, fmt.Errorf("wotlogin: truncated tick")
-			}
-			out = append(out, SmallMsg{ID: id, Length: 1, Body: append([]byte(nil), body[1:2]...)})
-			body = body[2:]
-		case 0x1a: // [type8][len8][payload], except 0x5b: the
-			// server-stats reply is fixed [type8][u32][u32] with NO
-			// length — the len8 position carries the low counter byte
-			// (Oct-01 session: 30/30 poll answers tick + 1a/5b + 8B,
-			// two slow-drifting counters ~54k/~124k).
-			if len(body) < 3 {
-				return out, body, fmt.Errorf("wotlogin: truncated 1a head")
-			}
-			if body[1] == 0x5b {
-				if len(body) < 2+8 {
-					return out, body, fmt.Errorf("wotlogin: truncated 1a/5b body")
-				}
-				out = append(out, SmallMsg{ID: id, Type: body[1], Length: 8, Body: append([]byte(nil), body[2:10]...)})
-				body = body[10:]
-				continue
-			}
-			ln := int(body[2])
-			if len(body) < 3+ln {
-				return out, body, fmt.Errorf("wotlogin: truncated 1a body (%d < %d)", len(body)-3, ln)
-			}
-			out = append(out, SmallMsg{ID: id, Type: body[1], Length: ln, Body: append([]byte(nil), body[3:3+ln]...)})
-			body = body[3+ln:]
-		case 0x45: // [len u8][payload] (EU2-metal smalls use u8
-			// lengths throughout; pinned empirically)
-			if len(body) < 2 {
-				return out, body, fmt.Errorf("wotlogin: truncated 45 head")
-			}
-			ln := int(body[1])
-			if len(body) < 2+ln {
-				return out, body, fmt.Errorf("wotlogin: truncated 45 body")
-			}
-			out = append(out, SmallMsg{ID: id, Length: ln, Body: append([]byte(nil), body[2:2+ln]...)})
-			body = body[2+ln:]
-		case 0x46: // zlib cPickle: [len u16][declen u32][zlib]
-			// (pinned empirically: length covers declen+zlib,
-			// declen must equal the inflated size).
-			if len(body) < 7 {
-				return out, body, fmt.Errorf("wotlogin: truncated 46 head")
-			}
-			ln := int(binary.LittleEndian.Uint16(body[1:3]))
-			if len(body) < 3+ln {
-				return out, body, fmt.Errorf("wotlogin: truncated 46 body")
-			}
-			raw := body[3 : 3+ln]
-			if len(raw) < 4 {
+		s, n, perr := lobby.ParseSmall(body)
+		if errors.Is(perr, lobby.ErrUnknownSmall) {
+			return out, body, nil // unmapped family: hand the rest back
+		}
+		if perr != nil {
+			return out, body, fmt.Errorf("wotlogin: %w", perr)
+		}
+		if n <= 0 {
+			return out, body, nil
+		}
+		msg := SmallMsg{ID: s.Family, Type: s.Type, Length: len(s.Body), Body: append([]byte(nil), s.Body...)}
+		// 0x46 carries a compressed pickle: inflate it so callers see the
+		// document, and report the inflated length.
+		if s.Family == 0x46 {
+			if len(s.Body) < 4 {
 				return out, body, fmt.Errorf("wotlogin: truncated 46 declen")
 			}
-			want := int(binary.LittleEndian.Uint32(raw[:4]))
-			zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
-			if err != nil {
-				return out, body, fmt.Errorf("wotlogin: 46 zlib open: %w", err)
+			want := int(binary.LittleEndian.Uint32(s.Body[:4]))
+			zr, zerr := zlib.NewReader(bytes.NewReader(s.Body[4:]))
+			if zerr != nil {
+				return out, body, fmt.Errorf("wotlogin: 46 zlib open: %w", zerr)
 			}
-			inflated, err := io.ReadAll(zr)
+			inflated, ierr := io.ReadAll(zr)
 			zr.Close()
-			if err != nil {
-				return out, body, fmt.Errorf("wotlogin: 46 zlib inflate: %w", err)
+			if ierr != nil {
+				return out, body, fmt.Errorf("wotlogin: 46 zlib inflate: %w", ierr)
 			}
 			if len(inflated) != want {
 				return out, body, fmt.Errorf("wotlogin: 46 declen %d != inflated %d", want, len(inflated))
 			}
-			out = append(out, SmallMsg{ID: id, Length: len(inflated), Body: inflated})
-			body = body[3+ln:]
-		default:
-			return out, body, nil
+			msg.Length = len(inflated)
+			msg.Body = inflated
 		}
+		out = append(out, msg)
+		body = body[n:]
 	}
 	return out, nil, nil
 }
