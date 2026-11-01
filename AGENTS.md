@@ -47,7 +47,11 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `Frag`), `lobby_state.go` (prefix salvage → plain maps/slices),
   `lobbycalls.go` (C>S base-call builders: doCmdInt2/3/4/Str,
   requestToken, primeBundle prefix, chat tails), `battle.go` (avatar
-  position parser). Split out of `login/` Oct 2026; all callers
+  position parser), `battlechat.go` (battle chat both directions:
+  C>S submit `0x9d`/eventType 22, S>C relay `0x75`/23, shared 24B
+  header + `[u8 len][text][u16 0]`, float64 UTC send time — see
+  `../docs/NETWORK_PROTOCOL.md` §19.10). Split out of `login/` Oct
+  2026; all callers
   import `lobby` directly (compat aliases removed).
   Tests: `login_test.go` (offline codec vectors), `hijack_test.go`,
   `paired_replay_test.go` (byte-identical replay of the paired genuine
@@ -372,7 +376,8 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   filter SHOT rows): creation bulk → `lobby.NewObserver` (roster/
   teams/vehicles/mounts via the generated table, no XML), then
   time-ordered SHOT (+READY merge) / HIT / INCOMING (`-margin` over
-  shell blast, displaced-track pad) / KILL / markers / presence sections.
+  shell blast, displaced-track pad) / KILL / markers / CHAT (both
+  directions, `lobby/battlechat.go`) / presence sections.
   Engine in `lobby/feed.go` (running buff calibration, drum/twin/
   dual/AR mag sim, caliber-unique tracerless marks, muzzle-history
   victims: two-sided offline `ObserveExplodeFull`, past-only live
@@ -499,12 +504,16 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
   defs (kept as raw bytes).
 - `../captures/` — genuine traffic, indexed in `../captures/README.md`.
 
-## Login — blockades
+## Login — former blockades (all closed)
 
-1. p2/EU2 silence at the 22B (pre-rotation, zero bytes on both
-   sockets — managerside pending push suspected; our bytes match the
-   game there, proven per-session Sep 19: zero bytes from
-   `92.223.20.215:32838`, the endpoint the game flooded Sep 18).
+1. CLOSED Oct-03 — p2/EU2 silence at the 22B. The "park" was TWO
+   stacked client bugs, not a server gate: a wrong stage-1 auth1 shape
+   (unreliable-no-0b, corrected to the decrypt-proven reliable+0b) and
+   a missing stage-2 victory return (the flood arrived, the code
+   looped until timeout). EU2 now logs in single-shot: `LOGGED_ON` →
+   rotation → redirect → rotation-2 → double-auth → 1252B flood,
+   exit 0. The falsification record below is kept as history; its
+   "server-side gate" verdicts are superseded.
    Falsified as gates, live: token2 machine family
    (`token2-family-match=true`), `lang_id` fr, reported PoW duration,
    VPN exit/path (rotation + off-VPN), SESSION staleness (re-dump
@@ -582,7 +591,8 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     same manager, new key — BOTH legs first-class. Stage-1 on the
     token2 session: rotation-ok, 250+ ticks, cumul=0, no redirect →
     PARK. Auth path is not the gate (token2 session parks identically);
-    EU2 push stays per-session server-side. security_msg="old_pass",
+    the park was the client-side auth1/victory-return pair (CLOSED
+    Oct-03, item 1). security_msg="old_pass",
     isDemoAccount=false.
     Same passage via `-host login.p5.worldoftanks.eu`: basic + token2
     relogin both first-class → RELOGGED `.215:32817` (p5 login still
@@ -608,7 +618,7 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     loginData via `mods/wgc-token-mod` → `wotlogin -broker-params
     -baseapp` → `LOGGED_ON` (fresh tail accepted) → stage-1 parked
     byte-identically to basic. Auth path is not the gate (see
-    `../docs/WGC.md` §8); EU2 push stays per-session server-side.
+    `../docs/WGC.md` §8); the park was client-side (CLOSED Oct-03).
     Remember-me mechanism MAPPED Sep 20 (2.4.0.1 Manager.pyc):
     tail persisted to prefs['token2'] IFF remember-me checked
     (password never stored, only its length); next login presents the
@@ -630,11 +640,11 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     ephemeral port (host alive; with UDP delivery proven, the silence
     is app-level).
    LoginApp path proven first-class Sep 19: `wotlogin` LOGGED_ON
-   registers account-side (website-visible; probe 12:21:32 listed) —
-   EU2 silence is manager-side only. Back-to-back byte proof
+   registers account-side (website-visible; probe 12:21:32 listed).
+   Back-to-back byte proof
    (`captures/ours-p2-20260919.pcapng`): our stage-1 22B
-   field-identical to the game's — per-session discrimination,
-   nothing else. The push-routing probe now EXISTS: `-hijack DUMP`
+   field-identical to the game's — the silence was never bytes. The
+   push-routing probe now EXISTS: `-hijack DUMP`
    (Sep 19) runs stage-1 with the GAME's live session (wotproxy dump +
    `BLOCK_KEY_HEX` CE key; 14.4 sources re-read: pending record is
    created synchronously with key minting and stock login never checks
@@ -656,10 +666,10 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
    expiry: VOID on timing. KILL-MODE redo (`../ce/hijack_trigger.lua`
    MODE="kill": auto-kill+fire same second as the 232B, bind
    `:56370`, stageRID 22155, `../captures/hijack_kill_20260920.log`):
-   25× silent over 20 s, all in-window. VERDICT: EU2 gate is pure
-   server-side session state (valid run). Stop chasing bytes. Next: EU2 lobby
-   via our client. Launcher ruled
-   out — the game runs launcherless here.
+   25× silent over 20 s, all in-window. VERDICT AT THE TIME: a
+   server-side session gate. SUPERSEDED Oct-03 — the park was two
+   client bugs (item 1), and the probe's silence was our own auth1
+   shape. Launcher ruled out — the game runs launcherless here.
 2. Offline digest CLOSED Sep 20 (`TestComputeDigestMatchesClient` green).
    Full client map recomputed byte-identically (`5df886f7…`): spaces +
    40 entities + static-component merge + 10 mode entities + 281
@@ -712,8 +722,8 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
    mode_entities/space_defs, 19 mode pkgs incl. halloween-part1+2 and
    fort_rush) + `../scripts-2.4.1/` (entities.xml + entity_defs,
    from live scripts.pkg); `TestComputeDigest241Offline` green at the
-   current best `cb361e6a…` (offline, deterministic; truth `c0cc08a2…`
-   open). Shared-entry audit on the external trees: 304 shared, 297
+   truth `c0cc08a2…` (offline, deterministic — CLOSED Oct-31, see below).
+   Shared-entry audit on the external trees: 304 shared, 297
    identical, 7 diff (Avatar handleScriptEvent 5→4 STRING, Account
    requiredVersion_2400→2410, StaticDeathZoneVisual +isCircular/
    customBorder, VehicleRespawn +isDisabledEffect, SMVehicleRespawn
@@ -844,8 +854,20 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
    determinism/implt); IDA workers re-verified driver identical
    (repo .i64 saved). Drop-three grind DIED overnight
    Oct-16 (no result; see above) — stood down, zz scratch deleted,
-   suite re-verified green. Decisive next UNCHANGED: live walk via
-   ce/walkfinal_241.lua (operator).
+   suite re-verified green.
+   **CLOSED Oct-31** — the live walk was captured on Linux/Proton via
+   Frida (`tools/frida-inject/`, replacing the Windows CE route) and
+   the delta was a *parser* bug, not a data one: `parseModeDefShared`
+   followed a mode def's `<Parent>` only one level, so
+   `HWPersonalDeathZone` → `PersonalDeathZone` → `AreaOfEffect` stopped
+   at the middle link and contributed 0 visits instead of 6 (5 props +
+   `playEffect`). Walking the chain to the root gives 403 entries /
+   1315 visits, an exact visit-for-visit match, and
+   `TestComputeDigest241Offline` now yields the truth `c0cc08a2…`.
+   Remaining open item: `TestWalk241TagsFromObserved` diverges at tag
+   #2048 (was #1337) — the model omits the `Uint` tag for
+   `STANCE_DANCE_STATE.state` (UINT8) inside
+   `StanceDanceController.abilityState`; digest-neutral.
 
 ## Replay — key provenance
 
@@ -864,7 +886,7 @@ callers, writer side). Cite this file, not the provenance.
 ## Replay — TODO: live EU5 lobby application (hangar)
 
 Transport is done (`login` reaches a sustained, acked 1252B flood on
-p5; EU2 stays server-side silent, see above). What is
+p5; EU2 was silent for the same client-side reason, see above). What is
 missing is the *application*: parse the flood into lobby state and
 speak back. Established Sep 20:
 
@@ -1330,8 +1352,8 @@ speak back. Established Sep 20:
   0x44 redirect, auth1 never answered) then 25 s timeout. NOT the live
   game session (persists 40+ min after user logged off). SESSION/
   TEMPORARY matrix tested (fixed blob, fresh GUID, temp 0/1 — all log
-  in fine, all park). No-auth1 tested (not poison). EU2 wall
-  unchanged. ROOT DIFFERENCE FOUND (captures/CE.txt genuine params):
+  in fine, all park). No-auth1 tested (not poison). ROOT DIFFERENCE
+  FOUND (captures/CE.txt genuine params):
   game logs in with `auth_method: token2` (WGC-issued token) +
   `temporary: 0`; we use `basic` (password). Launcher-token path
   needs WGC (Proton env). Park = likely account-level velocity
@@ -1607,9 +1629,10 @@ speak back. Established Sep 20:
   zlib/ASCII/magic, ECB-2nd-layer under 6 key forms H≈6.1 unstructured,
   all rotation/login-key chained forms fail; envelope-only verdict
   stands).
-- EU2 wall MOVED Sep 27: p2 (.213:32821) now gives rotation+ticks
-  like p5 (was zero bytes at 22B) but still no redirect — the park
-  is cross-cluster, the push is per-session. Game flows everywhere.
+- EU2 wall CLOSED Oct-03 (see "Login — former blockades" item 1):
+  the Sep-27 "moved" observation (p2 giving rotation+ticks like p5 but
+  no redirect) was the same client-side auth1/victory-return pair, not
+  a cross-cluster server gate.
 - Archive captures as `captures/ours-p5-lobby-<date>.hex` + key file
   when a run is worth keeping.
 
