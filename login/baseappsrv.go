@@ -1141,6 +1141,16 @@ func postDoCmd(clear []byte, key2 uint32) (req, cmd uint16, ok bool) {
 // the [13][tag] head, the footers (seq; cumul = the live client
 // watermark), and the 1a/5e error small's req echo are minted.
 func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *clientState, clear []byte) error {
+	// Chat rides its own A1 tag (0x98), not a doCmd* base call, so it is
+	// checked first. The client sends initAck and requestLastSysMessages
+	// here; we name them and stay silent (no chat backend yet).
+	if tr := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2])); len(clear) > 2+tr {
+		if cc, ok := lobby.ParseChatCommandFromClient(clear[2 : len(clear)-tr]); ok {
+			s.logf("stage2 %s: chat %s (req %d, ch %d, arg %d)",
+				from, cmdLabelChat(cc), cc.RequestID, cc.ChannelID, cc.Int64Arg)
+			return nil
+		}
+	}
 	req, cmd, ok := postDoCmd(clear, st.stage2Key)
 	if !ok {
 		return nil // acks and anything else: no answer (genuine parity)
@@ -1183,6 +1193,14 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		s.logf("stage2 %s: post-flood %s — no answer (v1-cut)", from, cmdLabel(cmd))
 	}
 	return nil
+}
+
+// cmdLabelChat renders a chat command for logs.
+func cmdLabelChat(c lobby.ChatCommand) string {
+	if n := c.Name(); n != "" {
+		return fmt.Sprintf("%s (%d)", n, c.Command)
+	}
+	return fmt.Sprintf("chat cmd %d", c.Command)
 }
 
 // cmdLabel renders an account command id for logs: the shipped name
