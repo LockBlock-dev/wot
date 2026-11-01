@@ -118,6 +118,11 @@ type ServerConfig struct {
 	// refused as an unknown account. Empty = no mapping (the login is
 	// refused as before).
 	TokenAccount string
+	// TokenLogin resolves TokenAccount without a password. A token login
+	// carries the token, not a password, so VerifyCredentials would
+	// refuse it as a bad password even once the name is mapped. nil =
+	// fall back to VerifyCredentials with the (empty) password.
+	TokenLogin func(name string) (int64, error)
 
 	// VerifyCredentials authenticates a login. It receives the plain
 	// account name (extracted from the client's JSON identity document)
@@ -533,11 +538,21 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		// ({"login": …, "auth_realm": …, "auth_method": …}); the hook
 		// gets the plain account name, not the blob.
 		name := userNameOf(params.Username)
-		if mapped := tokenLoginName(params.Username, s.cfg.TokenAccount); mapped != "" {
+		mapped := tokenLoginName(params.Username, s.cfg.TokenAccount)
+		if mapped != "" {
 			// A token login with no username: land it on the account the
 			// operator named, so a Steam client can test the server.
 			s.logf("%s: login rid=%d token login (no username) → account %q", from, req.rid, mapped)
 			name = mapped
+		}
+		if mapped != "" && s.cfg.TokenLogin != nil {
+			// The token is the credential; there is no password to check.
+			id, err := s.cfg.TokenLogin(mapped)
+			if err != nil {
+				s.logf("%s: login rid=%d token account %q rejected", from, req.rid, mapped)
+				return refusePacket(req.rid, statusBadPassword, textBadPassword)
+			}
+			return s.loggedOn(from, listen, req.rid, req.version, params, id)
 		}
 		id, err := s.cfg.VerifyCredentials(name, params.Password)
 		if err != nil {

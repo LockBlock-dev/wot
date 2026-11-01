@@ -183,6 +183,15 @@ func main() {
 			}
 			return acct.ID, nil
 		},
+		// A token login carries no password, so the mapped account is
+		// resolved by name alone.
+		TokenLogin: func(name string) (int64, error) {
+			acct, err := store.AccountByName(context.Background(), name)
+			if err != nil {
+				return 0, err
+			}
+			return acct.ID, nil
+		},
 	}
 	if *flagDigest == "any" {
 		cfg.AcceptAnyDigest = true

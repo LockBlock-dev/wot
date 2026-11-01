@@ -21,8 +21,12 @@
 #   S1=192.168.1.10:32850 S2=192.168.1.10:32851 \
 #     ./start-server.sh 192.168.1.10:20016
 #
+# A Steam client authenticates with a token2 and sends no username, so
+# those logins land on TOKEN_ACCOUNT (default: the default account) with
+# no password check. Set TOKEN_ACCOUNT= to refuse them instead.
+#
 # Env overrides: ADDR, S1, S2, DB, DEFS, FLOOD, FLOODFLOW, FLOODKEY,
-#                POST, POSTKEY, USER_NAME, USER_PASS, EXTRA
+#                POST, POSTKEY, USER_NAME, USER_PASS, TOKEN_ACCOUNT, EXTRA
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -79,4 +83,5 @@ exec go run ./cmd/wotserver \
 	-defs "$DEFS" \
 	-db "$DB" \
 	-user "${USER_NAME:-admin}" -pass "${USER_PASS:-admin}" \
+	-token-account "${TOKEN_ACCOUNT-${USER_NAME:-admin}}" \
 	${EXTRA:-}

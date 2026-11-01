@@ -717,3 +717,123 @@ func TestAccountIDFor(t *testing.T) {
 		}
 	}
 }
+
+// tokenLoginDatagram builds the client's login#2 bytes for a Steam-style
+// token2 login: auth_method=token2, a token2, and an EMPTY login name —
+// the document the live client sends.
+func tokenLoginDatagram(t *testing.T, rid uint32, ch Challenge, digest [16]byte) []byte {
+	t.Helper()
+	key, nonces, err := solveChallengeFor(t, ch)
+	if err != nil {
+		t.Fatalf("solve: %v", err)
+	}
+	priv := testRSAKey(t)
+	cfg := testClientConfig(&RSAPublicKey{key: &priv.PublicKey}, true)
+	cfg.AuthMethod = "token2"
+	cfg.Login = ""
+	cfg.Password = ""
+	cfg.Token2 = "123456789:1234567890123456789:123456789012345678901234567890123456789"
+	cfg.Digest = digest
+	params, err := encryptLogOnParamsWithProvider(cfg, ProviderForConfig(cfg), &RSAPublicKey{key: &priv.PublicKey})
+	if err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	respMsg := buildChallengeResponseMsg(250*time.Millisecond, key, nonces)
+	msg := buildLoginMsg(rid, [4]byte{verSub, verPatch, verMinor, verMajor}, params, true)
+	return buildLoginPacket(testPrefix(t), 0, respMsg, msg)
+}
+
+// TestLoginAppTokenLogin proves a token login with no username lands on
+// the mapped account without a password check. A Steam build always
+// authenticates this way, so without the mapping every such login is
+// refused as an unknown account, and with only the name mapped it is
+// refused as a bad password (the token carries no password).
+func TestLoginAppTokenLogin(t *testing.T) {
+	var gotName string
+	var verifyCalls int
+	srv, err := NewLoginAppServer(ServerConfig{
+		MaxNonce:     serverTestMaxNonce,
+		Versions:     testVersions(),
+		TokenAccount: "admin",
+		VerifyCredentials: func(user, pass string) (int64, error) {
+			verifyCalls++
+			return 0, errors.New(textBadPassword)
+		},
+		TokenLogin: func(name string) (int64, error) {
+			gotName = name
+			return 42, nil
+		},
+	}, testRSAKey(t))
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40006}
+	listen := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 20016}
+
+	pkt, err := srv.handlePacket(loginOneDatagram(t, 51, true), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#1: %v", err)
+	}
+	ch := challengeOf(t, pkt, 51)
+	pkt, err = srv.handlePacket(tokenLoginDatagram(t, 52, ch, testDigestA), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#2: %v", err)
+	}
+	rid, status, _, err := parseReply(pkt)
+	if err != nil {
+		t.Fatalf("reply parse: %v", err)
+	}
+	if rid != 52 || status != statusLoggedOn {
+		t.Fatalf("rid=%d status=%d, want 1 (LOGGED_ON)", rid, status)
+	}
+	if gotName != "admin" {
+		t.Fatalf("TokenLogin saw %q, want the mapped account", gotName)
+	}
+	if verifyCalls != 0 {
+		t.Fatalf("VerifyCredentials called %d times, want 0 (no password to check)", verifyCalls)
+	}
+}
+
+// TestLoginAppTokenLoginUnmapped proves the mapping is opt-in: with no
+// TokenAccount the token login still goes through VerifyCredentials with
+// the empty name, so an operator who wants the old refusal keeps it.
+func TestLoginAppTokenLoginUnmapped(t *testing.T) {
+	var gotUser string
+	srv, err := NewLoginAppServer(ServerConfig{
+		MaxNonce: serverTestMaxNonce,
+		Versions: testVersions(),
+		VerifyCredentials: func(user, pass string) (int64, error) {
+			gotUser = user
+			return 0, errors.New(textBadPassword)
+		},
+		TokenLogin: func(name string) (int64, error) {
+			t.Fatalf("TokenLogin called with no TokenAccount configured")
+			return 0, nil
+		},
+	}, testRSAKey(t))
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40007}
+	listen := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 20016}
+
+	pkt, err := srv.handlePacket(loginOneDatagram(t, 53, true), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#1: %v", err)
+	}
+	ch := challengeOf(t, pkt, 53)
+	pkt, err = srv.handlePacket(tokenLoginDatagram(t, 54, ch, testDigestA), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#2: %v", err)
+	}
+	rid, status, _, err := parseReply(pkt)
+	if err != nil {
+		t.Fatalf("reply parse: %v", err)
+	}
+	if rid != 54 || status != statusBadPassword {
+		t.Fatalf("rid=%d status=%d, want 68", rid, status)
+	}
+	if gotUser == "" || gotUser == "admin" {
+		t.Fatalf("VerifyCredentials saw %q, want the client's own (empty) name", gotUser)
+	}
+}
