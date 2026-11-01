@@ -437,19 +437,28 @@ func (l *CompLoader) parentSection(pkg, name string, fallback *Loader) (*Section
 }
 
 func (l *CompLoader) parseModeDef(pkg string, e *Entity, sec *Section, fallback *Loader) error {
+	return l.parseModeDefShared(pkg, e, sec, fallback, map[string]bool{})
+}
+
+// parseModeDefShared parses one def section and follows its <Parent> chain to
+// the root. A mode def's parent may itself be a scripts def that declares a
+// parent (HWPersonalDeathZone -> PersonalDeathZone -> AreaOfEffect), so the
+// chain cannot stop after one level.
+func (l *CompLoader) parseModeDefShared(pkg string, e *Entity, sec *Section, fallback *Loader, seen map[string]bool) error {
 	if p := sec.Child("Parent"); p != nil && p.StrVal() != "" {
-		ps, err := l.parentSection(pkg, p.StrVal(), fallback)
+		name := p.StrVal()
+		if seen[name] {
+			return fmt.Errorf("entdef: mode parent cycle at %s", name)
+		}
+		seen[name] = true
+		ps, err := l.parentSection(pkg, name, fallback)
 		if err != nil {
 			return err
 		}
-		if err := l.parseModeDefShared(e, ps, fallback); err != nil {
+		if err := l.parseModeDefShared(pkg, e, ps, fallback, seen); err != nil {
 			return err
 		}
 	}
-	return l.parseModeDefShared(e, sec, fallback)
-}
-
-func (l *CompLoader) parseModeDefShared(e *Entity, sec *Section, fallback *Loader) error {
 	if im := sec.Child("Implements"); im != nil {
 		for _, ifc := range im.Children {
 			if ifc.Name != "Interface" || ifc.StrVal() == "" {

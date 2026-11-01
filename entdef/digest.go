@@ -357,8 +357,8 @@ func entryIncluded(e *Entity, statics []*Entity) bool {
 // (ProbeWalk import-probe, game.log Oct-15: ok=385 fail=18 total=403).
 // Pass it as skip to ComputeDigestFull with the external 2.4.1 defs
 // (sibling dirs wotdefs-2.4.1/ + scripts-2.4.1/, kept out of this repo);
-// the 14 built-ins are still skipped via failEntries. Current best with
-// this set is cb361e6a… vs truth c0cc08a2… (open).
+// the 14 built-ins are still skipped via failEntries. With this set the
+// digest reproduces the client truth c0cc08a2… exactly.
 var Skip241 = map[string]bool{
 	"HWArenaDropComponent":             true,
 	"HWArenaVehicleRemovalComponent":   true,
@@ -474,8 +474,8 @@ func BuildMapOrder(wotdefsDir, defsDir string) ([]MapEntry, error) {
 const Truth240 = "5df886f75e73b33cff9d87fb9c69389c"
 
 // Truth241 is the live 2.4.1.0 BigWorld.digest (digest-dumper mod,
-// game.log Oct-15; dummy-creds probe → status 68). Offline recompute
-// is still OPEN (current best cb361e6a… → status 70).
+// game.log Oct-15; dummy-creds probe → status 68). The offline recompute
+// reproduces it exactly (TestComputeDigest241Offline).
 const Truth241 = "c0cc08a2f494f7087112009ce1d002db"
 
 // DigestVersion computes the offline login digest for one client version

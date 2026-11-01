@@ -68,11 +68,12 @@ func TestComputeDigestMatchesClient(t *testing.T) {
 // res/packages/scripts.pkg + mode pkgs, kept out of this repo).
 // No network, no live game.
 // Truth from the live client (digest-dumper, game.log Oct-15) is
-// c0cc08a2f494f7087112009ce1d002db (dummy-creds probe → 68); the current
-// offline best with the ProbeWalk-closed set (403 total, 18 fails) is
-// cb361e6a… (probe → 70, well-formed). Pinned at the current best so
-// `go test` stays green while the truth mismatch is worked; update want
-// to the truth when the walk is fixed.
+// c0cc08a2f494f7087112009ce1d002db (dummy-creds probe → 68), and the
+// offline model now reproduces it exactly (403 entries, 18 fails, 385
+// included). The last gap was the mode-def <Parent> chain: a mode def's
+// parent may itself be a scripts def that declares a parent
+// (HWPersonalDeathZone → PersonalDeathZone → AreaOfEffect), which the
+// parser used to stop after one level.
 func TestComputeDigest241Offline(t *testing.T) {
 	if _, err := os.Stat("../../wotdefs-2.4.1"); err != nil {
 		t.Skipf("external 2.4.1 defs unavailable: %v", err)
@@ -81,8 +82,7 @@ func TestComputeDigest241Offline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "cb361e6aff68680b7fc7ca83dafe52ca"
-	if got := hex.EncodeToString(d[:]); got != want {
-		t.Fatalf("241 digest = %s, want current best %s (truth c0cc08a2… open)", got, want)
+	if got := hex.EncodeToString(d[:]); got != Truth241 {
+		t.Fatalf("241 digest = %s, want client ground truth %s", got, Truth241)
 	}
 }
