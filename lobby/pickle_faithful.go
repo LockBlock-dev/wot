@@ -99,10 +99,11 @@ type FNode struct {
 	// Containers. For FDict, Keys[i] pairs with Items[i].
 	Keys  []*FNode
 	Items []*FNode
-	// Recipe is the sequence of add-opcodes used to build the container,
-	// in order: opAppend/opAppends for lists, opSetItem/opSetItems for
-	// dicts. Empty for tuples (their opcode is in Raw).
-	Recipe []byte
+	// Recipe is the sequence of add-steps used to build the container,
+	// in order. Each step records the opcode AND how many items it
+	// consumed: a list can be built by several APPENDS calls, and
+	// collapsing them into one changes the bytes.
+	Recipe []FStep
 
 	// FGlobal / FReduce.
 	Module, Name string
@@ -115,6 +116,13 @@ type FNode struct {
 	// loses entries and makes re-encoding shorter than the input.
 	Memos   []int
 	MemoOps []byte
+}
+
+// FStep is one container-building step: the opcode and the number of
+// items (or key/value pairs) it consumed.
+type FStep struct {
+	Op byte
+	N  int
 }
 
 // SetInt rewrites an integer node, marking it for canonical re-encoding.
@@ -324,7 +332,7 @@ func (d *fdecoder) run() error {
 			}
 			l := d.stack[len(d.stack)-1]
 			l.Items = append(l.Items, v)
-			l.Recipe = append(l.Recipe, opAppend)
+			l.Recipe = append(l.Recipe, FStep{Op: opAppend, N: 1})
 		case opAppends:
 			items, err := d.markItems()
 			if err != nil {
@@ -335,7 +343,7 @@ func (d *fdecoder) run() error {
 			}
 			l := d.stack[len(d.stack)-1]
 			l.Items = append(l.Items, items...)
-			l.Recipe = append(l.Recipe, opAppends)
+			l.Recipe = append(l.Recipe, FStep{Op: opAppends, N: len(items)})
 		case opSetItem:
 			v, err := d.pop()
 			if err != nil {
@@ -351,7 +359,7 @@ func (d *fdecoder) run() error {
 			m := d.stack[len(d.stack)-1]
 			m.Keys = append(m.Keys, k)
 			m.Items = append(m.Items, v)
-			m.Recipe = append(m.Recipe, opSetItem)
+			m.Recipe = append(m.Recipe, FStep{Op: opSetItem, N: 1})
 		case opSetItems:
 			items, err := d.markItems()
 			if err != nil {
@@ -365,7 +373,7 @@ func (d *fdecoder) run() error {
 				m.Keys = append(m.Keys, items[i])
 				m.Items = append(m.Items, items[i+1])
 			}
-			m.Recipe = append(m.Recipe, opSetItems)
+			m.Recipe = append(m.Recipe, FStep{Op: opSetItems, N: len(items) / 2})
 		case opTuple:
 			items, err := d.markItems()
 			if err != nil {
@@ -570,7 +578,7 @@ func (e *fencoder) emit(n *FNode) error {
 		// The reduced object can then be filled like a dict or a list
 		// (OrderedDict() followed by SETITEMS is the common case).
 		if len(n.Recipe) > 0 {
-			if n.Recipe[0] == opSetItem || n.Recipe[0] == opSetItems {
+			if n.Recipe[0].Op == opSetItem || n.Recipe[0].Op == opSetItems {
 				return e.emitPairs(n)
 			}
 			return e.emitItems(n, n.Items, opAppend, opAppends)
@@ -596,8 +604,8 @@ func (e *fencoder) putMemo(n *FNode) {
 // opAppends adds all remaining.
 func (e *fencoder) emitItems(n *FNode, items []*FNode, one, many byte) error {
 	i := 0
-	for _, op := range n.Recipe {
-		switch op {
+	for _, st := range n.Recipe {
+		switch st.Op {
 		case one:
 			if i >= len(items) {
 				return fmt.Errorf("lobby: list recipe overruns items")
@@ -608,15 +616,19 @@ func (e *fencoder) emitItems(n *FNode, items []*FNode, one, many byte) error {
 			e.out = append(e.out, one)
 			i++
 		case many:
+			if i+st.N > len(items) {
+				return fmt.Errorf("lobby: list recipe overruns items")
+			}
 			e.out = append(e.out, opMark)
-			for ; i < len(items); i++ {
+			for k := 0; k < st.N; k++ {
 				if err := e.emit(items[i]); err != nil {
 					return err
 				}
+				i++
 			}
 			e.out = append(e.out, many)
 		default:
-			return fmt.Errorf("lobby: bad list recipe op 0x%02x", op)
+			return fmt.Errorf("lobby: bad list recipe op 0x%02x", st.Op)
 		}
 	}
 	if i != len(items) {
@@ -628,8 +640,8 @@ func (e *fencoder) emitItems(n *FNode, items []*FNode, one, many byte) error {
 // emitPairs replays a dict recipe.
 func (e *fencoder) emitPairs(n *FNode) error {
 	i := 0
-	for _, op := range n.Recipe {
-		switch op {
+	for _, st := range n.Recipe {
+		switch st.Op {
 		case opSetItem:
 			if i >= len(n.Items) {
 				return fmt.Errorf("lobby: dict recipe overruns items")
@@ -643,18 +655,22 @@ func (e *fencoder) emitPairs(n *FNode) error {
 			e.out = append(e.out, opSetItem)
 			i++
 		case opSetItems:
+			if i+st.N > len(n.Items) {
+				return fmt.Errorf("lobby: dict recipe overruns items")
+			}
 			e.out = append(e.out, opMark)
-			for ; i < len(n.Items); i++ {
+			for k := 0; k < st.N; k++ {
 				if err := e.emit(n.Keys[i]); err != nil {
 					return err
 				}
 				if err := e.emit(n.Items[i]); err != nil {
 					return err
 				}
+				i++
 			}
 			e.out = append(e.out, opSetItems)
 		default:
-			return fmt.Errorf("lobby: bad dict recipe op 0x%02x", op)
+			return fmt.Errorf("lobby: bad dict recipe op 0x%02x", st.Op)
 		}
 	}
 	if i != len(n.Items) {
