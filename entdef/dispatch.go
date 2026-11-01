@@ -6,6 +6,13 @@ import (
 	"sort"
 )
 
+// Method component domains, as the defs name them.
+const (
+	CompClient = compClient
+	CompCell   = compCell
+	CompBase   = compBase
+)
+
 // ElementLength is how a method's arguments or a property's value are
 // framed on the wire: a fixed byte count, or a variable payload whose
 // length is written in a 1..4 byte header.

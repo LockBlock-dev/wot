@@ -20,6 +20,7 @@ type fileConfig struct {
 	Post       *string `json:"post"`
 	PostKey    *string `json:"postkey"`
 	PostFlow   *string `json:"postflow"`
+	Defs       *string `json:"defs"`
 	BaseApp    *string `json:"baseapp"`
 	MaxNonce   *int64  `json:"maxnonce"`
 	AnyVersion *bool   `json:"any_version"`
@@ -74,6 +75,7 @@ func (c *fileConfig) apply(set func(name string) bool) {
 	str("post", flagPost, c.Post)
 	str("postkey", flagPostKey, c.PostKey)
 	str("postflow", flagPostFlow, c.PostFlow)
+	str("defs", flagDefs, c.Defs)
 	str("baseapp", flagBaseApp, c.BaseApp)
 	num("maxnonce", flagMaxNonce, c.MaxNonce)
 	boolean("any-version", flagAnyVersion, c.AnyVersion)

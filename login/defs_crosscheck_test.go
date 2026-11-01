@@ -61,19 +61,21 @@ func TestDefsAgreeWithPostDoCmd(t *testing.T) {
 		if err != nil || len(clear) < 14 || clear[2] != 0x02 {
 			continue
 		}
-		// The hand-written reader's view.
-		req, cmd, ok := postDoCmd(clear, 0)
+		// The hand-written reader's view (no dispatch configured).
+		plain := &BaseAppServer{}
+		call, ok := plain.postDoCmd(clear, 0)
 		if !ok {
 			// postDoCmd checks the session key; re-read the ids directly
 			// so the comparison does not depend on it.
 			switch [2]byte{clear[7], clear[8]} {
 			case [2]byte{0x95, 0x1c}, [2]byte{0x93, 0x14}:
-				req = uint16(clear[10]) | uint16(clear[11])<<8
-				cmd = uint16(clear[12]) | uint16(clear[13])<<8
+				call.Req = uint16(clear[10]) | uint16(clear[11])<<8
+				call.Cmd = uint16(clear[12]) | uint16(clear[13])<<8
 			default:
 				continue
 			}
 		}
+		req, cmd := call.Req, call.Cmd
 		// The defs' view: base id 13 is doCmdInt3, 11 is doCmdInt2.
 		id := 13
 		if clear[7] == 0x93 {

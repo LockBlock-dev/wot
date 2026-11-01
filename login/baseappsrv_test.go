@@ -196,6 +196,7 @@ func TestBaseAppPostFloodCarrier(t *testing.T) {
 // v2.1 returns the request id too (the 1a/5e season error echoes it).
 func TestBaseAppPostDoCmd(t *testing.T) {
 	k2 := uint32(0x78128370)
+	srv := &BaseAppServer{} // no dispatch: the hand-written fallback
 	cases := []struct {
 		name string
 		call []byte
@@ -208,18 +209,18 @@ func TestBaseAppPostDoCmd(t *testing.T) {
 	}
 	for _, c := range cases {
 		clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, c.call)...)
-		req, cmd, ok := postDoCmd(clear, k2)
-		if !ok || req != c.req || cmd != c.cmd {
-			t.Fatalf("%s: postDoCmd = %d/%d, %v; want %d/%d, true", c.name, req, cmd, ok, c.req, c.cmd)
+		call, ok := srv.postDoCmd(clear, k2)
+		if !ok || call.Req != c.req || call.Cmd != c.cmd {
+			t.Fatalf("%s: postDoCmd = %d/%d, %v; want %d/%d, true", c.name, call.Req, call.Cmd, ok, c.req, c.cmd)
 		}
 		// A foreign stage key must not resolve.
-		if _, _, ok := postDoCmd(clear, k2^1); ok {
+		if _, ok := srv.postDoCmd(clear, k2^1); ok {
 			t.Fatalf("%s: foreign key accepted", c.name)
 		}
 	}
 	// Token bundles (0x8a requestToken) carry no doCmdInt3 head.
 	tok := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, lobby.BuildRequestToken(2, 5))...)
-	if _, _, ok := postDoCmd(tok, k2); ok {
+	if _, ok := srv.postDoCmd(tok, k2); ok {
 		t.Fatal("requestToken bundle matched a doCmdInt3")
 	}
 }

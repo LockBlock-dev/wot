@@ -50,6 +50,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LockBlock-dev/wot/entdef"
 	"github.com/LockBlock-dev/wot/lobby"
 )
 
@@ -145,6 +146,14 @@ type BaseAppConfig struct {
 	// carries a second pickle document holding `stats.credits` and
 	// `stats.freeXP` (see server.ApplyState).
 	PatchBulk func(stream []byte) ([]byte, error)
+
+	// Dispatch is the script model's client-facing tables. When set, the
+	// post-flood client calls are decoded from the defs instead of the
+	// hand-written element reader: the element id maps to a base method
+	// id by a fixed base, and the method's argument types come from the
+	// defs. nil = the hand-written reader (kept so a server can run
+	// without the defs on disk).
+	Dispatch *entdef.Dispatch
 
 	// BulkFragSize is the flood datagram size the carrier selects
 	// (1252 in every genuine capture).
@@ -1387,36 +1396,100 @@ func (s *BaseAppServer) sendPre(conn Transport, to *net.UDPAddr, st *clientState
 	return nil
 }
 
-// postDoCmd reads the leading doCmdInt* call of a post-flood client
-// bundle. Wire (lobby.DoCmdInt3/Int2): [flags 2][02][key2 u32 LE]
-// [A1 u8][len u16][reqID u16][cmd u16][int64 args...] — the arg block
-// starts at the same offset for both variants, so reqID/cmd are always
-// at clear[10:12]/clear[12:14]. The genuine tail bundles (flows3-s2,
-// all decrypt-proven):
+// Element ids of entity method calls. The client sends base method N as
+// element 0x88+N and cell method N as 0x10+N, so the method id is the
+// element id minus the base — no table needed.
+const (
+	baseMethodElementID = 0x88
+	cellMethodElementID = 0x10
+)
+
+// postCall is one decoded post-flood client call.
+type postCall struct {
+	// Req is the call's request id (the first argument).
+	Req uint16
+	// Cmd is the command id (the second argument), which is what the
+	// answer switch keys on.
+	Cmd uint16
+	// Method is the defs' view of the call, or nil when the server runs
+	// without a dispatch.
+	Method *entdef.MethodDef
+	// Args is every argument, in declared order.
+	Args []entdef.Value
+}
+
+// Name is the method's def name, or a placeholder without a dispatch.
+func (c postCall) Name() string {
+	if c.Method == nil {
+		return fmt.Sprintf("cmd %d", c.Cmd)
+	}
+	return c.Method.Name
+}
+
+// postDoCmd reads the leading entity-method call of a post-flood client
+// bundle. Wire: [flags 2][02][key2 u32 LE][elemID u8][len u16 LE][args].
 //
-//	sync   (84B, idx 1010): `95 1c00 e000 6400 …` = doCmdInt3, reqID
-//	  224, cmd 100 (CMD_SYNC_DATA) + the (98,25) initAck tail
-//	poll   (60B, idx 1092/1196): `95 1c00 ca00 f501 …` = doCmdInt3,
-//	  reqID 202 (REQUEST_ID_NO_RESPONSE), cmd 501 (CMD_REQ_SERVER_STATS)
-//	season (52B, idx 1209): `93 1400 e100 7900 …` = doCmdInt2, reqID
-//	  225, cmd 121 (CMD_SET_ACTIVE_VEH_SEASON)
+// The element id is the method id plus a fixed base, and the length is
+// the method's fixed argument size, so with a dispatch the whole call is
+// decoded from the defs — argument types included. Without one it falls
+// back to the two calls the lobby actually sends (doCmdInt3/doCmdInt2),
+// which is what the hand-written reader always did.
 //
-// Sync and poll share the 0x95 tag, so ONLY the cmd field tells them
-// apart — matching on the tag alone answers every poll as a sync.
-func postDoCmd(clear []byte, key2 uint32) (req, cmd uint16, ok bool) {
+// Sync and poll share the doCmdInt3 element, so ONLY the command field
+// tells them apart — matching on the element id alone answers every poll
+// as a sync.
+func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 	if len(clear) < 14 || clear[2] != 0x02 {
-		return 0, 0, false
+		return postCall{}, false
 	}
 	if binary.LittleEndian.Uint32(clear[3:7]) != key2 {
-		return 0, 0, false
+		return postCall{}, false
 	}
-	// (A1, argLen) per the lobby call builders: 0x95/0x1c doCmdInt3,
-	// 0x93/0x14 doCmdInt2 (ArgLength is the Mercury VARIABLE header).
-	switch [2]byte{clear[7], clear[8]} {
+	elemID := clear[7]
+	argLen := int(binary.LittleEndian.Uint16(clear[8:10]))
+	if len(clear) < 10+argLen {
+		return postCall{}, false
+	}
+	body := clear[10 : 10+argLen]
+
+	if s.cfg.Dispatch != nil {
+		if acct := s.cfg.Dispatch.Entity("Account"); acct != nil {
+			if m := acct.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
+				// The defs say how long the call is; a mismatch means the
+				// model and the wire disagree, which is worth refusing
+				// rather than decoding garbage.
+				if m.Length.Fixed && m.Length.Size != argLen {
+					s.logf("post-flood %s: element %#02x carries %d B, the defs say %d",
+						m.Name, elemID, argLen, m.Length.Size)
+					return postCall{}, false
+				}
+				args, err := m.ReadArgs(bytes.NewReader(body), entdef.NewCodec())
+				if err != nil {
+					s.logf("post-flood %s: %v", m.Name, err)
+					return postCall{}, false
+				}
+				call := postCall{Method: m, Args: args}
+				if len(args) > 0 && args[0].Kind == entdef.VInt {
+					call.Req = uint16(args[0].Int)
+				}
+				if len(args) > 1 && args[1].Kind == entdef.VInt {
+					call.Cmd = uint16(args[1].Int)
+				}
+				return call, true
+			}
+		}
+	}
+
+	// No dispatch: the two calls the lobby sends, by their pinned element
+	// ids and argument sizes.
+	switch [2]byte{elemID, byte(argLen)} {
 	case [2]byte{0x95, 0x1c}, [2]byte{0x93, 0x14}:
-		return binary.LittleEndian.Uint16(clear[10:12]), binary.LittleEndian.Uint16(clear[12:14]), true
+		return postCall{
+			Req: binary.LittleEndian.Uint16(clear[10:12]),
+			Cmd: binary.LittleEndian.Uint16(clear[12:14]),
+		}, true
 	}
-	return 0, 0, false
+	return postCall{}, false
 }
 
 // servePostFlood answers one decrypted post-flood client datagram and
@@ -1444,10 +1517,11 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			return nil
 		}
 	}
-	req, cmd, ok := postDoCmd(clear, st.stage2Key)
+	call, ok := s.postDoCmd(clear, st.stage2Key)
 	if !ok {
 		return nil // acks and anything else: no answer (genuine parity)
 	}
+	req, cmd := call.Req, call.Cmd
 	switch cmd {
 	case lobby.CmdSyncData: // answered ONCE per session
 		s.mu.Lock()

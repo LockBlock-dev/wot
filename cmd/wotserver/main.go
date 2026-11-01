@@ -58,6 +58,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/LockBlock-dev/wot/entdef"
 	"github.com/LockBlock-dev/wot/login"
 	"github.com/LockBlock-dev/wot/server"
 )
@@ -75,6 +76,7 @@ var (
 	flagPost       *string
 	flagPostKey    *string
 	flagPostFlow   *string
+	flagDefs       *string
 	flagBaseApp    *string
 	flagMaxNonce   *int64
 	flagAnyVersion *bool
@@ -98,6 +100,8 @@ func main() {
 	flagPost = flag.String("post", "", "dump for the post-flood chain + pre-flood smalls (\"\" = same as -flood)")
 	flagPostKey = flag.String("postkey", "", "hex block key for -post (\"\" = same as -floodkey)")
 	flagPostFlow = flag.String("postflow", "", "flow substring for -post (\"\" = same as -floodflow)")
+	flagDefs = flag.String("defs", "../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs",
+		"scripts/entity_defs directory: decodes post-flood client calls from the defs (\"\" = hand-written reader)")
 	flagBaseApp = flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
 	flagMaxNonce = flag.Int64("maxnonce", int64(login.DefaultMaxNonce), "PoW easiness bound announced in challenges")
 	flagAnyVersion = flag.Bool("any-version", false, "accept any client protocol version")
@@ -193,6 +197,7 @@ func main() {
 			s1: *flagS1, s2: *flagS2,
 			flood: *flagFlood, floodKey: *flagFloodKey, floodFlow: *flagFloodFlow,
 			post: *flagPost, postKey: *flagPostKey, postFlow: *flagPostFlow,
+			defs:    *flagDefs,
 			patch:   patch,
 			verbose: *flagVerbose,
 		})
@@ -298,6 +303,7 @@ type baseAppArgs struct {
 	post      string
 	postKey   string
 	postFlow  string
+	defs      string
 	patch     func([]byte) ([]byte, error)
 	verbose   bool
 }
@@ -336,12 +342,36 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 		// verbatim.
 		VerifyBulk: server.VerifyBundle,
 		PatchBulk:  a.patch,
+		Dispatch:   loadDispatch(a.defs),
 		Verbose:    verbose,
 	})
 	if err != nil {
 		fatal(err)
 	}
 	return base, s1conn, s2conn
+}
+
+// loadDispatch builds the script model's client-facing tables, so the
+// post-flood client calls are decoded from the defs rather than by the
+// hand-written element reader. A missing defs directory is not fatal: the
+// server falls back to the hand-written reader and says so.
+func loadDispatch(dir string) *entdef.Dispatch {
+	if dir == "" {
+		return nil
+	}
+	l := &entdef.Loader{Dir: dir}
+	names, err := l.LoadEntities()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "wotserver: defs unavailable (%v); using the hand-written reader\n", err)
+		return nil
+	}
+	d, err := entdef.NewDispatch(l, names)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "wotserver: defs dispatch (%v); using the hand-written reader\n", err)
+		return nil
+	}
+	fmt.Printf("wotserver: defs loaded: %d entities from %s\n", len(d.Entities()), dir)
+	return d
 }
 
 // advertiseOf converts a bound socket into the address to write into
