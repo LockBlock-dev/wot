@@ -52,11 +52,9 @@ type GarageVehicle struct {
 // ServedFields names the PlayerState fields that reach the client, and
 // the wire slot each one rides.
 //
-// It is the honest inventory of the account model. The rest of the struct
-// is stored and settable through wotaccounts but has no slot in any
-// capture: the account document the flood carries holds `stats.credits`,
-// `stats.freeXP`, `piggyBank.credits`, an empty `inventory` and
-// `account.globalRating` — no gold, no garage list, no research.
+// It is the honest inventory of the account model: what reaches the client
+// from PlayerState, what reaches it from the carrier unchanged, and what
+// has no slot at all.
 func ServedFields() map[string]string {
 	return map[string]string{
 		"FreeXP":       "1a/69 stats small + bundle stats.freeXP",
@@ -66,10 +64,26 @@ func ServedFields() map[string]string {
 	}
 }
 
-// UnservedFields names the PlayerState fields with no wire slot, so an
-// operator is not surprised when setting them changes nothing in game.
+// CaptureFields names the account-document keys the client sees but that
+// come from the carrier unchanged. They have a wire slot — the garage is
+// `inventory`, progression is `sessionStats`/`wtr`/`battlePass`/`quests`/
+// `tokens`/`dogTags` — we just do not drive them from PlayerState yet, so
+// every account sees the capture's player.
+func CaptureFields() map[string]string {
+	return map[string]string{
+		"Garage":      "bundle inventory (vehicles, equipment, shells)",
+		"Progression": "bundle sessionStats, wtr, battlePass, dogTags, quests, tokens",
+		"Dossier":     "bundle stats.dossier (opaque blob)",
+		"Revisions":   "bundle prevRev, rev, cache",
+	}
+}
+
+// UnservedFields names the PlayerState fields with no wire slot in any
+// capture, so an operator is not surprised when setting them changes
+// nothing in game. The garage is NOT here: it has a slot (`inventory`), it
+// is just served from the carrier — see CaptureFields.
 func UnservedFields() []string {
-	return []string{"Gold", "Garage", "Research"}
+	return []string{"Gold", "Research"}
 }
 
 // DefaultPlayerState is the state a freshly provisioned account starts

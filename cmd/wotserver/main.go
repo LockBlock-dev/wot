@@ -286,8 +286,9 @@ func main() {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	fmt.Printf("wotserver: player state served: %s; stored only: %s\n",
-		strings.Join(names, ", "), strings.Join(server.UnservedFields(), ", "))
+	fmt.Printf("wotserver: player state served: %s; from the capture: %s; no wire slot: %s\n",
+		strings.Join(names, ", "), strings.Join(sortedKeys(server.CaptureFields()), ", "),
+		strings.Join(server.UnservedFields(), ", "))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -382,6 +383,16 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 		fatal(err)
 	}
 	return base, s1conn, s2conn
+}
+
+// sortedKeys returns a map's keys in order, for a stable log line.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // loadDispatch builds the script model's client-facing tables, so the

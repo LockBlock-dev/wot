@@ -274,3 +274,94 @@ func TestApplyStateRefusesOverflow(t *testing.T) {
 		t.Fatal("an overflowing piggy bank was accepted")
 	}
 }
+
+// TestApplyStateLeavesTheCaptureAlone pins the boundary the operator sees:
+// the garage and the progression state are served from the carrier, so a
+// state patch must not touch them.
+func TestApplyStateLeavesTheCaptureAlone(t *testing.T) {
+	raw := loadAccountBundle(t)
+
+	// The keys the capture serves. Their value nodes must survive a patch
+	// byte for byte.
+	keys := []string{
+		"inventory", "sessionStats", "wtr", "battlePass", "dogTags",
+		"quests", "tokens", "eventsData", "cache", "prevRev", "rev",
+	}
+	before, err := DecodeBundle(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := before.AccountDoc()
+	if doc < 0 {
+		t.Fatal("no account document")
+	}
+	snapshot := map[string][]byte{}
+	for _, k := range keys {
+		n := before.Docs[doc].pair(k)
+		if n == nil {
+			t.Fatalf("%q missing from the account document", k)
+		}
+		snapshot[k] = append([]byte(nil), n.Raw...)
+	}
+	// stats.dossier is the opaque blob inside stats.
+	statsBefore := before.Docs[doc].pair("stats")
+	if d := statsBefore.Get("dossier"); d != nil {
+		snapshot["stats.dossier"] = append([]byte(nil), d.Raw...)
+	}
+
+	patched, err := BulkPatcher(func(b *Bundle) error {
+		return ApplyState(b, &PlayerState{
+			Credits: 500000, FreeXP: 12345, PiggyBank: 40000, GlobalRating: 1234.5,
+		})
+	})(raw)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	after, err := DecodeBundle(patched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc = after.AccountDoc()
+	for _, k := range keys {
+		n := after.Docs[doc].pair(k)
+		if n == nil {
+			t.Fatalf("%q vanished from the account document", k)
+		}
+		if !bytes.Equal(n.Raw, snapshot[k]) {
+			t.Errorf("%q changed: %d B -> %d B", k, len(snapshot[k]), len(n.Raw))
+		}
+	}
+	statsAfter := after.Docs[doc].pair("stats")
+	if d := statsAfter.Get("dossier"); d != nil {
+		if !bytes.Equal(d.Raw, snapshot["stats.dossier"]) {
+			t.Error("stats.dossier changed")
+		}
+	}
+}
+
+// TestCaptureFieldsAreNotClaimedAsServed keeps the three categories from
+// overlapping: a field is served from state, served from the capture, or
+// has no slot — never two of those.
+func TestCaptureFieldsAreNotClaimedAsServed(t *testing.T) {
+	served := ServedFields()
+	capture := CaptureFields()
+	for k := range capture {
+		if _, ok := served[k]; ok {
+			t.Errorf("%q is claimed as both served and capture-served", k)
+		}
+	}
+	for _, f := range UnservedFields() {
+		if _, ok := served[f]; ok {
+			t.Errorf("%q is claimed as both served and unserved", f)
+		}
+		if _, ok := capture[f]; ok {
+			t.Errorf("%q is claimed as both capture-served and unserved", f)
+		}
+	}
+	// The garage has a slot, so it must not be in the no-slot list.
+	for _, f := range UnservedFields() {
+		if f == "Garage" {
+			t.Error("Garage is listed as having no slot, but inventory is its slot")
+		}
+	}
+}
