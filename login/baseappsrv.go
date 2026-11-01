@@ -576,6 +576,17 @@ func (s *BaseAppServer) applyBulk() error {
 	if err != nil {
 		return err
 	}
+	// The client reads a fragment's last 4 bytes as
+	// [fragmentIndex u16][fragmentCount u16] and rejects a fragment whose
+	// count differs from the bundle it is assembling:
+	//
+	//   FragmentedBundle::addPacket: Mangled fragment footers on packet
+	//   #162, got [1,185], expecting [2,174]
+	//
+	// A capture can hold fragments of more than one bundle (a flow that
+	// spans a reconnect). Keep the bundle with the most fragments and
+	// drop the rest, or the client never accepts the burst.
+	frames = keepLargestBundle(frames)
 	// Chain order: by chain id, then position inside the chain.
 	order := make([]int, len(frames))
 	for i := range order {
@@ -634,6 +645,37 @@ func (s *BaseAppServer) applyBulk() error {
 		s.bulk = append(s.bulk, frames[i].clear)
 	}
 	return nil
+}
+
+// keepLargestBundle drops fragments that belong to a different bundle
+// than the majority. The fragment count is the high u16 of the frame's
+// last 4 bytes (the client's own footer split).
+func keepLargestBundle(frames []bulkFrame) []bulkFrame {
+	counts := map[uint16]int{}
+	for _, fr := range frames {
+		n := len(fr.clear)
+		if n < 4 {
+			continue
+		}
+		counts[uint16(binary.LittleEndian.Uint32(fr.clear[n-4:])>>16)]++
+	}
+	if len(counts) < 2 {
+		return frames
+	}
+	var best uint16
+	for c, n := range counts {
+		if n > counts[best] {
+			best = c
+		}
+	}
+	out := frames[:0]
+	for _, fr := range frames {
+		n := len(fr.clear)
+		if n >= 4 && uint16(binary.LittleEndian.Uint32(fr.clear[n-4:])>>16) == best {
+			out = append(out, fr)
+		}
+	}
+	return out
 }
 
 // loadPost keeps the three post-flood chain frames' DECRYPTED bodies for
