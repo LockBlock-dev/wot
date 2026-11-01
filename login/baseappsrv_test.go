@@ -690,3 +690,14 @@ func mintKeyFor(t *testing.T, old uint32) uint32 {
 	}
 	return k
 }
+
+// TestCmdLabel proves the post-flood log names the command when the
+// shipped table knows it, and falls back to the bare number otherwise.
+func TestCmdLabel(t *testing.T) {
+	if got := cmdLabel(lobby.CmdSyncShop); got != "CMD_SYNC_SHOP (300)" {
+		t.Fatalf("cmdLabel(300) = %q", got)
+	}
+	if got := cmdLabel(9999); got != "cmd 9999" {
+		t.Fatalf("cmdLabel(9999) = %q", got)
+	}
+}

@@ -1081,13 +1081,23 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		}
 		s.logf("stage2 %s: post-flood season select (req %d) → 1a/5e no-vehicle error (minted)", from, req)
 	default:
-		// Other cmds (226/600 dossier sync, doCmdStr) are recognized
-		// but NOT answered: each wants per-account inventory we don't
-		// hold. v1-cut: silence beats a wrong-content answer (see §18
-		// honesty layering).
-		s.logf("stage2 %s: post-flood cmd %d — no answer (v1-cut)", from, cmd)
+		// Everything else is recognized but NOT answered: each wants
+		// per-account inventory we don't hold. v1-cut: silence beats a
+		// wrong-content answer (see §18 honesty layering). The name
+		// comes from the shipped AccountCommands.pyc table so the log
+		// says which command the client wanted.
+		s.logf("stage2 %s: post-flood %s — no answer (v1-cut)", from, cmdLabel(cmd))
 	}
 	return nil
+}
+
+// cmdLabel renders an account command id for logs: the shipped name
+// when known, else the bare number.
+func cmdLabel(cmd uint16) string {
+	if n := lobby.CmdName(cmd); n != "" {
+		return fmt.Sprintf("%s (%d)", n, cmd)
+	}
+	return fmt.Sprintf("cmd %d", cmd)
 }
 
 // allocPost takes the next post-flood walk slot (caller holds s.mu).
