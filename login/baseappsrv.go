@@ -918,7 +918,7 @@ func dictApp(tpl []byte, name string, accountID int64, started, now time.Time) (
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte{0x13, 0x40}, body...), nil
+	return append(EncodeTickSync(0x40), body...), nil
 }
 
 // descriptorFrame substitutes the packed account name in the 76B
@@ -1140,7 +1140,7 @@ func redirectApp(target *net.UDPAddr) ([]byte, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("wotserver: stage-2 endpoint %s is not IPv4 (ip4 redirect core)", target)
 	}
-	app := []byte{0x13, 0x3f, 0x44}
+	app := append(EncodeTickSync(0x3f), 0x44)
 	app = append(app, ip...)
 	var pb [2]byte
 	binary.BigEndian.PutUint16(pb[:], uint16(target.Port))
@@ -1529,14 +1529,14 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		st.synced = true
 		s.mu.Unlock()
 		if !synced {
-			app := append([]byte{0x13, 0}, s.revReply[4:len(s.revReply)-8]...)
+			app := append(EncodeTickSync(0), s.revReply[4:len(s.revReply)-8]...)
 			if err := s.mintPost(conn, from, st, app); err != nil {
 				return err
 			}
 			s.logf("stage2 %s: post-flood sync → [13] rev answer (minted)", from)
 		}
 	case lobby.CmdReqServerStats:
-		app := append([]byte{0x13, 0}, s.pollAns[4:len(s.pollAns)-8]...)
+		app := append(EncodeTickSync(0), s.pollAns[4:len(s.pollAns)-8]...)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}
@@ -1551,7 +1551,7 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			s.logf("stage2 %s: post-flood %s — no carrier template", from, cmdLabel(cmd))
 			return nil
 		}
-		app := append([]byte{0x13, 0}, s.queueAns[4:len(s.queueAns)-8]...)
+		app := append(EncodeTickSync(0), s.queueAns[4:len(s.queueAns)-8]...)
 		if err := s.mintPost(conn, from, st, app); err != nil {
 			return err
 		}

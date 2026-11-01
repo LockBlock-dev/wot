@@ -507,16 +507,34 @@ func parseLobbyRedirect(clear []byte) (string, int, bool) {
 // first authenticate (BaseAppExt ID 11).
 const msgEnableEntities = 0x0b
 
+// flagsBytes renders a channel flags word as the two little-endian bytes
+// the wire carries, so the flag constants stay the single source of truth
+// instead of being duplicated as literals.
+func flagsBytes(f uint16) []byte {
+	var b [2]byte
+	binary.LittleEndian.PutUint16(b[:], f)
+	return b[:]
+}
+
 var (
-	flagsRel   = []byte{0x58, 0x04}
-	flagsUnrel = []byte{0x48, 0x14}
+	// flagsRel is ON|RELIABLE|SEQ|CUMUL (0x0458): the reliable stage-1
+	// shape.
+	flagsRel = flagsBytes(chFlagOnChannel | chFlagReliable | chFlagSequence | chFlagCumulAck)
+	// flagsUnrel is ON|SEQ|CUMUL|AUX (0x1448): the unreliable shape.
+	flagsUnrel = flagsBytes(chFlagOnChannel | chFlagSequence | chFlagCumulAck | chFlagAux)
 	// Pinned byte shapes for tests (see auxFor for the live rule).
 	midRotAck = []byte{0xff, 0xff, 0xff, 0x0f}
 	midZero   = []byte{0x00, 0x00, 0x00, 0x00}
 	// ack0Clear is the first client packet after a rotation: bare aux
 	// word + footers, no app message (decrypt-proven 14B:
 	// 4814 ffffff0f seq=1 cumul=1). Fully constant, no session material.
-	ack0Clear = []byte{0x48, 0x14, 0xff, 0xff, 0xff, 0x0f, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00}
+	ack0Clear = func() []byte {
+		b := append([]byte{}, flagsUnrel...)
+		b = append(b, midRotAck...)
+		b = append(b, 1, 0, 0, 0) // seq
+		b = append(b, 1, 0, 0, 0) // cumul
+		return b
+	}()
 )
 
 // auxFor renders the unreliable-packet aux word, exe-confirmed
