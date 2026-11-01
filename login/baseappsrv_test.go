@@ -174,29 +174,38 @@ func TestBaseAppPostFloodCarrier(t *testing.T) {
 	if want, _ := hex.DecodeString(genuineDictSmallRaw); !bytes.Equal(base.dictTpl, want) {
 		t.Fatalf("dict template %x want %x", base.dictTpl, want)
 	}
-	// descriptorFrame round-trips the capture's own name byte-exactly,
-	// and a short name splices cleanly: [:25] + nlen + name + [37:]
-	// = 25+1+len+24 (clear 61B with the 11B capture name → 58B with 8B
-	// "loopback"; the channel footers at [53:61] are part of the tail).
+	// descriptorFrame splices the name and drops the capture's fragment
+	// footer: the template is flags 0x0478 (IS_FRAGMENT) with the range
+	// [2,174] from flows3-s2, while the flood burst comes from
+	// proxy-1752 and says [1,185]. The client stores the first footer it
+	// sees and rejects every later fragment that disagrees, so the
+	// descriptor goes out as a plain reliable frame: 0x0458, trailer
+	// [seq][cumul] only.
 	tpl, _ := hex.DecodeString(genuineDescrRaw)
+	wantRound := append([]byte{0x58, 0x04}, tpl[2:45]...)
+	wantRound = append(wantRound, tpl[53:61]...)
 	round, err := descriptorFrame(base.descTpl, "ExampleUser")
-	if err != nil || !bytes.Equal(round, tpl) {
-		t.Fatalf("descriptor round-trip = %x, %v; want byte-exact", round, err)
+	if err != nil || !bytes.Equal(round, wantRound) {
+		t.Fatalf("descriptor round-trip = %x, %v; want %x", round, err, wantRound)
 	}
 	short, err := descriptorFrame(base.descTpl, "loopback")
-	if err != nil || len(short) != 58 {
-		t.Fatalf("descriptor splice = %dB, %v; want 58B", len(short), err)
+	if err != nil || len(short) != 50 {
+		t.Fatalf("descriptor splice = %dB, %v; want 50B", len(short), err)
 	}
 	if string(short[26:34]) != "loopback" || short[25] != 8 {
 		t.Fatalf("descriptor splice slot: nlen=%d name=%q", short[25], short[26:34])
 	}
-	if !bytes.Equal(short[:25], tpl[:25]) || !bytes.Equal(short[34:], tpl[37:]) {
-		t.Fatalf("descriptor splice outskirts drift: head %x tail %x", short[:25], short[34:])
+	// head: flags + app up to the name slot; tail: the 8B app tail plus
+	// [seq][cumul] (the capture's [first][last] range is dropped).
+	wantTail := append(append([]byte{}, tpl[37:45]...), tpl[53:61]...)
+	wantHead := append([]byte{0x58, 0x04}, tpl[2:25]...)
+	if !bytes.Equal(short[:25], wantHead) || !bytes.Equal(short[34:], wantTail) {
+		t.Fatalf("descriptor splice outskirts drift: head %x tail %x want %x", short[:25], short[34:], wantTail)
 	}
 	// 255-truncation guard: a 300B name is capped without error
 	// (nlen is a 1B field; sendCarrier-level name bytes are game-only).
 	long, err := descriptorFrame(base.descTpl, string(make([]byte, 300)))
-	if err != nil || long[25] != 255 || len(long) != 25+1+255+24 {
+	if err != nil || long[25] != 255 || len(long) != 25+1+255+16 {
 		t.Fatalf("descriptor truncation: nlen=%d len=%d err=%v", long[25], len(long), err)
 	}
 }
@@ -462,17 +471,19 @@ func TestBaseAppStageLoopback(t *testing.T) {
 		t.Fatalf("info clear %x want %x", infoClear, want)
 	}
 	descPkt := readDatagram(t, c2, 3*time.Second)
-	// Our name (8B) splices into the 61B template → 58B clear → 68B
-	// wire: pad = (8−((58+5)%8))%8 = 1 → 58+1+4 magic+1 wastage+4 rfx.
-	if len(descPkt) != 68 {
-		t.Fatalf("descriptor wire %dB, want 68 (58B name-spliced clear)", len(descPkt))
+	// Our name (8B) splices into the template and the fragment footer is
+	// dropped → 50B clear → 60B wire: pad = (8−((50+5)%8))%8 = 1 →
+	// 50+1+4 magic+1 wastage+4 rfx.
+	if len(descPkt) != 60 {
+		t.Fatalf("descriptor wire %dB, want 60 (50B name-spliced clear)", len(descPkt))
 	}
 	descClear := decryptTest(t, blockKey, descPkt)
 	tpl, _ := hex.DecodeString(genuineDescrRaw)
-	wantDesc := append([]byte{}, tpl[:25]...)
+	wantDesc := append([]byte{0x58, 0x04}, tpl[2:25]...)
 	wantDesc = append(wantDesc, byte(len(loopbackName)))
 	wantDesc = append(wantDesc, []byte(loopbackName)...)
-	wantDesc = append(wantDesc, tpl[37:]...)
+	wantDesc = append(wantDesc, tpl[37:45]...)
+	wantDesc = append(wantDesc, tpl[53:61]...)
 	if !bytes.Equal(descClear, wantDesc) {
 		t.Fatalf("descriptor clear %x want %x (name spliced at [25])", descClear, wantDesc)
 	}

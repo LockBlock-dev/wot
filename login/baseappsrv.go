@@ -1038,7 +1038,25 @@ func descriptorFrame(tpl []byte, name string) ([]byte, error) {
 	out := append([]byte{}, tpl[:nl]...)
 	out = append(out, byte(len(name)))
 	out = append(out, name...)
-	return append(out, tpl[nl+1+captured:]...), nil
+	out = append(out, tpl[nl+1+captured:]...)
+	// The template comes from a DIFFERENT capture than the flood burst
+	// (flows3-s2 vs proxy-1752), and it carries that session's fragment
+	// footer: flags 0x0478 (IS_FRAGMENT) with the range [2,174]. The
+	// client stores the first footer it sees and rejects every later
+	// fragment that disagrees:
+	//
+	//   FragmentedBundle::addPacket: Mangled fragment footers on packet
+	//   #162, got [1,185], expecting [2,174]
+	//
+	// The descriptor is one complete message, not a fragment, so drop
+	// the flag and the 8-byte range: flags 0x0478 -> 0x0458, trailer
+	// [first][last][seq][cumul] -> [seq][cumul].
+	if len(out) >= 16 && out[0] == 0x78 && out[1] == 0x04 {
+		out[0], out[1] = 0x58, 0x04
+		n := len(out)
+		out = append(out[:n-16], out[n-8:]...)
+	}
+	return out, nil
 }
 
 // isTickHead reports a decrypted S>C frame whose [13] tick tag equals
