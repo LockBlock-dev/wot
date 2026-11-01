@@ -1,6 +1,7 @@
 package server
 
 import (
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +24,23 @@ type Account struct {
 // every lookup and every insert goes through this.
 func NormalizeName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// loginNameRE is the client's own login-name pattern, copied from the
+// shipped EU scripts (external_strings_utils.LOGIN_NAME_RE, 2.4.1.1):
+//
+//	^[a-z0-9_-]+(\.[a-z0-9_-]+)*@[a-z0-9-]+(\.[a-z0-9-]+)*\.([a-z]{2,4})$
+//
+// The login form validates against it before anything is sent, so a name
+// that fails it can never be typed in the client — the player sees
+// "invalid login" and no datagram leaves the machine.
+var loginNameRE = regexp.MustCompile(
+	`^[a-z0-9_-]+(\.[a-z0-9_-]+)*@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,4}$`)
+
+// LoginNameValid reports whether name is a login the client's form
+// accepts. Names are compared normalized, like every other lookup.
+func LoginNameValid(name string) bool {
+	return loginNameRE.MatchString(NormalizeName(name))
 }
 
 // HashPassword returns a bcrypt hash suitable for Account.PassHash.

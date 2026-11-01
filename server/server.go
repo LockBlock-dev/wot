@@ -57,6 +57,13 @@ func (s *Server) Provision(ctx context.Context) error {
 		return nil
 	}
 	name := NormalizeName(s.cfg.DefaultUser)
+	if !LoginNameValid(name) {
+		// The client's login form only accepts an email-shaped name, so
+		// this account can never be typed in. Say so once, loudly.
+		s.log().Warn("default account name is not a login the client accepts",
+			"account", name,
+			"hint", "the login form requires an email, e.g. admin@wot.test")
+	}
 	acct, err := s.Store.AccountByName(ctx, name)
 	switch {
 	case err == nil:

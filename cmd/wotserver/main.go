@@ -114,7 +114,8 @@ func main() {
 	flagDigest = flag.String("digest", "", `"any" disables the entity-defs gate (default: the pinned client truths)`)
 	flagVerbose = flag.Bool("verbose", false, "per-datagram diagnostics to stderr")
 	flagDB = flag.String("db", "wotserver.db", "SQLite database path (accounts + player state)")
-	flagUser = flag.String("user", "admin", "default account provisioned on startup when absent")
+	flagUser = flag.String("user", "admin@wot.test",
+		"default account provisioned on startup when absent (the client's login form only accepts an email)")
 	flagPass = flag.String("pass", "admin", "password for the default account")
 	flagConfig = flag.String("config", "", "JSON config file; flags given on the command line win")
 	flag.Parse()

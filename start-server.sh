@@ -82,6 +82,6 @@ exec go run ./cmd/wotserver \
 	-post "$POST" -postkey "$POSTKEY" \
 	-defs "$DEFS" \
 	-db "$DB" \
-	-user "${USER_NAME:-admin}" -pass "${USER_PASS:-admin}" \
-	-token-account "${TOKEN_ACCOUNT-${USER_NAME:-admin}}" \
+	-user "${USER_NAME:-admin@wot.test}" -pass "${USER_PASS:-admin}" \
+	-token-account "${TOKEN_ACCOUNT-${USER_NAME:-admin@wot.test}}" \
 	${EXTRA:-}

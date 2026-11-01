@@ -10,6 +10,6 @@
   "any_version": false,
   "verbose": false,
   "db": "wotserver.db",
-  "user": "admin",
+  "user": "admin@wot.test",
   "pass": "admin"
 }

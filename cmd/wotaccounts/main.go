@@ -204,6 +204,13 @@ func list(ctx context.Context, st server.Store) error {
 }
 
 func add(ctx context.Context, st server.Store, name, pw, roles string) error {
+	if !server.LoginNameValid(name) {
+		// Not fatal — the store takes any name — but the client's login
+		// form only accepts an email, so this account cannot be typed in.
+		fmt.Fprintf(os.Stderr,
+			"warning: %q is not a login the client accepts (the form requires an email, e.g. admin@wot.test)\n",
+			server.NormalizeName(name))
+	}
 	hash, err := server.HashPassword(pw)
 	if err != nil {
 		return err
