@@ -41,6 +41,7 @@ func main() {
 	bareAuth := flag.Bool("bare-auth", false, "send authenticate as bare [02][key] without the 0b trailer (poison test)")
 	lobbyFlag := flag.Bool("lobby", false, "no-op: lobby speak-back is default -baseapp behavior now (kept so old invocations still parse)")
 	probePort := flag.Bool("probe-port", false, "only test if the BaseApp port is open (connected UDP socket surfaces ICMP refused vs timeout); needs a live session, so it logs in first and skips the handshake")
+	token2Login := flag.String("token2", "", "from-zero token2 login with an EMPTY login name (the Steam client's shape: auth_method=token2, token2 set, no username, no password); value is the token2")
 	brokerParams := flag.String("broker-params", "", "broker loginData dump FILE ({order,params} pasted from mods/wgc-token-mod python.log): from-zero token2 login with the broker's verbatim params + empty password (single-use tail — mint-then-fire; conflicts with -relogin)")
 	baseDelay := flag.Duration("baseapp-delay", 0, "wait after LOGGED_ON before the first BaseApp packet (push-race probe: LoginApp->manager pending propagation may lose to an immediate stage-1; the game waits ~200ms+)")
 	baseBudget := flag.Duration("baseapp-budget", 150*time.Second, "outer budget for the BaseApp attempt (shorten for delay-sweep probes)")
@@ -110,6 +111,14 @@ func main() {
 		opts = append(opts, login.WithSolveTimeout(*solveTimeout))
 	}
 	cfg = login.ApplyOptions(cfg, opts...)
+	if *token2Login != "" {
+		// The Steam client's identity document: a token2, no username,
+		// no password. The server has to map it to an account.
+		cfg.AuthMethod = "token2"
+		cfg.Login = ""
+		cfg.Password = ""
+		cfg.Token2 = *token2Login
+	}
 	login.StageBareAuth = *bareAuth
 	_ = *lobbyFlag // -lobby is default behavior now (hangar-ward speak-back); kept so old invocations still parse.
 	if *hijack != "" {
