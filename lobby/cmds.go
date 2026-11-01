@@ -23,7 +23,12 @@ const (
 	// small, {players: <int>, classes: <tuple>}. Server-wide, not
 	// per-account.
 	CmdReqQueueInfo = 502
-	CmdSyncDossiers = 600 // CMD_SYNC_DOSSIERS
+
+	// CmdReqBattleResults is CMD_REQ_BATTLE_RESULTS: the client asks for
+	// the results of its last battle. The live server answers with the
+	// 1a/5e error small (status 1) — there is nothing to report.
+	CmdReqBattleResults = 1500
+	CmdSyncDossiers     = 600 // CMD_SYNC_DOSSIERS
 
 	// CmdEnqueueInBattleQueue is CMD_ENQUEUE_IN_BATTLE_QUEUE, sent
 	// with doCmdIntArr as [QUEUE_TYPE.RANDOMS, vehInvID,

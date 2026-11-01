@@ -1482,6 +1482,16 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			return err
 		}
 		s.logf("stage2 %s: post-flood queue info → 1a/67 census (minted)", from)
+	case lobby.CmdReqBattleResults:
+		// The live server answers with the 1a/5e error small, status 1
+		// (the season-select path uses status 0): `[13][tag][1a 5e 05]
+		// [req u16 LE][01 00 00]` + footers. We hold no battle history,
+		// so the error is the faithful answer, not a stub.
+		app := []byte{0x13, 0, 0x1a, 0x5e, 0x05, byte(req), byte(req >> 8), 0x01, 0x00, 0x00}
+		if err := s.mintPost(conn, from, st, app); err != nil {
+			return err
+		}
+		s.logf("stage2 %s: post-flood battle results (req %d) → 1a/5e error (minted)", from, req)
 	case lobby.CmdSetActiveVehSeason:
 		// We hold no garage, so answer the genuine failure small the
 		// capture shows (~22 ms after the 52B season bundle, flows3-s2
