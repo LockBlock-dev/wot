@@ -1162,20 +1162,6 @@ func (s *BaseAppServer) handleStage1(conn Transport, from *net.UDPAddr, pkt []by
 		return err
 	}
 	s.logf("stage1 %s: 22B rid=%d mtu=%d att=%d → rotation %dB", from, rq.rid, rq.mtu, rq.attempts, len(rot))
-	// The genuine order is rotation · info(52) · tick(28) · space(44) ·
-	// redirect(36). The info rides with the rotation; the rest is the
-	// tail, so a lost rotation is re-signaled without replaying it.
-	s.mu.Lock()
-	acct, name, ent := st.accountID, st.name, st.entityID
-	s.mu.Unlock()
-	info, err := buildChannelPacket(st.blockKey, flagsRel, stage1InfoApp(ent, accountIDFor(acct, name)), nil, 1, 1)
-	if err != nil {
-		return err
-	}
-	if _, err := conn.WriteToUDP(info, from); err != nil {
-		return err
-	}
-	s.logf("stage1 %s: createBasePlayer %dB (entity %d, account %d)", from, len(info), ent, accountIDFor(acct, name))
 	return nil
 }
 
@@ -1185,6 +1171,7 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 	type tailJob struct {
 		blockKey string
 		addr     *net.UDPAddr
+		st       *clientState
 	}
 	s.mu.Lock()
 	var due []tailJob
@@ -1192,7 +1179,7 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 		if st.stage2Addr != nil || st.tailAt.IsZero() || now.Before(st.tailAt) {
 			continue
 		}
-		due = append(due, tailJob{blockKey: st.blockKey, addr: st.addr})
+		due = append(due, tailJob{blockKey: st.blockKey, addr: st.addr, st: st})
 		st.tailAt = time.Time{} // fire once
 	}
 	for k, st := range s.pending {
@@ -1205,6 +1192,24 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 		if j.addr == nil {
 			continue
 		}
+		// createBasePlayer: the genuine 52B, sent AFTER the client's
+		// authenticate (capture order: rotation, client acks +
+		// authenticate, then this). Creating the player entity before
+		// the connection is authenticated leaves it unregistered and
+		// the client asserts `pEntity` on the next entity message.
+		s.mu.Lock()
+		acct, name, ent := j.st.accountID, j.st.name, j.st.entityID
+		s.mu.Unlock()
+		info, err := buildChannelPacket(j.blockKey, flagsRel, stage1InfoApp(ent, accountIDFor(acct, name)), nil, 1, 1)
+		if err != nil {
+			s.logf("stage1 tail: %v", err)
+			continue
+		}
+		if _, err := conn.WriteToUDP(info, j.addr); err != nil {
+			s.logf("stage1 tail: %v", err)
+			continue
+		}
+		s.logf("stage1 %s: createBasePlayer %dB (entity %d, account %d)", j.addr, len(info), ent, accountIDFor(acct, name))
 		// tick: genuine 28B `5804 133e <seq=2> <cumul=1>` — flagsRel +
 		// [13][stage tag] (ClientInterface::tickSyncPeriodic, wire id
 		// 19) + footers; the tag byte's semantics are open (stage-1
