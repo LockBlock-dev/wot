@@ -16,6 +16,13 @@ type PlayerState struct {
 	Credits int64 `json:"credits"`
 	Gold    int64 `json:"gold"`
 	FreeXP  int64 `json:"free_xp"`
+	// PiggyBank is the credits held in the piggy bank, a separate
+	// balance the client shows next to the main one.
+	PiggyBank int64 `json:"piggy_bank"`
+
+	// GlobalRating is the account's WTR-style rating, a float on the
+	// wire (account.globalRating).
+	GlobalRating float64 `json:"global_rating"`
 
 	// Garage is the owned-vehicle list. Empty means "not modelled yet":
 	// the bundle template's garage is served unchanged.
@@ -52,8 +59,10 @@ type GarageVehicle struct {
 // `account.globalRating` — no gold, no garage list, no research.
 func ServedFields() map[string]string {
 	return map[string]string{
-		"FreeXP":  "1a/69 stats small + bundle stats.freeXP",
-		"Credits": "bundle stats.credits",
+		"FreeXP":       "1a/69 stats small + bundle stats.freeXP",
+		"Credits":      "bundle stats.credits",
+		"PiggyBank":    "bundle piggyBank.credits",
+		"GlobalRating": "bundle account.globalRating",
 	}
 }
 

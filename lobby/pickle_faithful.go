@@ -136,6 +136,45 @@ func (n *FNode) SetString(v string) {
 	n.Kind, n.S, n.Dirty = FString, v, true
 }
 
+// SetIntWidth rewrites an integer node using a specific opcode width, so a
+// value that would canonically encode narrower still fills a slot that is
+// wider. The width is the encoded byte count: 2 (BININT1), 3 (BININT2) or
+// 5 (BININT).
+//
+// This exists because a patched bundle is rebuilt in place: the slot's
+// width is the capture's, not the value's, and a value of 0 in a 3-byte
+// slot has to stay 3 bytes.
+func (n *FNode) SetIntWidth(v int64, width int) error {
+	var raw []byte
+	switch width {
+	case 2:
+		if v < 0 || v > 0xFF {
+			return fmt.Errorf("lobby: %d does not fit a 2-byte BININT1", v)
+		}
+		raw = []byte{opBinInt1, byte(v)}
+	case 3:
+		if v < 0 || v > 0xFFFF {
+			return fmt.Errorf("lobby: %d does not fit a 3-byte BININT2", v)
+		}
+		raw = []byte{opBinInt2, byte(v), byte(v >> 8)}
+	case 5:
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return fmt.Errorf("lobby: %d does not fit a 5-byte BININT", v)
+		}
+		raw = []byte{opBinInt, byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}
+	default:
+		return fmt.Errorf("lobby: no integer opcode is %d bytes", width)
+	}
+	n.Kind, n.I, n.Raw, n.Dirty = FInt, v, raw, false
+	return nil
+}
+
+// SetFloat rewrites a float node. BINFLOAT is a fixed 9 bytes whatever the
+// value, so a float patch never changes the length.
+func (n *FNode) SetFloat(v float64) {
+	n.Kind, n.F, n.Dirty = FFloat, v, true
+}
+
 // keepOp is a container opcode to emit at a given stack index.
 type KeepOp struct {
 	at int

@@ -126,7 +126,8 @@ func ApplyState(b *Bundle, st *PlayerState) error {
 		// bundle already says.
 		return nil
 	}
-	stats := b.Docs[doc].pair("stats")
+	d := b.Docs[doc]
+	stats := d.pair("stats")
 	if stats == nil || stats.Kind != lobby.FDict {
 		return fmt.Errorf("bulk: account document has no stats dict")
 	}
@@ -136,7 +137,40 @@ func ApplyState(b *Bundle, st *PlayerState) error {
 	if err := setDictInt(stats, "freeXP", st.FreeXP); err != nil {
 		return err
 	}
+	// The piggy bank is a separate balance the client shows next to the
+	// main one.
+	if pb := d.pair("piggyBank"); pb != nil && pb.Kind == lobby.FDict {
+		if err := setDictInt(pb, "credits", st.PiggyBank); err != nil {
+			return err
+		}
+	}
+	// The account's rating is a float on the wire.
+	if acct := d.pair("account"); acct != nil && acct.Kind == lobby.FDict {
+		if err := setDictFloat(acct, "globalRating", st.GlobalRating); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// setDictFloat rewrites one float entry of a dict. BINFLOAT is a fixed 9
+// bytes, so unlike an integer there is no width to preserve.
+func setDictFloat(d *lobby.FNode, key string, v float64) error {
+	for i, k := range d.Keys {
+		if k.S != key {
+			continue
+		}
+		n := d.Items[i]
+		if n.Kind != lobby.FFloat {
+			return fmt.Errorf("bulk: %q is not a float", key)
+		}
+		if len(n.Raw) != 9 {
+			return fmt.Errorf("bulk: %q is %d B, want a 9 B BINFLOAT", key, len(n.Raw))
+		}
+		n.SetFloat(v)
+		return nil
+	}
+	return fmt.Errorf("bulk: %q not in the account document", key)
 }
 
 // setDictInt rewrites one integer entry of a dict, refusing a value that
@@ -150,26 +184,12 @@ func setDictInt(d *lobby.FNode, key string, v int64) error {
 		if n.Kind != lobby.FInt {
 			return fmt.Errorf("bulk: %q is not an int", key)
 		}
-		want := encodedIntLen(v)
-		if got := len(n.Raw); got != want {
-			return fmt.Errorf("bulk: %q = %d encodes to %d bytes, the capture's slot is %d (value out of range for an in-place patch)",
-				key, v, want, got)
+		// The slot's width is the capture's, not the value's: a value
+		// that would canonically encode narrower still has to fill it.
+		if err := n.SetIntWidth(v, len(n.Raw)); err != nil {
+			return fmt.Errorf("bulk: %q: %w", key, err)
 		}
-		n.SetInt(v)
 		return nil
 	}
 	return fmt.Errorf("bulk: %q not in the account stats", key)
-}
-
-// encodedIntLen mirrors the encoder's integer width choice.
-func encodedIntLen(v int64) int {
-	switch {
-	case v >= 0 && v < 256:
-		return 2 // BININT1
-	case v >= 0 && v < 65536:
-		return 3 // BININT2
-	case v >= -1<<31 && v < 1<<31:
-		return 5 // BININT
-	}
-	return 1 + len(fmt.Sprintf("%d\n", v)) // INT
 }

@@ -190,3 +190,87 @@ func TestServedFieldsIsHonest(t *testing.T) {
 		t.Errorf("stats = %v, want credits 500000 / freeXP 12345", got)
 	}
 }
+
+// TestApplyStatePatchesPiggyBankAndRating covers the two scalars added
+// after the first pass: the piggy bank balance and the account rating.
+func TestApplyStatePatchesPiggyBankAndRating(t *testing.T) {
+	raw := loadAccountBundle(t)
+	patched, err := BulkPatcher(func(b *Bundle) error {
+		return ApplyState(b, &PlayerState{
+			Credits: 500000, FreeXP: 12345,
+			PiggyBank: 40000, GlobalRating: 1234.5,
+		})
+	})(raw)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if len(patched) != len(raw) {
+		t.Fatalf("length changed: %d -> %d", len(raw), len(patched))
+	}
+	b, err := DecodeBundle(patched)
+	if err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	d := b.Docs[b.AccountDoc()]
+
+	pb := d.pair("piggyBank")
+	if pb == nil || pb.Kind != lobby.FDict {
+		t.Fatal("no piggyBank dict")
+	}
+	if v := pb.Get("credits"); v == nil || v.I != 40000 {
+		t.Errorf("piggyBank.credits = %+v, want 40000", v)
+	}
+
+	acct := d.pair("account")
+	if acct == nil || acct.Kind != lobby.FDict {
+		t.Fatal("no account dict")
+	}
+	if v := acct.Get("globalRating"); v == nil || v.F != 1234.5 {
+		t.Errorf("account.globalRating = %+v, want 1234.5", v)
+	}
+
+	// The stats dict is untouched by the new fields.
+	stats := d.pair("stats")
+	if v := stats.Get("credits"); v == nil || v.I != 500000 {
+		t.Errorf("stats.credits = %+v", v)
+	}
+}
+
+// TestApplyStateFillsTheSlotWidth pins the width rule: a value that would
+// canonically encode narrower still fills the capture's slot, so the
+// bundle length never moves.
+func TestApplyStateFillsTheSlotWidth(t *testing.T) {
+	raw := loadAccountBundle(t)
+	// piggyBank.credits is a 3-byte BININT2 in the capture; 0 would
+	// canonically be a 2-byte BININT1.
+	patched, err := BulkPatcher(func(b *Bundle) error {
+		return ApplyState(b, &PlayerState{Credits: 500000, FreeXP: 12345, PiggyBank: 0})
+	})(raw)
+	if err != nil {
+		t.Fatalf("zero piggy bank: %v", err)
+	}
+	if len(patched) != len(raw) {
+		t.Fatalf("length changed: %d -> %d", len(raw), len(patched))
+	}
+	b, err := DecodeBundle(patched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := b.Docs[b.AccountDoc()].pair("piggyBank")
+	if v := pb.Get("credits"); v == nil || v.I != 0 {
+		t.Errorf("piggyBank.credits = %+v, want 0", v)
+	}
+}
+
+// TestApplyStateRefusesOverflow keeps a value too big for its slot from
+// silently truncating.
+func TestApplyStateRefusesOverflow(t *testing.T) {
+	raw := loadAccountBundle(t)
+	// piggyBank.credits is 3 bytes: 70000 does not fit.
+	_, err := BulkPatcher(func(b *Bundle) error {
+		return ApplyState(b, &PlayerState{Credits: 500000, FreeXP: 12345, PiggyBank: 70000})
+	})(raw)
+	if err == nil {
+		t.Fatal("an overflowing piggy bank was accepted")
+	}
+}

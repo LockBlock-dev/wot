@@ -96,7 +96,7 @@ func TestPasswdAndSetState(t *testing.T) {
 		t.Error("new password does not work")
 	}
 
-	if err := setState(ctx, st, "p", 500, 7, 42); err != nil {
+	if err := setState(ctx, st, "p", 500, 7, 42, 9, 1234.5); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	state, err := st.LoadState(ctx, acct.ID)
@@ -106,8 +106,11 @@ func TestPasswdAndSetState(t *testing.T) {
 	if state.Credits != 500 || state.Gold != 7 || state.FreeXP != 42 {
 		t.Errorf("state = %+v, want 500/7/42", state)
 	}
+	if state.PiggyBank != 9 || state.GlobalRating != 1234.5 {
+		t.Errorf("state = %+v, want piggy bank 9 / rating 1234.5", state)
+	}
 	// -1 means "leave alone".
-	if err := setState(ctx, st, "p", -1, 9, -1); err != nil {
+	if err := setState(ctx, st, "p", -1, 9, -1, -1, -1); err != nil {
 		t.Fatal(err)
 	}
 	state, err = st.LoadState(ctx, acct.ID)
@@ -116,6 +119,9 @@ func TestPasswdAndSetState(t *testing.T) {
 	}
 	if state.Credits != 500 || state.Gold != 9 || state.FreeXP != 42 {
 		t.Errorf("state = %+v, want credits/freeXP untouched", state)
+	}
+	if state.PiggyBank != 9 || state.GlobalRating != 1234.5 {
+		t.Errorf("state = %+v, want piggy bank/rating untouched", state)
 	}
 }
 

@@ -33,6 +33,7 @@ import (
 var valueFlags = map[string]bool{
 	"db": true, "pass": true, "role": true,
 	"credits": true, "gold": true, "freexp": true,
+	"piggybank": true, "rating": true,
 }
 
 func main() {
@@ -43,6 +44,8 @@ func main() {
 	credits := fs.Int64("credits", -1, "set credits (-1 = leave alone)")
 	gold := fs.Int64("gold", -1, "set gold (-1 = leave alone)")
 	freexp := fs.Int64("freexp", -1, "set free XP (-1 = leave alone)")
+	piggy := fs.Int64("piggybank", -1, "set piggy bank credits (-1 = leave alone)")
+	rating := fs.Float64("rating", -1, "set global rating (-1 = leave alone)")
 	fs.Usage = usage
 
 	// Flags may sit on either side of the subcommand (`-db X add NAME`
@@ -107,7 +110,7 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		if err := setState(ctx, store, name, *credits, *gold, *freexp); err != nil {
+		if err := setState(ctx, store, name, *credits, *gold, *freexp, *piggy, *rating); err != nil {
 			fatal(err)
 		}
 	default:
@@ -149,6 +152,7 @@ func usage() {
   wotaccounts [-db FILE] passwd NAME [-pass P]
   wotaccounts [-db FILE] state NAME
   wotaccounts [-db FILE] set NAME [-credits N] [-gold N] [-freexp N]
+                              [-piggybank N] [-rating F]
 
 Omit -pass to read the password from stdin (keeps it out of the process
 list). Passwords are never printed.
@@ -257,7 +261,7 @@ func showState(ctx context.Context, st server.Store, name string) error {
 	return nil
 }
 
-func setState(ctx context.Context, st server.Store, name string, credits, gold, freexp int64) error {
+func setState(ctx context.Context, st server.Store, name string, credits, gold, freexp, piggy int64, rating float64) error {
 	a, err := st.AccountByName(ctx, name)
 	if err != nil {
 		return notFound(err, name)
@@ -275,10 +279,17 @@ func setState(ctx context.Context, st server.Store, name string, credits, gold, 
 	if freexp >= 0 {
 		s.FreeXP = freexp
 	}
+	if piggy >= 0 {
+		s.PiggyBank = piggy
+	}
+	if rating >= 0 {
+		s.GlobalRating = rating
+	}
 	if err := st.SaveState(ctx, a.ID, s); err != nil {
 		return err
 	}
-	fmt.Printf("%s: credits %d, gold %d, free XP %d\n", a.Name, s.Credits, s.Gold, s.FreeXP)
+	fmt.Printf("%s: credits %d, gold %d, free XP %d, piggy bank %d, rating %.2f\n",
+		a.Name, s.Credits, s.Gold, s.FreeXP, s.PiggyBank, s.GlobalRating)
 	return nil
 }
 
