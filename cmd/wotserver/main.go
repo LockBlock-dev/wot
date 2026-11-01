@@ -71,6 +71,9 @@ var (
 	flagFlood      *string
 	flagFloodKey   *string
 	flagFloodFlow  *string
+	flagPost       *string
+	flagPostKey    *string
+	flagPostFlow   *string
 	flagBaseApp    *string
 	flagMaxNonce   *int64
 	flagAnyVersion *bool
@@ -91,6 +94,9 @@ func main() {
 	flagFlood = flag.String("flood", "../captures/flows3-s2.txt", "wotproxy-style stage-2 dump for the bulk carrier (\"\" = no carrier)")
 	flagFloodKey = flag.String("floodkey", "../captures/key3.txt", "hex block key file for the carrier dump")
 	flagFloodFlow = flag.String("floodflow", "", "flow substring to select from a multi-flow carrier dump (\"\" = single-flow dump)")
+	flagPost = flag.String("post", "", "dump for the post-flood chain + pre-flood smalls (\"\" = same as -flood)")
+	flagPostKey = flag.String("postkey", "", "hex block key for -post (\"\" = same as -floodkey)")
+	flagPostFlow = flag.String("postflow", "", "flow substring for -post (\"\" = same as -floodflow)")
 	flagBaseApp = flag.String("baseapp", "", "host:port minted into the LOGGED_ON record (overrides -s1; external-advertise mode)")
 	flagMaxNonce = flag.Int64("maxnonce", int64(login.DefaultMaxNonce), "PoW easiness bound announced in challenges")
 	flagAnyVersion = flag.Bool("any-version", false, "accept any client protocol version")
@@ -170,7 +176,25 @@ func main() {
 	var base *login.BaseAppServer
 	var s1conn, s2conn *net.UDPConn
 	if *flagS1 != "" {
-		base, s1conn, s2conn = startBaseApp(*flagS1, *flagS2, *flagFlood, *flagFloodKey, *flagFloodFlow, *flagVerbose)
+		// The bundle's account document is patched with the default
+		// account's economy. The carrier is shared by every session, so
+		// this is the single-account path; per-session patching needs a
+		// per-session re-fragment (the frames are rebuilt in place).
+		var patch func([]byte) ([]byte, error)
+		if acct, err := core.Store.AccountByName(context.Background(), server.NormalizeName(*flagUser)); err == nil {
+			if st, err := core.State(context.Background(), acct.ID); err == nil {
+				patch = server.BulkPatcher(func(b *server.Bundle) error {
+					return server.ApplyState(b, st)
+				})
+			}
+		}
+		base, s1conn, s2conn = startBaseApp(baseAppArgs{
+			s1: *flagS1, s2: *flagS2,
+			flood: *flagFlood, floodKey: *flagFloodKey, floodFlow: *flagFloodFlow,
+			post: *flagPost, postKey: *flagPostKey, postFlow: *flagPostFlow,
+			patch:   patch,
+			verbose: *flagVerbose,
+		})
 		// LoginApp→BaseApp handoff: every finished login feeds the
 		// stage-1 pending record (SessionKey, BlockKey, Name).
 		// Every finished login feeds stage-1; the account's free XP
@@ -254,7 +278,21 @@ func main() {
 // the [44] redirect target, so the ADVERTISED address must carry a
 // dialed IP (an unspecified bind host advertises 127.0.0.1; a real IP
 // verbatim) and must sit in the manager window for our own client.
-func startBaseApp(s1arg, s2arg, flood, floodKey, floodFlow string, verbose bool) (*login.BaseAppServer, *net.UDPConn, *net.UDPConn) {
+// baseAppArgs groups the carrier wiring so the call site stays readable.
+type baseAppArgs struct {
+	s1, s2    string
+	flood     string
+	floodKey  string
+	floodFlow string
+	post      string
+	postKey   string
+	postFlow  string
+	patch     func([]byte) ([]byte, error)
+	verbose   bool
+}
+
+func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPConn) {
+	s1arg, s2arg, verbose := a.s1, a.s2, a.verbose
 	l1, err := net.ResolveUDPAddr("udp", s1arg)
 	if err != nil {
 		fatal(fmt.Errorf("wotserver: -s1 resolve: %w", err))
@@ -274,10 +312,20 @@ func startBaseApp(s1arg, s2arg, flood, floodKey, floodFlow string, verbose bool)
 	redirect := advertiseOf(s2conn)
 	base, err := login.NewBaseAppServer(login.BaseAppConfig{
 		Redirect:     redirect,
-		FloodPath:    flood,
-		FloodKeyPath: floodKey,
-		FloodFlow:    floodFlow,
-		Verbose:      verbose,
+		FloodPath:    a.flood,
+		FloodKeyPath: a.floodKey,
+		FloodFlow:    a.floodFlow,
+		PostPath:     a.post,
+		PostKeyPath:  a.postKey,
+		PostFlow:     a.postFlow,
+		// The bundle is decoded and re-encoded at load: a carrier that
+		// does not decode fails here instead of being served as garbage.
+		// No account field lives in the bundle (see server.StatePatches),
+		// so the re-encode is byte-identical and the frames replay
+		// verbatim.
+		VerifyBulk: server.VerifyBundle,
+		PatchBulk:  a.patch,
+		Verbose:    verbose,
 	})
 	if err != nil {
 		fatal(err)

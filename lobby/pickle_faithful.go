@@ -208,6 +208,8 @@ type fdecoder struct {
 	// keepOps records a container opcode that must follow the items the
 	// fallback left on the stack: {stack index to emit at, opcode}.
 	keepOps []KeepOp
+	// sawProto records that this document's opening PROTO was consumed.
+	sawProto bool
 	// end is where the decoded document ends when the stream continues
 	// with bytes that are not pickle (-1 = the document ran to STOP).
 	// The flood's later chunks carry channel-framed packets after the
@@ -290,6 +292,16 @@ func (d *fdecoder) run() error {
 		}
 		switch op {
 		case opProto:
+			if d.sawProto {
+				// PROTO only opens a pickle document. A second one
+				// means the stream carries another document (the flood
+				// is a sequence of them: static config, then the
+				// per-account document). End this one here; the caller
+				// decodes the rest as its own document.
+				d.end = start
+				return nil
+			}
+			d.sawProto = true
 			if _, err := d.byte1(); err != nil {
 				return err
 			}

@@ -20,42 +20,85 @@ import (
 // property the private server relies on: a patched bundle differs from
 // the capture only where we meant it to.
 type Bundle struct {
-	// Stack is the decoded object stream, in wire order.
+	// Docs are the pickle documents the stream carries, in wire order.
+	// The flood is a sequence of them: the static lobby config first,
+	// then the per-account document (sessionStats, inventory, …).
+	Docs []BundleDoc
+	// Stack is every document's objects flattened, in wire order. It is
+	// the view Find and the setters work on.
 	Stack []*lobby.FNode
-	// Raw is the reassembled bundle these nodes came from.
+	// Raw is the reassembled bundle these documents came from.
 	Raw []byte
+	// Tail is whatever follows the last document. The flood carries
+	// trailing bytes after the pickle; they are not ours to interpret,
+	// so they ride along verbatim.
+	Tail []byte
+	// Decoded is how many bytes of Raw the documents cover; Raw[Decoded:]
+	// is Tail. The encoder must reproduce exactly Decoded+len(Tail) bytes.
+	Decoded int
+}
+
+// BundleDoc is one pickle document inside the flood.
+type BundleDoc struct {
+	// Stack is this document's objects, in wire order.
+	Stack []*lobby.FNode
+	// Marks are the stack indices where a MARK is still open at STOP.
+	// The lobby bundle's outer dict is never closed, so these must be
+	// replayed for the encoding to match.
+	Marks []int
 	// ops are container opcodes that follow items the decoder left on
 	// the stack (malformed-region fallback).
 	ops []lobby.KeepOp
-	// Marks are the stack indices where a MARK is still open at STOP.
-	// The lobby bundle is a stream whose outer dict is never closed, so
-	// these must be replayed for the encoding to match.
-	Marks []int
-	// Tail is whatever follows the pickle's STOP. The flood carries
-	// trailing bytes after the document; they are not ours to interpret,
-	// so they ride along verbatim.
-	Tail []byte
-	// stopped records whether the document ended at STOP. The flood's
-	// later chunks carry channel-framed packets, so a stream can end
-	// early; the encoder must then not add a STOP of its own.
+	// stopped records whether the document ended at STOP. A document cut
+	// short by non-pickle bytes must not gain one.
 	stopped bool
 }
 
-// DecodeBundle parses a reassembled lobby bundle.
+// DecodeBundle parses a reassembled lobby bundle: every pickle document
+// it carries, in order.
+//
+// A document ends at STOP, or where the next document's PROTO begins, or
+// at the first byte that is not pickle at all (the flood's later chunks
+// carry channel-framed packets). Whatever is left over is Tail.
 func DecodeBundle(raw []byte) (*Bundle, error) {
-	stack, marks, ops, n, stopped, err := lobby.DecodeFaithfulStream(raw)
-	if err != nil {
-		return nil, fmt.Errorf("server: bundle decode: %w", err)
+	b := &Bundle{Raw: raw}
+	off := 0
+	for off < len(raw) {
+		stack, marks, ops, n, stopped, err := lobby.DecodeFaithfulStream(raw[off:])
+		if err != nil {
+			if len(b.Docs) == 0 {
+				return nil, fmt.Errorf("server: bundle decode: %w", err)
+			}
+			// A later document that will not decode is not ours to
+			// interpret: keep it verbatim as tail.
+			break
+		}
+		if n <= 0 {
+			break
+		}
+		b.Docs = append(b.Docs, BundleDoc{Stack: stack, Marks: marks, ops: ops, stopped: stopped})
+		b.Stack = append(b.Stack, stack...)
+		off += n
+		if stopped {
+			// STOP closes the stream's document sequence.
+			break
+		}
 	}
-	return &Bundle{Stack: stack, Marks: marks, ops: ops, Raw: raw, Tail: raw[n:], stopped: stopped}, nil
+	b.Decoded = off
+	b.Tail = raw[off:]
+	return b, nil
 }
 
 // Encode re-serialises the bundle. Untouched nodes replay verbatim, so
 // an unmodified bundle encodes back to its input bytes.
 func (b *Bundle) Encode() ([]byte, error) {
-	out, err := lobby.EncodeFaithfulOpsStop(b.Stack, b.Marks, b.ops, b.stopped)
-	if err != nil {
-		return nil, fmt.Errorf("server: bundle encode: %w", err)
+	var out []byte
+	for i, d := range b.Docs {
+		enc, err := lobby.EncodeFaithfulOpsStop(d.Stack, d.Marks, d.ops, d.stopped)
+		if err != nil {
+			return nil, fmt.Errorf("server: bundle encode doc %d: %w", i, err)
+		}
+		out = append(out, enc...)
 	}
 	return append(out, b.Tail...), nil
 }

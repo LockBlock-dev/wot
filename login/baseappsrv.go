@@ -45,6 +45,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +115,37 @@ type BaseAppConfig struct {
 	// another flow's ticks.
 	FloodFlow string
 
+	// PostPath/PostKeyPath/PostFlow select a DIFFERENT dump for the
+	// post-flood chain (terminator, rev answer, poll answer, seed tick)
+	// and the pre-flood smalls. Empty means "same as the flood source".
+	//
+	// The split exists because no single capture carries both halves:
+	// the complete bulk bundle (proxy-20261014-1752 flow 35493->, 416
+	// objects, 245 813 of 249 464 bytes decodable) has no 332B
+	// terminator, and the capture that has the chain (flows3-s2) has a
+	// bulk whose tail is not pickle. Serving the good bundle therefore
+	// means taking the bulk from one dump and the chain from another.
+	PostPath    string
+	PostKeyPath string
+	PostFlow    string
+
+	// VerifyBulk receives the reassembled bulk stream (the lobby bundle)
+	// once at load. It is the integrity gate: a carrier whose bundle does
+	// not decode — a truncated capture, a wrong key, a flow that is not
+	// the bulk — fails here instead of being served as garbage the client
+	// silently ACKs. nil = no check.
+	VerifyBulk func(stream []byte) error
+
+	// PatchBulk rewrites the reassembled bulk stream before it is served.
+	// It must return a stream of the SAME length: the frames are rebuilt
+	// in place, so a length change would desynchronise the client's
+	// fragment accounting. nil = serve the carrier verbatim.
+	//
+	// This is where the account's economy reaches the client: the flood
+	// carries a second pickle document holding `stats.credits` and
+	// `stats.freeXP` (see server.ApplyState).
+	PatchBulk func(stream []byte) ([]byte, error)
+
 	// BulkFragSize is the flood datagram size the carrier selects
 	// (1252 in every genuine capture).
 	BulkFragSize int
@@ -129,6 +161,10 @@ type BaseAppServer struct {
 
 	bulk   [][]byte // flood frame CLEAR bodies (flags+app+trailers)
 	bulkOK bool
+	// bulkBytes is the reassembled bundle size the gate accepted.
+	bulkBytes int
+	// bulkPatched counts the bundle bytes PatchBulk changed.
+	bulkPatched int
 
 	// Post-flood chain frames (v2, flows3-s2 tail): the 332B
 	// terminator ends the bulk burst, the [13][7b] 60B carries the
@@ -227,7 +263,8 @@ func NewBaseAppServer(cfg BaseAppConfig) (*BaseAppServer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("wotserver: flood carrier: %w", err)
 		}
-		s.logf("bulk carrier loaded %d frames from %s", n, cfg.FloodPath)
+		s.logf("bulk carrier loaded %d frames, %d B bundle, %d B patched, from %s",
+			n, s.bulkBytes, s.bulkPatched, cfg.FloodPath)
 		if err := s.loadPost(); err != nil {
 			return nil, fmt.Errorf("wotserver: post-flood carrier: %w", err)
 		}
@@ -278,9 +315,34 @@ func versionOrUnknown(v string) string {
 	return v
 }
 
+// postSource resolves the dump used for the post-flood chain and the
+// pre-flood smalls: its own when configured, else the flood source.
+func (s *BaseAppServer) postSource() (path, keyPath, flow string) {
+	path, keyPath, flow = s.cfg.PostPath, s.cfg.PostKeyPath, s.cfg.PostFlow
+	if path == "" {
+		path = s.cfg.FloodPath
+	}
+	if keyPath == "" {
+		keyPath = s.cfg.FloodKeyPath
+	}
+	// The flow selector belongs to a dump, so it is only inherited when
+	// the post source IS the flood source. A separate dump has its own
+	// flow names; inheriting would filter everything out.
+	if flow == "" && path == s.cfg.FloodPath {
+		flow = s.cfg.FloodFlow
+	}
+	return path, keyPath, flow
+}
+
 // inFlow reports whether a dump record belongs to the selected flow.
 func (s *BaseAppServer) inFlow(addr string) bool {
 	return s.cfg.FloodFlow == "" || strings.Contains(addr, s.cfg.FloodFlow)
+}
+
+// inPostFlow is inFlow against the post-flood source's selector.
+func (s *BaseAppServer) inPostFlow(addr string) bool {
+	_, _, flow := s.postSource()
+	return flow == "" || strings.Contains(addr, flow)
 }
 
 // loadBulk keeps every flood frame's DECRYPTED body for verbatim
@@ -311,11 +373,163 @@ func (s *BaseAppServer) loadBulk() (int, error) {
 		}
 		s.bulk = append(s.bulk, clear)
 	}
-	if len(s.bulk) == 0 {
-		return 0, fmt.Errorf("no %dB S>C frames in %s", s.cfg.BulkFragSize, s.cfg.FloodPath)
+	if err := s.applyBulk(); err != nil {
+		return 0, err
 	}
 	s.bulkOK = true
 	return len(s.bulk), nil
+}
+
+// bulkFrame is one decrypted carrier frame plus where its payload sits
+// in the reassembled stream.
+type bulkFrame struct {
+	clear []byte // [flags][app][trailers]
+	pay   []byte // clear[2:len-trailer]
+	head  int    // bytes of pay that are chain header, not bundle
+	first uint32 // chain id (the range's first seq)
+	rel   uint32 // position inside the chain
+	order int    // arrival order, for the wire
+}
+
+// splitBulkFrames decrypts the carrier's bulk frames and works out each
+// one's place in the fragment chains.
+//
+// The chain id is the range's first seq (IS_FRAGMENT puts an 8-byte
+// first/last range at the front of the trailer); a frame without the flag
+// is its own single-fragment chain. The chain header length follows from
+// the frame's own shape, so no cross-frame state is needed.
+func (s *BaseAppServer) splitBulkFrames() ([]bulkFrame, error) {
+	key, err := ReadAnyKeyFile(s.cfg.FloodKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("key file: %w", err)
+	}
+	f, err := os.Open(s.cfg.FloodPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	dump, err := ParseWotproxyDump(f)
+	if err != nil {
+		return nil, err
+	}
+	var out []bulkFrame
+	for _, d := range dump {
+		if d.Dir != "S>C" || len(d.Data) != s.cfg.BulkFragSize || !s.inFlow(d.Addr) {
+			continue
+		}
+		clear, err := decryptBlowfish(key, d.Data[4:])
+		if err != nil || len(clear) < 14 {
+			continue // mis-captured frame: drop silently
+		}
+		n := len(clear)
+		flags := binary.LittleEndian.Uint16(clear[0:2])
+		tr := ChannelTrailerLen(flags)
+		if n < 2+tr {
+			continue
+		}
+		first := binary.LittleEndian.Uint32(clear[n-8 : n-4])
+		seq := first
+		if flags&chFlagFragment != 0 && tr >= 12 {
+			first = binary.LittleEndian.Uint32(clear[n-12 : n-8])
+			seq = binary.LittleEndian.Uint32(clear[n-4:])
+		}
+		pay := clear[2 : n-tr]
+		out = append(out, bulkFrame{clear: clear, pay: pay, first: first, rel: seq - first, order: len(out)})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no %dB S>C frames in %s", s.cfg.BulkFragSize, s.cfg.FloodPath)
+	}
+	// The chain header rides on the chain's FIRST fragment, which is the
+	// one with the smallest rel — not necessarily rel 0: the capture's
+	// first fragment can be missing (the 1752 flow starts at rel 1).
+	minRel := map[uint32]uint32{}
+	for _, fr := range out {
+		if cur, ok := minRel[fr.first]; !ok || fr.rel < cur {
+			minRel[fr.first] = fr.rel
+		}
+	}
+	for i := range out {
+		if out[i].rel == minRel[out[i].first] {
+			out[i].head = chainHeadLen(out[i].pay)
+		}
+	}
+	return out, nil
+}
+
+// chainHeadLen is how many leading bytes of a chain's first fragment are
+// header rather than bundle. Mirrors the shapes login.ReassembleFrags
+// recognises; anything unrecognised is treated as an 8-byte header.
+func chainHeadLen(pay []byte) int {
+	switch {
+	case len(pay) >= 4 && pay[0] == 0xFF && pay[3] == 0x03:
+		return 4
+	case len(pay) >= 8 && pay[5] == 0xDD && pay[6] == 0x00:
+		return 8
+	case len(pay) >= 8 && pay[0] == 0x13 && pay[2] == 0x1A:
+		return 8
+	case len(pay) >= 8:
+		return 8
+	}
+	return 0
+}
+
+// applyBulk runs the load-time pass over the carrier: reassemble the
+// bundle in chain order, hand it to the gate and the patcher, and write
+// the result back into the frames in place.
+func (s *BaseAppServer) applyBulk() error {
+	frames, err := s.splitBulkFrames()
+	if err != nil {
+		return err
+	}
+	// Chain order: by chain id, then position inside the chain.
+	order := make([]int, len(frames))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		fa, fb := frames[order[a]], frames[order[b]]
+		if fa.first != fb.first {
+			return fa.first < fb.first
+		}
+		return fa.rel < fb.rel
+	})
+	var stream []byte
+	for _, i := range order {
+		stream = append(stream, frames[i].pay[frames[i].head:]...)
+	}
+	if s.cfg.VerifyBulk != nil {
+		if err := s.cfg.VerifyBulk(stream); err != nil {
+			return fmt.Errorf("bulk verify: %w", err)
+		}
+	}
+	s.bulkBytes = len(stream)
+	if s.cfg.PatchBulk != nil {
+		patched, err := s.cfg.PatchBulk(stream)
+		if err != nil {
+			return fmt.Errorf("bulk patch: %w", err)
+		}
+		if len(patched) != len(stream) {
+			return fmt.Errorf("bulk patch changed the length (%d -> %d); frames are rebuilt in place",
+				len(stream), len(patched))
+		}
+		off := 0
+		for _, i := range order {
+			body := frames[i].pay[frames[i].head:]
+			copy(body, patched[off:off+len(body)])
+			off += len(body)
+		}
+		for j := range patched {
+			if patched[j] != stream[j] {
+				s.bulkPatched++
+			}
+		}
+	}
+	// Serve in arrival order, as the capture did.
+	s.bulk = s.bulk[:0]
+	for _, fr := range frames {
+		s.bulk = append(s.bulk, fr.clear)
+	}
+	return nil
 }
 
 // loadPost keeps the three post-flood chain frames' DECRYPTED bodies for
@@ -335,11 +549,12 @@ func (s *BaseAppServer) loadBulk() (int, error) {
 // replay the bodies verbatim (content honesty = same layering as the
 // bulk) and mint only the pure-tick stream around them.
 func (s *BaseAppServer) loadPost() error {
-	key, err := ReadAnyKeyFile(s.cfg.FloodKeyPath)
+	path, keyPath, _ := s.postSource()
+	key, err := ReadAnyKeyFile(keyPath)
 	if err != nil {
 		return fmt.Errorf("key file: %w", err)
 	}
-	f, err := os.Open(s.cfg.FloodPath)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
@@ -353,7 +568,7 @@ func (s *BaseAppServer) loadPost() error {
 	// dump in arrival order and only accept ticks past the last 332B.
 	sawTerm := false
 	for _, d := range dump {
-		if d.Dir != "S>C" || !s.inFlow(d.Addr) {
+		if d.Dir != "S>C" || !s.inPostFlow(d.Addr) {
 			continue
 		}
 		switch len(d.Data) {
@@ -406,7 +621,7 @@ func (s *BaseAppServer) loadPost() error {
 	}
 	if s.term == nil || s.revReply == nil || s.pollAns == nil || s.tickSeed == nil {
 		return fmt.Errorf("post-flood chain frames missing (term=%v rev=%v poll=%v tick=%v) in %s",
-			s.term != nil, s.revReply != nil, s.pollAns != nil, s.tickSeed != nil, s.cfg.FloodPath)
+			s.term != nil, s.revReply != nil, s.pollAns != nil, s.tickSeed != nil, path)
 	}
 	s.postOK = true
 	return nil
@@ -435,11 +650,12 @@ func (s *BaseAppServer) loadPost() error {
 // (consistent with loadPost's strictness); each is re-checked at serve
 // time by the patchers, which fail loud on shape drift.
 func (s *BaseAppServer) loadPre() error {
-	key, err := ReadAnyKeyFile(s.cfg.FloodKeyPath)
+	path, keyPath, _ := s.postSource()
+	key, err := ReadAnyKeyFile(keyPath)
 	if err != nil {
 		return fmt.Errorf("key file: %w", err)
 	}
-	f, err := os.Open(s.cfg.FloodPath)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
@@ -449,7 +665,7 @@ func (s *BaseAppServer) loadPre() error {
 		return err
 	}
 	for _, d := range dump {
-		if d.Dir != "S>C" || !s.inFlow(d.Addr) {
+		if d.Dir != "S>C" || !s.inPostFlow(d.Addr) {
 			continue
 		}
 		switch len(d.Data) {
@@ -516,7 +732,7 @@ func (s *BaseAppServer) loadPre() error {
 	}
 	if s.infoApp == nil || s.descTpl == nil || s.dictTpl == nil {
 		return fmt.Errorf("pre-flood smalls missing (info=%v descr=%v dict=%v) in %s",
-			s.infoApp != nil, s.descTpl != nil, s.dictTpl != nil, s.cfg.FloodPath)
+			s.infoApp != nil, s.descTpl != nil, s.dictTpl != nil, path)
 	}
 	s.preOK = true
 	return nil
