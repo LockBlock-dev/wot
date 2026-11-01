@@ -109,10 +109,12 @@ type FNode struct {
 	Callable     *FNode
 	Args         *FNode
 
-	// Memo. Memo < 0 means the object was never memoised. MemoOp records
-	// whether the original used the 1-byte or 4-byte form.
-	Memo   int
-	MemoOp byte
+	// Memos holds every memo index this object was stored at, in wire
+	// order, with the opcode form used for each (BINPUT vs LONG_BINPUT).
+	// A node can be memoised more than once; keeping only the last index
+	// loses entries and makes re-encoding shorter than the input.
+	Memos   []int
+	MemoOps []byte
 }
 
 // SetInt rewrites an integer node, marking it for canonical re-encoding.
@@ -239,11 +241,11 @@ func (d *fdecoder) run() error {
 			// into the decoded stack.
 			d.marks = append(d.marks, len(d.stack))
 		case opNone:
-			d.push(&FNode{Memo: -1, Kind: FNone, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FNone, Raw: d.data[start:d.pos]})
 		case opNewTrue:
-			d.push(&FNode{Memo: -1, Kind: FBool, B: true, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FBool, B: true, Raw: d.data[start:d.pos]})
 		case opNewFalse:
-			d.push(&FNode{Memo: -1, Kind: FBool, B: false, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FBool, B: false, Raw: d.data[start:d.pos]})
 		case opInt:
 			ln, err := d.line()
 			if err != nil {
@@ -251,31 +253,31 @@ func (d *fdecoder) run() error {
 			}
 			var v int64
 			fmt.Sscanf(string(ln), "%d", &v)
-			d.push(&FNode{Memo: -1, Kind: FInt, I: v, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FInt, I: v, Raw: d.data[start:d.pos]})
 		case opBinInt:
 			b, err := d.read(4)
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FInt, I: int64(int32(binary.LittleEndian.Uint32(b))), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FInt, I: int64(int32(binary.LittleEndian.Uint32(b))), Raw: d.data[start:d.pos]})
 		case opBinInt1:
 			b, err := d.byte1()
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FInt, I: int64(b), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FInt, I: int64(b), Raw: d.data[start:d.pos]})
 		case opBinInt2:
 			b, err := d.read(2)
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FInt, I: int64(binary.LittleEndian.Uint16(b)), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FInt, I: int64(binary.LittleEndian.Uint16(b)), Raw: d.data[start:d.pos]})
 		case opBinFloat:
 			b, err := d.read(8)
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FFloat, F: math.Float64frombits(binary.BigEndian.Uint64(b)), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FFloat, F: math.Float64frombits(binary.BigEndian.Uint64(b)), Raw: d.data[start:d.pos]})
 		case opShortBinString:
 			n, err := d.byte1()
 			if err != nil {
@@ -285,7 +287,7 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FString, S: string(b), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FString, S: string(b), Raw: d.data[start:d.pos]})
 		case opBinString:
 			n, err := d.u32()
 			if err != nil {
@@ -295,7 +297,7 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FString, S: string(b), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FString, S: string(b), Raw: d.data[start:d.pos]})
 		case opBinUnicode:
 			n, err := d.u32()
 			if err != nil {
@@ -305,13 +307,13 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FUnicode, S: string(b), Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FUnicode, S: string(b), Raw: d.data[start:d.pos]})
 		case opEmptyList:
-			d.push(&FNode{Memo: -1, Kind: FList, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FList, Raw: d.data[start:d.pos]})
 		case opEmptyDict:
-			d.push(&FNode{Memo: -1, Kind: FDict, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FDict, Raw: d.data[start:d.pos]})
 		case opEmptyTuple:
-			d.push(&FNode{Memo: -1, Kind: FTuple, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FTuple, Raw: d.data[start:d.pos]})
 		case opAppend:
 			v, err := d.pop()
 			if err != nil {
@@ -369,7 +371,7 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FTuple, Items: items, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FTuple, Items: items, Raw: d.data[start:d.pos]})
 		case opTuple1, opTuple2, opTuple3:
 			n := int(op-opTuple1) + 1
 			if len(d.stack) < n {
@@ -377,7 +379,7 @@ func (d *fdecoder) run() error {
 			}
 			items := append([]*FNode(nil), d.stack[len(d.stack)-n:]...)
 			d.stack = d.stack[:len(d.stack)-n]
-			d.push(&FNode{Memo: -1, Kind: FTuple, Items: items, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FTuple, Items: items, Raw: d.data[start:d.pos]})
 		case opBinPut, opLongBinPut:
 			var idx int
 			if op == opBinPut {
@@ -397,7 +399,8 @@ func (d *fdecoder) run() error {
 				return fmt.Errorf("lobby: BINPUT with empty stack")
 			}
 			top := d.stack[len(d.stack)-1]
-			top.Memo, top.MemoOp = idx, op
+			top.Memos = append(top.Memos, idx)
+			top.MemoOps = append(top.MemoOps, op)
 			d.memo[idx] = top
 		case opBinGet, opLongBinGet:
 			var idx int
@@ -428,7 +431,7 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1,
+			d.push(&FNode{
 				Kind:   FGlobal,
 				Module: string(mod[:len(mod)-1]),
 				Name:   string(name[:len(name)-1]),
@@ -443,7 +446,7 @@ func (d *fdecoder) run() error {
 			if err != nil {
 				return err
 			}
-			d.push(&FNode{Memo: -1, Kind: FReduce, Callable: call, Args: args, Raw: d.data[start:d.pos]})
+			d.push(&FNode{Kind: FReduce, Callable: call, Args: args, Raw: d.data[start:d.pos]})
 		default:
 			return fmt.Errorf("lobby: unsupported pickle opcode 0x%02x at %d", op, start)
 		}
@@ -463,7 +466,7 @@ func EncodeFaithful(stack []*FNode) ([]byte, error) {
 // stack index listed in marks (the positions DecodeFaithfulMarks
 // reported as still open).
 func EncodeFaithfulMarks(stack []*FNode, marks []int) ([]byte, error) {
-	e := &fencoder{seen: map[*FNode]int{}}
+	e := &fencoder{seen: map[*FNode]bool{}}
 	e.out = append(e.out, opProto, 2)
 	next := 0
 	for i, n := range stack {
@@ -484,22 +487,23 @@ func EncodeFaithfulMarks(stack []*FNode, marks []int) ([]byte, error) {
 
 type fencoder struct {
 	out  []byte
-	seen map[*FNode]int // node -> memo index already emitted
+	seen map[*FNode]bool // node body already emitted
 }
 
 func (e *fencoder) emit(n *FNode) error {
 	// A memoised node emits its body once, then BINGET.
-	if n.Memo >= 0 {
-		if _, done := e.seen[n]; done {
-			if n.MemoOp == opBinPut && n.Memo < 256 {
-				e.out = append(e.out, opBinGet, byte(n.Memo))
+	if len(n.Memos) > 0 {
+		if e.seen[n] {
+			idx := n.Memos[0]
+			if n.MemoOps[0] == opBinPut && idx < 256 {
+				e.out = append(e.out, opBinGet, byte(idx))
 			} else {
 				e.out = append(e.out, opLongBinGet)
-				e.out = binary.LittleEndian.AppendUint32(e.out, uint32(n.Memo))
+				e.out = binary.LittleEndian.AppendUint32(e.out, uint32(idx))
 			}
 			return nil
 		}
-		e.seen[n] = n.Memo
+		e.seen[n] = true
 	}
 
 	switch n.Kind {
@@ -578,15 +582,14 @@ func (e *fencoder) emit(n *FNode) error {
 
 // putMemo writes the memo assignment for a node, if it has one.
 func (e *fencoder) putMemo(n *FNode) {
-	if n.Memo < 0 {
-		return
+	for i, idx := range n.Memos {
+		if n.MemoOps[i] == opBinPut && idx < 256 {
+			e.out = append(e.out, opBinPut, byte(idx))
+			continue
+		}
+		e.out = append(e.out, opLongBinPut)
+		e.out = binary.LittleEndian.AppendUint32(e.out, uint32(idx))
 	}
-	if n.MemoOp == opBinPut && n.Memo < 256 {
-		e.out = append(e.out, opBinPut, byte(n.Memo))
-		return
-	}
-	e.out = append(e.out, opLongBinPut)
-	e.out = binary.LittleEndian.AppendUint32(e.out, uint32(n.Memo))
 }
 
 // emitItems replays a list recipe: each opAppend adds one item, each
