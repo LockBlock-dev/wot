@@ -251,6 +251,10 @@ type BaseAppServer struct {
 	// no session field); stage-2 sources are fresh sockets, so the
 	// address is the only stable join.
 	byAddr map[string]*clientState
+
+	// stage1Seen bounds the stage-1 datagram trace: a client that never
+	// gets an answer resends, and an unbounded trace would bury the log.
+	stage1Seen int
 }
 
 type clientState struct {
@@ -326,7 +330,38 @@ func NewBaseAppServer(cfg BaseAppConfig) (*BaseAppServer, error) {
 	return s, nil
 }
 
+// logf is the BaseApp's lifecycle channel. It always prints: a silent
+// BaseApp is indistinguishable from a dead one, and "the client hangs
+// after LOGGED_ON" is exactly the symptom that needs these lines. The
+// per-datagram detail stays behind -verbose (logVerbosef).
 func (s *BaseAppServer) logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[wotserver] "+format+"\n", args...)
+}
+
+// traceStage1 prints the first few stage-1 datagrams that got no answer,
+// with their bytes. A client stuck on "Connecting" resends the same
+// handshake; without this the server looks dead while it is in fact
+// dropping something it cannot read.
+func (s *BaseAppServer) traceStage1(from *net.UDPAddr, pkt []byte, why string) {
+	s.mu.Lock()
+	n := s.stage1Seen
+	s.stage1Seen++
+	s.mu.Unlock()
+	if n >= 8 {
+		if n == 8 {
+			s.logf("stage1 %s: further unanswered datagrams not traced", from)
+		}
+		return
+	}
+	head := pkt
+	if len(head) > 32 {
+		head = head[:32]
+	}
+	s.logf("stage1 %s: %dB %s: % x", from, len(pkt), why, head)
+}
+
+// logVerbosef is the noisy channel: per-packet detail, -verbose only.
+func (s *BaseAppServer) logVerbosef(format string, args ...any) {
 	if s.cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "[wotserver] "+format+"\n", args...)
 	}
@@ -1066,14 +1101,25 @@ func (s *BaseAppServer) handleStage1(conn Transport, from *net.UDPAddr, pkt []by
 	rq, ok := parseBaseAppLogin(pkt)
 	if !ok {
 		// Everything non-22B on stage-1 is walk tokens (acks, auth1,
-		// post-redirect auth2): silence, like the live managers.
+		// post-redirect auth2): silence, like the live managers. A 22B
+		// that does not parse is different — that is a handshake we
+		// failed to read, and staying silent there hides a dead client.
+		// Only a 22B is handshake-shaped. Everything else on stage-1 is
+		// a walk token (ack/auth) — normal traffic, not a failure.
+		if len(pkt) == 22 {
+			s.traceStage1(from, pkt, "did not parse")
+		} else {
+			s.logVerbosef("stage1 %s: %dB walk token", from, len(pkt))
+		}
 		return nil
 	}
 	st := s.bySession(rq.sessionKey)
 	if st == nil {
 		// Unknown session key: silence (p5 validates keys: random-key
-		// 22Bs draw zero bytes there).
+		// 22Bs draw zero bytes there) — but say so, or a client that
+		// never gets an answer looks like a dead server.
 		s.logf("stage1 %s: 22B for unknown session key %08x — silent", from, rq.sessionKey)
+		s.traceStage1(from, pkt, "unknown session key")
 		return nil
 	}
 	s.mu.Lock()
