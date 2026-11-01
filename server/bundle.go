@@ -79,10 +79,10 @@ func DecodeBundle(raw []byte) (*Bundle, error) {
 		b.Docs = append(b.Docs, BundleDoc{Stack: stack, Marks: marks, ops: ops, stopped: stopped})
 		b.Stack = append(b.Stack, stack...)
 		off += n
-		if stopped {
-			// STOP closes the stream's document sequence.
-			break
-		}
+		// A STOP closes one document, not the stream: a bundle built in
+		// code writes each document with its own STOP. Keep going while
+		// the next bytes decode; the loop ends on a decode error (the
+		// capture's non-pickle tail) or at the end of the stream.
 	}
 	b.Decoded = off
 	b.Tail = raw[off:]

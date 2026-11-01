@@ -83,17 +83,26 @@ func (b *Bundle) AccountDoc() int {
 	return -1
 }
 
-// pair resolves a flat key/value pair inside one document: the node that
-// follows the string node equal to key.
+// pair resolves a key inside one document, in either shape the flood
+// uses.
 //
-// The account document is a stream of `key, value` pairs whose outer dict
-// is never closed (the flood is cut short before its SETITEMS), so the
-// pairs are siblings on the stack rather than entries of one dict.
+// A captured account document is a stream of `key, value` pairs whose
+// outer dict is never closed (the flood is cut short before its
+// SETITEMS), so the pairs are siblings on the stack. A document built in
+// code is a proper dict, so the key is an entry. Both are supported, so a
+// generated bundle and a captured one are interchangeable.
 func (d BundleDoc) pair(key string) *lobby.FNode {
 	for i := 0; i+1 < len(d.Stack); i++ {
 		n := d.Stack[i]
 		if (n.Kind == lobby.FString || n.Kind == lobby.FUnicode) && n.S == key {
 			return d.Stack[i+1]
+		}
+	}
+	for _, n := range d.Stack {
+		if n.Kind == lobby.FDict {
+			if v := n.Get(key); v != nil {
+				return v
+			}
 		}
 	}
 	return nil

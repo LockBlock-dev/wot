@@ -715,7 +715,23 @@ func (e *fencoder) putMemo(n *FNode) {
 
 // emitItems replays a list recipe: each opAppend adds one item, each
 // opAppends adds all remaining.
+//
+// A node built from scratch has no recipe; it is emitted as one APPENDS
+// over every item, which is what cPickle produces for a list literal.
 func (e *fencoder) emitItems(n *FNode, items []*FNode, one, many byte) error {
+	if len(n.Recipe) == 0 {
+		if len(items) == 0 {
+			return nil
+		}
+		e.out = append(e.out, opMark)
+		for _, it := range items {
+			if err := e.emit(it); err != nil {
+				return err
+			}
+		}
+		e.out = append(e.out, many)
+		return nil
+	}
 	i := 0
 	for _, st := range n.Recipe {
 		switch st.Op {
@@ -751,7 +767,29 @@ func (e *fencoder) emitItems(n *FNode, items []*FNode, one, many byte) error {
 }
 
 // emitPairs replays a dict recipe.
+//
+// A node built from scratch has no recipe; it is emitted as one SETITEMS
+// over every pair, which is what cPickle produces for a dict literal.
 func (e *fencoder) emitPairs(n *FNode) error {
+	if len(n.Recipe) == 0 {
+		if len(n.Items) == 0 {
+			return nil
+		}
+		if len(n.Keys) != len(n.Items) {
+			return fmt.Errorf("lobby: dict has %d keys and %d items", len(n.Keys), len(n.Items))
+		}
+		e.out = append(e.out, opMark)
+		for i := range n.Items {
+			if err := e.emit(n.Keys[i]); err != nil {
+				return err
+			}
+			if err := e.emit(n.Items[i]); err != nil {
+				return err
+			}
+		}
+		e.out = append(e.out, opSetItems)
+		return nil
+	}
 	i := 0
 	for _, st := range n.Recipe {
 		switch st.Op {
