@@ -205,6 +205,9 @@ type hull struct {
 	// away faster than the tracks could follow, and the height is the
 	// trajectory's until it lands.
 	Airborne bool
+	// AirborneWhy records the drop, the expected drop and the ground's own
+	// drop when the hull last left the ground, for the log.
+	AirborneWhy [3]float32
 	// Flags is the latest `vehicle_moveWith` byte.
 	Flags  uint8
 	Limits motionLimits
@@ -486,6 +489,7 @@ func (h *hull) settle(tr *Terrain, dt float32) bool {
 		}
 		if drop > expected+hullSuspensionTravel {
 			h.Airborne = true
+			h.AirborneWhy = [3]float32{drop, expected, h.Position[1] - center}
 			return true
 		}
 		h.VerticalVelocity = -drop / dt

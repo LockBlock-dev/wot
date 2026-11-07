@@ -2994,10 +2994,10 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		// matrix, was correctly 12 m behind the tank. Re-anchoring it every
 		// tick costs 39 B on a datagram the capture shows at 181-500 B.
 		if tick%10 == 0 {
-			s.logf("arena %d tick %d: hull pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f flags=%#02x limits fwd=%.2f bwd=%.2f rot=%.2f hadGround=%v airborne=%v",
+			s.logf("arena %d tick %d: hull pos=(%.2f,%.2f,%.2f) yaw=%.3f speed=%.2f flags=%#02x limits fwd=%.2f bwd=%.2f rot=%.2f hadGround=%v airborne=%v why=%v",
 				arenaID, tick, hullNow.Position[0], hullNow.Position[1], hullNow.Position[2],
 				hullNow.Direction[2], hullNow.Speed, hullNow.Flags,
-				hullNow.Limits.SpeedForward, hullNow.Limits.SpeedBackward, hullNow.Limits.RotationSpeed, st.hadGround, hullNow.Airborne)
+				hullNow.Limits.SpeedForward, hullNow.Limits.SpeedBackward, hullNow.Limits.RotationSpeed, st.hadGround, hullNow.Airborne, hullNow.AirborneWhy)
 		}
 		marker := gunMarkerFor(hullNow, cur, pitch, spec, dispFactor)
 		mode := hullNow.engineMode()
