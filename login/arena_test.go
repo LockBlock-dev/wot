@@ -632,6 +632,14 @@ func TestLeaveArenaSwitchesBackToStage1(t *testing.T) {
 	if _, ok := s.byAddr[addr.String()]; ok {
 		t.Error("the old socket is still bound to the session")
 	}
+	// The client's new socket starts its counters at zero. A stale cumulative
+	// ack (measured: 2823 after a battle) makes the client reject the session
+	// dict as "ACK for packets not yet sent", so the Account is created and
+	// `showGUI` — which rides that dict — never runs: the loading screen hangs.
+	if st.postSeq != 0 || st.postTag != 0 || st.postCumul != 0 {
+		t.Errorf("post counters = seq %d tag %d cumul %d, want all zero",
+			st.postSeq, st.postTag, st.postCumul)
+	}
 }
 
 // TestLeaveArenaResetIsReliable pins the fallback leave (no stage-1 endpoint):

@@ -91,8 +91,14 @@ type ArenaHandoff struct {
 	InfoID uint32
 	// Dummy is an optional synthetic opponent, so a solo battle still has a
 	// tank in the other team. It gets its own Vehicle entity and its own
-	// VEHICLES_INFO entry.
+	// VEHICLES_INFO entry. It is also the damage target: `applyShot` resolves
+	// the player's shells against it.
 	Dummy *ArenaPlayerDoc
+	// Bots are the rest of the synthetic roster: every other tank that should
+	// be VISIBLE in the battle. Each gets its own Vehicle entity, its own
+	// VEHICLES_INFO entry and an `enterAoI`, so the client draws it and the
+	// team panels list it. They do not drive or fire yet.
+	Bots []ArenaPlayerDoc
 }
 
 // BattleResultDoc is one player's battle result.
@@ -727,45 +733,15 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	vehicles := []entdef.Value{vehicleInfoValue(infoType, h.Player, vehicle.ID, 1, ownX, ownZ)}
 
 	// The synthetic opponent, if the battle has one: its own Vehicle entity
-	// first, so the client has something to draw, then its list entry.
+	// first, so the client has something to draw, then its list entry. It is
+	// the damage target, so its position and health are kept on the session.
 	if h.Dummy != nil {
 		dummyID := h.VehicleID + 1
-		dv, err := s.arenaVehicleFor(st, h, *h.Dummy, dummyID, false)
+		dv, infoValue, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, 1, seq, cumul)
 		if err != nil {
 			s.logf("stage2 %s: arena %d: no dummy Vehicle (%v)", from, h.ArenaID, err)
-		} else if dprops, err := EntityPropertyRunNames(dv, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag"); err != nil {
-			s.logf("stage2 %s: arena %d: dummy Vehicle properties (%v)", from, h.ArenaID, err)
-		} else if dcreate, err := EncodeCreateEntity(dv.ID, uint16(dv.Type.TypeID), VolatilePackerType,
-			enemy, 0, 0, 0, dprops); err != nil {
-			s.logf("stage2 %s: arena %d: dummy Vehicle element (%v)", from, h.ArenaID, err)
 		} else {
-			if err := s.sendReliableEntity(conn, from, st, dcreate, seq, cumul); err != nil {
-				return seq, err
-			}
-			seq++
-			// Same order as the player's own tank: the cell properties, then
-			// the entity enters the world.
-			if dsel, err := EncodeSelectEntity(dv.ID); err == nil {
-				if err := s.sendReliableEntity(conn, from, st, dsel, seq, cumul); err != nil {
-					return seq, err
-				}
-				seq++
-			}
-			if dupdate, err := EncodeUpdateEntityExcept(dv, true, vehicleDeltaSkip...); err == nil {
-				if err := s.sendReliableEntity(conn, from, st, dupdate, seq, cumul); err != nil {
-					return seq, err
-				}
-				seq++
-			}
-			if denter, err := EncodeEnterAoI(dv.ID, 0); err == nil {
-				if err := s.sendReliableEntity(conn, from, st, denter, seq, cumul); err != nil {
-					return seq, err
-				}
-				seq++
-			}
-			// The server's copy of the dummy: where it stands and how much
-			// health it has left. `applyShot` updates the health and sends
-			// the client the difference.
+			seq = nextSeqAfter(seq, 4)
 			s.mu.Lock()
 			st.dummy = dv
 			st.dummyID = dummyID
@@ -776,9 +752,41 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 			}
 			st.dummyMaxHealth = st.dummyHealth
 			s.mu.Unlock()
-			vehicles = append(vehicles, vehicleInfoValue(infoType, *h.Dummy, dummyID, 1, enemyX, enemyZ))
-			s.logf("stage2 %s: dummy Vehicle %d created (team %d, %d B)", from, dummyID, h.Dummy.Team, len(dcreate))
+			vehicles = append(vehicles, infoValue)
+			s.logf("stage2 %s: dummy Vehicle %d created (team %d)", from, dummyID, h.Dummy.Team)
 		}
+	}
+
+	// The rest of the roster. Their VEHICLES_INFO rows go out with the list —
+	// the loading screen lists the whole battle — but the entities are created
+	// a few per sweep: 29 tanks × 4 reliable packets in one burst overflows
+	// the client's channel window, and the battle then dies on
+	// "channel … has overflowed" before it starts.
+	if len(h.Bots) > 0 {
+		s.mu.Lock()
+		st.pendingBots = st.pendingBots[:0]
+		// Per-team slots: the player holds 1 on their own side, the dummy 1 on
+		// the other, and the team panel and scoreboard order by this.
+		allySlot, enemySlot := 1, 1
+		for i := range h.Bots {
+			doc := h.Bots[i]
+			id := h.VehicleID + 2 + uint32(i)
+			base, slot := enemy, 0
+			if doc.Team == h.Player.Team {
+				base = spawn
+				allySlot++
+				slot = allySlot
+			} else {
+				enemySlot++
+				slot = enemySlot
+			}
+			pos := botSpawn(base, i, len(h.Bots))
+			vehicles = append(vehicles, vehicleInfoValue(infoType, doc, id, slot, pos[0], pos[2]))
+			st.pendingBots = append(st.pendingBots, pendingBot{doc: doc, id: id, pos: pos, index: slot})
+		}
+		s.mu.Unlock()
+		s.logf("stage2 %s: arena %d: %d bots queued (team 1 %d, team 2 %d)", from, h.ArenaID,
+			len(h.Bots), countTeam(h.Bots, h.Player.Team), countTeam(h.Bots, h.Player.Team^3))
 	}
 
 	info, infoApp, err := s.arenaInfoApp(st, h, alloc, vehicles)
@@ -1919,8 +1927,159 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	if err := s.mintPost(conn, from, st, app); err != nil {
 		return err
 	}
+	// The client's new socket starts its counters at zero, so the ones this
+	// send just advanced go too. Leaving the old cumulative ack set makes
+	// `serveBulk` stamp the session dict with the battle's watermark
+	// (measured: 2823), which the client rejects as "ACK for packets not yet
+	// sent" — the flood's Account is created, the dict that carries
+	// `selectPlayerEntity + showGUI` is dropped, and the client hangs on the
+	// loading screen.
+	s.mu.Lock()
+	st.postSeq, st.postTag, st.postCumul = 0, 0, 0
+	s.mu.Unlock()
 	s.logf("stage2 %s: left arena %d — switchBaseApp %v, the client re-enters on stage-1", from, arena.ArenaID, s.cfg.Stage1)
 	return nil
+}
+
+// pendingBot is one synthetic vehicle waiting to be created.
+type pendingBot struct {
+	doc   ArenaPlayerDoc
+	id    uint32
+	pos   [3]float32
+	index int
+}
+
+// botsPerSweep is how many synthetic vehicles one sweep creates. Four packets
+// each, every 200 ms, keeps the client's reliable window clear.
+const botsPerSweep = 4
+
+// spawnPendingBots creates up to `botsPerSweep` of a session's queued synthetic
+// vehicles. It returns the number created.
+func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
+	s.mu.Lock()
+	if len(st.pendingBots) == 0 || st.arena == nil {
+		s.mu.Unlock()
+		return 0
+	}
+	n := botsPerSweep
+	if n > len(st.pendingBots) {
+		n = len(st.pendingBots)
+	}
+	batch := append([]pendingBot(nil), st.pendingBots[:n]...)
+	st.pendingBots = st.pendingBots[n:]
+	h := st.arena
+	addr := st.stage2Addr
+	seq, cumul := st.postSeq, st.postCumul
+	s.mu.Unlock()
+	if addr == nil {
+		return 0
+	}
+	created := 0
+	for _, b := range batch {
+		if _, _, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.index, seq, cumul); err != nil {
+			s.logf("arena %d: bot %s: %v", h.ArenaID, b.doc.Name, err)
+			continue
+		}
+		seq = nextSeqAfter(seq, 4)
+		created++
+	}
+	s.mu.Lock()
+	if seq > st.postSeq {
+		st.postSeq = seq
+	}
+	left := len(st.pendingBots)
+	s.mu.Unlock()
+	s.logf("arena %d: %d bots created, %d left", h.ArenaID, created, left)
+	return created
+}
+
+// createSyntheticVehicle puts one non-player Vehicle into the battle: the
+// entity, its cell properties, the AoI entry and its VEHICLES_INFO row.
+//
+// It sends four reliable packets on seq..seq+3, in the same order the player's
+// own tank uses (create, select, the cell-property run, enterAoI), and returns
+// the entity and the row the caller appends to the arena's vehicle list.
+func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, infoIndex int, seq, cumul uint32) (*Entity, entdef.Value, error) {
+	infoType := entdef.Alias("VEHICLES_INFO")
+	if infoType == nil {
+		return nil, entdef.Value{}, fmt.Errorf("no VEHICLES_INFO type")
+	}
+	e, err := s.arenaVehicleFor(st, h, doc, id, false)
+	if err != nil {
+		return nil, entdef.Value{}, err
+	}
+	// `publicInfo.index` is the tank's slot in its team: the team panel and
+	// the scoreboard order by it, and `arenaVehicleFor` writes 1 for the
+	// player's own tank.
+	if pi, ok := e.Props["publicInfo"]; ok {
+		e.Set("publicInfo", dictSet(pi, "index", entdef.Value{Kind: entdef.VUint, Uint: uint64(infoIndex)}))
+	}
+	props, err := EntityPropertyRunNames(e, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag")
+	if err != nil {
+		return nil, entdef.Value{}, err
+	}
+	create, err := EncodeCreateEntity(e.ID, uint16(e.Type.TypeID), VolatilePackerType, pos, 0, 0, 0, props)
+	if err != nil {
+		return nil, entdef.Value{}, err
+	}
+	if err := s.sendReliableEntity(conn, from, st, create, seq, cumul); err != nil {
+		return nil, entdef.Value{}, err
+	}
+	seq++
+	if sel, err := EncodeSelectEntity(e.ID); err == nil {
+		if err := s.sendReliableEntity(conn, from, st, sel, seq, cumul); err != nil {
+			return nil, entdef.Value{}, err
+		}
+		seq++
+	}
+	if upd, err := EncodeUpdateEntityExcept(e, true, vehicleDeltaSkip...); err == nil {
+		if err := s.sendReliableEntity(conn, from, st, upd, seq, cumul); err != nil {
+			return nil, entdef.Value{}, err
+		}
+		seq++
+	}
+	if enter, err := EncodeEnterAoI(e.ID, 0); err == nil {
+		if err := s.sendReliableEntity(conn, from, st, enter, seq, cumul); err != nil {
+			return nil, entdef.Value{}, err
+		}
+	}
+	return e, vehicleInfoValue(infoType, doc, id, infoIndex, pos[0], pos[2]), nil
+}
+
+// nextSeqAfter is the seq after n reliable sends.
+func nextSeqAfter(seq, n uint32) uint32 { return seq + n }
+
+// countTeam is how many of the bots are on one wire team.
+func countTeam(bots []ArenaPlayerDoc, team uint8) int {
+	n := 0
+	for i := range bots {
+		if bots[i].Team == team {
+			n++
+		}
+	}
+	return n
+}
+
+// botSpawn spreads the i-th of n synthetic tanks around a team's spawn point.
+//
+// The arena defs carry ONE spawn per team, so a fifteen-tank side has to be
+// laid out here: a ring of up to six around the point, then wider rings, so
+// they neither overlap nor stand in a line. The y is the caller's ground
+// height; the ring only moves x and z.
+func botSpawn(base [3]float32, i, n int) [3]float32 {
+	if n <= 0 {
+		return base
+	}
+	const perRing = 6
+	ring := i / perRing
+	slot := i % perRing
+	radius := 6.0 + float64(ring)*5.0
+	angle := 2 * math.Pi * (float64(slot) + 0.5*float64(ring%2)) / perRing
+	return [3]float32{
+		base[0] + float32(math.Cos(angle)*radius),
+		base[1],
+		base[2] + float32(math.Sin(angle)*radius),
+	}
 }
 
 // arenaVehicleIDs is every vehicle entity id in the battle: the player's own,

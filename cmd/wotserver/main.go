@@ -795,19 +795,38 @@ func arenaHandoff(a *server.Arena, p *server.ArenaPlayer) *login.ArenaHandoff {
 		// for the battle and distinct from the Avatar's, which is random.
 		VehicleID: uint32(a.ID)*100000 + uint32(p.AccountID) + 1,
 	}
-	// A solo battle has nobody in the other team, and the loading screen
-	// then shows one empty column. A synthetic opponent fills it: a TOG II,
-	// the UK tier 6 heavy, whose compact descriptor is the one the garage
-	// seeds (GB63_TOG_II, type 210).
+	// A solo battle is filled with the synthetic roster: 15 per side once the
+	// player is in, which is what the official server does when the queue is
+	// short. The tanks are real vehicles from the generated table (stock
+	// modules, default shell, default crew); the first enemy is the TOG II,
+	// because the server's damage model is that tank's collision boxes.
 	if len(a.Order) <= 1 {
-		h.Dummy = &login.ArenaPlayerDoc{
-			AccountID:        0,
-			Name:             "Dummy",
-			Team:             (p.Team + 1) ^ 3, // the other side: 1 <-> 2
-			VehicleCompDescr: []byte{0x51, 0xd2, 0x3f, 0x00, 0x36, 0x00, 0xcd, 0x00, 0x02, 0x00, 0x3c, 0x00, 0x24, 0x00, 0x00},
-			// The TOG II's own `hull/maxHealth` from its item defs.
-			MaxHealth: 1248,
+		playerTeam := p.Team + 1
+		enemyTeam := playerTeam ^ 3
+		bots := login.BotRoster(29, 14, p.VehicleCompDescr)
+		for i := range bots {
+			if bots[i].Team == 1 {
+				bots[i].Team = playerTeam
+			} else {
+				bots[i].Team = enemyTeam
+			}
 		}
+		// The damage target: the first enemy, forced to the TOG II so
+		// `applyShot`'s hull/turret boxes match the tank the client draws.
+		for i := range bots {
+			if bots[i].Team != enemyTeam {
+				continue
+			}
+			bots[i].Name = "Dummy"
+			bots[i].VehicleCompDescr = []byte{0x51, 0xd2, 0x3f, 0x00, 0x36, 0x00, 0xcd, 0x00, 0x02, 0x00, 0x3c, 0x00, 0x24, 0x00, 0x00}
+			// The TOG II's own `hull/maxHealth` from its item defs.
+			bots[i].MaxHealth = 1248
+			doc := bots[i]
+			h.Dummy = &doc
+			bots = append(bots[:i], bots[i+1:]...)
+			break
+		}
+		h.Bots = bots
 	}
 	for _, id := range a.Order {
 		other := a.Players[id]

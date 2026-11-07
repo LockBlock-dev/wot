@@ -364,6 +364,11 @@ type clientState struct {
 	dummyYaw       float32
 	dummyHealth    int
 	dummyMaxHealth int
+	// pendingBots are the synthetic vehicles still to create. The arena entry
+	// queues them and `sweepStage2` creates a few per sweep: a 30-tank battle
+	// is 116 reliable packets, and one burst overflows the client's channel
+	// window before the battle starts.
+	pendingBots []pendingBot
 	// dummyStickers is the dummy's accumulated `damageStickers` (the shell
 	// holes); every pierced hit re-sends the whole list.
 	dummyStickers []entdef.Value
@@ -3863,6 +3868,18 @@ func (s *BaseAppServer) mintPostLarge(conn Transport, to *net.UDPAddr, st *clien
 
 // sweepStage2 fires due post-flood ticks (genuine cadence 100 ms).
 func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
+	// Synthetic vehicles still to create, a few per sweep (see pendingBots).
+	s.mu.Lock()
+	var botStates []*clientState
+	for _, st := range s.byAddr {
+		if len(st.pendingBots) > 0 {
+			botStates = append(botStates, st)
+		}
+	}
+	s.mu.Unlock()
+	for _, st := range botStates {
+		s.spawnPendingBots(conn, st)
+	}
 	type tickJob struct {
 		st    *clientState
 		addr  *net.UDPAddr
