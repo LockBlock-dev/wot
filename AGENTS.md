@@ -1250,6 +1250,27 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `AttributeError: 'NoneType' object has no attribute 'components'` on every
   entry. The entry creates one `TeamInfo` (VehicleID+3) with `teamID` = the
   player's team; the client defaults the static components' properties.
+- **The damage UI is `Avatar.onBattleEvents` + `OwnVehicle.battleEventsSummary`,
+  not the health update.** The victim's `onHealthChanged` only moves the
+  health bar; the bottom-left damage log and its totals come from
+  `Avatar.onBattleEvents(ARRAY<BATTLE_EVENT>)` (`{eventType, targetID,
+  details, count}`, `details` = `BattleFeedbackCommon.packDamage`), and the
+  personal efficiency panel's damage counter reads
+  `OwnVehicle.battleEventsSummary` (`damage`/`trackAssist`/`radioAssist`/
+  `tankings`/`stunAssist`). Both are sent after every damaging hit.
+- **A kill is a NESTED `vehiclesInfo` update, not a re-sent list.**
+  `AvatarVehiclesInfo` has no `set_vehiclesInfo` handler: a whole-value update
+  sets the attribute and calls nothing, so the tab keeps the victim alive, the
+  kill count stays 0 and no kill message appears. The client's handlers are
+  `setNested_vehiclesInfo` (buffers one field's diff) and the `__generation`
+  bump that flushes it into `ClientArena` (`setVehInfo_isAlive` →
+  `updateVehicleIsAlive` → `onVehicleKilled`). The wire is NRL record kind 1:
+  `[node u16 BE][1][len packed-u24][compressed path][value]`, the path
+  `[1][prop][1][elem][0][field]` bits MSB-first, each index
+  `bitsRequired(count)` wide (`EncodeNrlNestedField`). Send the victim's
+  `isAlive`/`deathInfo` + a generation, then the shooter's `frags`/`stFrags` +
+  another generation (the diff buffer is per field name, so each vehicle needs
+  its own flush).
 - **A STANDALONE property element is framed by the property's own declared
   length, not by `updateEntity`'s u16.** `EntityDispatch.Properties[i].Length`
   is the client's element length: a fixed-size value (`health`, INT16) is
