@@ -1176,7 +1176,11 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   damage ±25%, and streams `Vehicle.showDamageFromShot`/`health`/
   `onHealthChanged` plus `Avatar.showShotResults`/`showTracer`/`stopTracer`.
   The exposed ids are the defs' indexes; `selectEntity(dummy)` must precede the
-  Vehicle calls and `selectPlayerEntity` the Avatar's.
+  Vehicle calls and `selectPlayerEntity` the Avatar's, in the SAME packet.
+  `health` is a bare `[0xB5][i16]` — `EncodePropertyUpdate`'s
+  `[id][u16 len][value]` makes the client read the length as the health and
+  the value's low byte as the next element id (0x9E → exposed method 80 out
+  of range on the 11-method Vehicle, then a crash).
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the

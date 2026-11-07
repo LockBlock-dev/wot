@@ -475,33 +475,39 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	segment := encodeHitSegment(dummyBounds(), res.Local, res.LocalDir, 1, res.Effect)
 	point := hitPointValue(segment, hitParams(sh, res.Effect))
 
-	var els [][]byte
-	// Select the dummy, then its damage and health.
+	// Two packets, one per selected entity: the client's selection applies to
+	// the elements that follow it in the same bundle, so the dummy's methods
+	// and the Avatar's must not share a packet.
+	var dummyApp, avatarApp []byte
 	if el, err := EncodeSelectEntity(dummyID); err == nil {
-		els = append(els, el)
+		dummyApp = append(dummyApp, el...)
 	}
 	if el, err := showDamageFromShotElement(dummy, attacker, point, sh.EffectsIndex, damage, uint8(damageFactor), sh.Speed); err == nil {
-		els = append(els, el)
+		dummyApp = append(dummyApp, el...)
 	}
 	if damage > 0 {
 		dummy.SetInt("health", int64(newHealth))
-		if el, err := EncodePropertyUpdate(dummy, "health"); err == nil {
-			els = append(els, el)
-		}
+		// A bare property is `[id][value]`, with NO length:
+		// `EncodePropertyUpdate`'s `[id][u16 len][value]` is the
+		// `updateEntity` run's form, and sending it standalone makes the
+		// client read the length as the health and the value's low byte as
+		// the next element id (health 926 = 0x039E → element `0x9E` =
+		// exposed method 80, out of range on the 11-method Vehicle).
+		dummyApp = append(dummyApp, EncodeBareU16(elVehicleHealth, uint16(newHealth))...)
 		if el, err := onHealthChangedElement(dummy, newHealth, oldHealth, attacker); err == nil {
-			els = append(els, el)
+			dummyApp = append(dummyApp, el...)
 		}
 	}
 	// The shooter's own view: the shell and the hit marker.
-	els = append(els, EncodeSelectPlayerEntity())
+	avatarApp = append(avatarApp, EncodeSelectPlayerEntity()...)
 	if el, err := showTracerElement(avatar, attacker, shotID, sh, marker.Position, marker.Velocity); err == nil {
-		els = append(els, el)
+		avatarApp = append(avatarApp, el...)
 	}
 	if el, err := stopTracerElement(avatar, shotID, res.Point); err == nil {
-		els = append(els, el)
+		avatarApp = append(avatarApp, el...)
 	}
 	if el, err := showShotResultsElement(avatar, dummyID, flags); err == nil {
-		els = append(els, el)
+		avatarApp = append(avatarApp, el...)
 	}
 
 	s.mu.Lock()
@@ -509,9 +515,12 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	s.mu.Unlock()
 
 	st.sendMu.Lock()
-	for _, el := range els {
+	for _, app := range [][]byte{dummyApp, avatarApp} {
+		if len(app) == 0 {
+			continue
+		}
 		seq, cumul := s.nextSeq(st)
-		if err := s.sendReliableLocked(conn, from, st, el, seq, cumul); err != nil {
+		if err := s.sendReliableLocked(conn, from, st, app, seq, cumul); err != nil {
 			s.logf("arena %d: shot: send failed: %v", arenaID, err)
 			break
 		}

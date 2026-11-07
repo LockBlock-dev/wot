@@ -1,6 +1,7 @@
 package login
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -267,5 +268,21 @@ func TestDispersionShellData(t *testing.T) {
 	}
 	if d.Shell.EffectsIndex == 0 {
 		t.Fatalf("effects index = 0, want the shot_effects position")
+	}
+}
+
+// TestHealthIsABareProperty pins the `Vehicle.health` update: a bare
+// `[0xA7+14][i16]`, not the `updateEntity` run's `[id][u16 len][value]`.
+// With the length the client reads it as the health and the value's low
+// byte as the next element id (health 926 = 0x039E → 0x9E = exposed method
+// 80, out of range on the 11-method Vehicle).
+func TestHealthIsABareProperty(t *testing.T) {
+	got := EncodeBareU16(elVehicleHealth, 926)
+	want := []byte{0xB5, 0x9E, 0x03}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("health element = % x, want % x", got, want)
+	}
+	if elVehicleHealth != 0xB5 {
+		t.Fatalf("elVehicleHealth = %#x, want 0xB5 (0xA7 + 14)", elVehicleHealth)
 	}
 }
