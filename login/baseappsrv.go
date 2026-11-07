@@ -1438,7 +1438,12 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		app = append(app, EncodeTickSync(0x40)...)
 		app = append(app, pair...)
 		s.checkWire(app)
-		if err := s.sendReliable(conn, from, st, app, seq, cumul); err != nil {
+		// Unreliable: the client's `LoginReplyFilter` passes only the first
+		// copy of a login reply (a retransmission's fresh prefix changes the
+		// byte at offset 146), so a resent `CreateBasePlayer` is dropped as
+		// "unexpected packet on external interface" and the client
+		// disconnects. Nothing is retransmitted on this stream.
+		if err := s.sendUnreliableLocked(conn, from, st, app); err != nil {
 			return seq, err
 		}
 		s.logf("stage2 %s: CreateBasePlayer + showGUI %dB (entity %d, Account, %d components, seq %d) % x",
@@ -3544,6 +3549,22 @@ func (s *BaseAppServer) mintPost(conn Transport, to *net.UDPAddr, st *clientStat
 	}
 	s.resend.track(st.resendKey, to.String(), seq, pkt)
 	return nil
+}
+
+// mintPostUnreliable is mintPost on the unreliable stream: the tag is
+// allocated the same way, but nothing is tracked for retransmission. The
+// leave reset and the re-entered Account use it because the client's
+// `LoginReplyFilter` drops a retransmitted login reply and disconnects.
+func (s *BaseAppServer) mintPostUnreliable(conn Transport, to *net.UDPAddr, st *clientState, app []byte) error {
+	if len(app) < 2 {
+		return fmt.Errorf("wotserver: post-flood frame missing its tag slot")
+	}
+	s.mu.Lock()
+	tag, _, _ := allocPost(st)
+	s.mu.Unlock()
+	app[1] = tag
+	s.checkWire(app)
+	return s.sendUnreliableLocked(conn, to, st, app)
 }
 
 // mintPostLarge sends app as a reliable frame, splitting it into a fragment
