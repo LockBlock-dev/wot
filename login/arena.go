@@ -1951,6 +1951,10 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	// loading screen.
 	s.mu.Lock()
 	st.postSeq, st.postTag, st.postCumul = 0, 0, 0
+	// The re-entry is redirected to the second BaseApp: the client keeps a
+	// packet receiver per address, and the battle's watermark would reject
+	// the fresh login's sequence numbers on the same one.
+	st.reentry = true
 	s.mu.Unlock()
 	s.logf("stage2 %s: left arena %d — switchBaseApp %v, the client re-enters on stage-1", from, arena.ArenaID, s.cfg.Stage1)
 	return nil

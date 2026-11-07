@@ -75,6 +75,7 @@ var (
 	flagPrivKey     *string
 	flagS1          *string
 	flagS2          *string
+	flagS3          *string
 	flagFlood       *string
 	flagFloodKey    *string
 	flagFloodFlow   *string
@@ -108,6 +109,7 @@ func main() {
 		"PEM RSA private key for LogOnParams decryption (pairs with mods/custom-server-mod)")
 	flagS1 = flag.String("s1", "127.0.0.1:32850", "BaseApp stage-1 listener host:port (the LOGGED_ON record shows this; \"\" = LoginApp only)")
 	flagS2 = flag.String("s2", "127.0.0.1:32851", "BaseApp stage-2 listener host:port (the [44] redirect target; bind inside 32810-32999)")
+	flagS3 = flag.String("s3", "127.0.0.1:32852", "second BaseApp listener host:port: where a leave's re-entry is redirected (\"\" = reuse -s2)")
 	flagSettings = flag.String("settings", "wotserver.settings.json", "JSON lobby server-settings document (the client's initialServerSettings; \"\" = empty, the client's defaults)")
 	// The defs must be the build the client runs: they are the property
 	// tables the client decodes entity data against, and a type that
@@ -304,7 +306,7 @@ func main() {
 
 	// BaseApp half: bind stage-1 (+ stage-2) unless -s1 is empty.
 	var base *login.BaseAppServer
-	var s1conn, s2conn *net.UDPConn
+	var s1conn, s2conn, s3conn *net.UDPConn
 	if *flagS1 != "" {
 		// Squads live in memory: a squad is a live session object, not
 		// account state, so a restart drops them (the client re-creates
@@ -409,8 +411,8 @@ func main() {
 			Census:  matchmaking.Census,
 			Handoff: matchmaking.Handoff,
 		}
-		base, s1conn, s2conn = startBaseApp(baseAppArgs{
-			s1: *flagS1, s2: *flagS2,
+		base, s1conn, s2conn, s3conn = startBaseApp(baseAppArgs{
+			s1: *flagS1, s2: *flagS2, s3: *flagS3,
 			defs:      *flagDefs,
 			settings:  *flagSettings,
 			cbp:       *flagCBP,
@@ -533,11 +535,19 @@ func main() {
 		}()
 	}
 	if base != nil {
-		fmt.Printf("wotserver: BaseApp stage-1 %s, stage-2 %s (redirect target)\n", s1conn.LocalAddr(), s2conn.LocalAddr())
+		fmt.Printf("wotserver: BaseApp stage-1 %s, stage-2 %s (redirect target)", s1conn.LocalAddr(), s2conn.LocalAddr())
+		if s3conn != nil {
+			fmt.Printf(", stage-3 %s (leave re-entry)", s3conn.LocalAddr())
+		}
+		fmt.Println()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := base.Serve(ctx, s1conn, s2conn); err != nil && err != context.Canceled {
+			var leaveConn *net.UDPConn
+			if s3conn != nil {
+				leaveConn = s3conn
+			}
+			if err := base.ServeAll(ctx, s1conn, s2conn, leaveConn); err != nil && err != context.Canceled {
 				errCh <- fmt.Errorf("baseapp: %w", err)
 			}
 		}()
@@ -557,13 +567,13 @@ func main() {
 // verbatim) and must sit in the manager window for our own client.
 // baseAppArgs groups the carrier wiring so the call site stays readable.
 type baseAppArgs struct {
-	s1, s2   string
-	defs     string
-	settings string
-	cbp      bool
-	queue    *login.QueueHooks
-	patch    func([]byte) ([]byte, error)
-	verbose  bool
+	s1, s2, s3 string
+	defs       string
+	settings   string
+	cbp        bool
+	queue      *login.QueueHooks
+	patch      func([]byte) ([]byte, error)
+	verbose    bool
 	// xmppToken mints the chat credential the client asks for with
 	// requestToken(XMPPCS); nil leaves the request unanswered.
 	xmppToken func(int64) string
@@ -581,7 +591,7 @@ type baseAppArgs struct {
 	arenas *login.ArenaHooks
 }
 
-func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPConn) {
+func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPConn, *net.UDPConn) {
 	s1arg, s2arg, verbose := a.s1, a.s2, a.verbose
 	l1, err := net.ResolveUDPAddr("udp", s1arg)
 	if err != nil {
@@ -600,6 +610,22 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 		fatal(err)
 	}
 	redirect := advertiseOf(s2conn)
+	// The second BaseApp: a leave's re-entry is redirected here, because the
+	// client keeps a packet receiver per address and the battle's watermark
+	// would reject a fresh login's sequence numbers on the same one.
+	var s3conn *net.UDPConn
+	var redirectLeave *net.UDPAddr
+	if a.s3 != "" {
+		l3, err := net.ResolveUDPAddr("udp", a.s3)
+		if err != nil {
+			fatal(fmt.Errorf("wotserver: -s3 resolve: %w", err))
+		}
+		s3conn, err = net.ListenUDP("udp", l3)
+		if err != nil {
+			fatal(err)
+		}
+		redirectLeave = advertiseOf(s3conn)
+	}
 	var settings, settingsSmall []byte
 	if a.settings != "" {
 		settings, err = server.SettingsFromJSON(a.settings)
@@ -633,6 +659,7 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 	}
 	base, err := login.NewBaseAppServer(login.BaseAppConfig{
 		Redirect:      redirect,
+		RedirectLeave: redirectLeave,
 		Stage1:        advertiseOf(s1conn),
 		Settings:      settings,
 		SettingsSmall: settingsSmall,
@@ -654,7 +681,7 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 	if err != nil {
 		fatal(err)
 	}
-	return base, s1conn, s2conn
+	return base, s1conn, s2conn, s3conn
 }
 
 // sortedKeys returns a map's keys in order, for a stable log line.

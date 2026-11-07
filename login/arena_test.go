@@ -640,6 +640,13 @@ func TestLeaveArenaSwitchesBackToStage1(t *testing.T) {
 		t.Errorf("post counters = seq %d tag %d cumul %d, want all zero",
 			st.postSeq, st.postTag, st.postCumul)
 	}
+	// The re-entry's [44] must name the SECOND BaseApp: the client keeps a
+	// packet receiver per address, and the battle's watermark on the same one
+	// makes the fresh login's seq 1..N "missing packets" → REASON_CORRUPTED_
+	// PACKET → `MF_ASSERT_DEV FAILED: pEntity` (a crash, measured).
+	if !st.reentry {
+		t.Error("the leave did not mark the session for the second BaseApp")
+	}
 }
 
 // TestLeaveArenaResetIsReliable pins the fallback leave (no stage-1 endpoint):

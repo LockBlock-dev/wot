@@ -38,6 +38,10 @@ ADDR="${ADDR:-127.0.0.1:20016}"
 # parseRedirectAt guard skips them.
 S1="${S1:-127.0.0.1:32850}"
 S2="${S2:-127.0.0.1:32851}"
+# The second BaseApp: a leave's re-entry is redirected here, because the client
+# keeps a packet receiver per address and the battle's watermark would reject a
+# fresh login's sequence numbers on the same one.
+S3="${S3:-127.0.0.1:32852}"
 DB="${DB:-$ROOT/wotserver.db}"
 # The entity defs MUST be the build the client runs: the property tables are
 # what the client decodes entity data against, and a type that changed between
@@ -96,7 +100,7 @@ fi
 
 stop_running
 
-printf 'restart-server: LoginApp %s, stage-1 %s, stage-2 %s\n' "$ADDR" "$S1" "$S2"
+printf 'restart-server: LoginApp %s, stage-1 %s, stage-2 %s, stage-3 %s\n' "$ADDR" "$S1" "$S2" "$S3"
 printf 'restart-server: log %s\n' "$LOG"
 
 # GARAGE_ALL defaults to on; 0 disables it. Build the flag as a variable:
@@ -113,7 +117,7 @@ GARAGE_ALL_FLAG=-garage-all
 setsid nohup "$BIN" \
 	-addr "$ADDR" \
 	-privkey "$PRIVKEY" \
-	-s1 "$S1" -s2 "$S2" \
+	-s1 "$S1" -s2 "$S2" -s3 "$S3" \
 	-defs "$DEFS" \
 	-settings "$SETTINGS" \
 	-xmpp "$XMPP" \

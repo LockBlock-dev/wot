@@ -159,6 +159,16 @@ type GarageItem struct {
 type BaseAppConfig struct {
 	Redirect *net.UDPAddr
 
+	// RedirectLeave is where a RE-ENTRY is redirected: the leave sends the
+	// client back to stage-1, and the [44] it gets there must name a
+	// DIFFERENT BaseApp than the connection the battle ran on. Reusing the
+	// battle's address makes the client keep its PacketReceiver for that
+	// address, so the fresh login's seq 1..N arrive behind the battle's
+	// watermark (measured: "Bundle (#1,#5) is missing packets before #2",
+	// REASON_CORRUPTED_PACKET, then `MF_ASSERT_DEV FAILED: pEntity` and a
+	// crash). nil = use Redirect.
+	RedirectLeave *net.UDPAddr
+
 	// Stage1 is the stage-1 endpoint the client is sent back to when it
 	// leaves a battle. The leave is a BaseApp re-entry, not a login reply on
 	// the battle connection: the client closes that connection and
@@ -355,6 +365,13 @@ type clientState struct {
 	// Avatar so the battle app has something to attach the camera and the
 	// player panel to.
 	vehicle *Entity
+	// conn is the stage-2 socket this session is served on. A leave's
+	// re-entry arrives on a second listener, and every tick, resend and
+	// answer must go back out of the socket the client is talking to.
+	conn Transport
+	// reentry marks a session that came back through stage-1 after a leave,
+	// so the redirect names the second BaseApp endpoint.
+	reentry bool
 	// targets are the synthetic tanks the player's shells can hit: the dummy
 	// first, then the bots. Each carries its own entity, spawn, health,
 	// shell-hole list and module state, so a shot resolves against whichever
@@ -809,24 +826,38 @@ func answerApp(small []byte) []byte {
 
 // Serve runs both listeners until ctx cancels.
 func (s *BaseAppServer) Serve(ctx context.Context, stage1, stage2 Transport) error {
+	return s.ServeAll(ctx, stage1, stage2, nil)
+}
+
+// ServeAll is Serve plus the second BaseApp endpoint a leave's re-entry is
+// redirected to. leaveStage2 may be nil, in which case the re-entry reuses
+// Redirect (and the client's packet receiver sees the battle's watermark).
+func (s *BaseAppServer) ServeAll(ctx context.Context, stage1, stage2, leaveStage2 Transport) error {
 	if stage1 == nil || stage2 == nil {
 		return fmt.Errorf("wotserver: baseapp needs both listeners")
 	}
+	conns := []Transport{stage1, stage2}
+	if leaveStage2 != nil {
+		conns = append(conns, leaveStage2)
+	}
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
-	wg.Add(2)
+	errCh := make(chan error, len(conns))
+	wg.Add(len(conns))
 	go func() {
 		defer wg.Done()
 		if err := serveStage1(s, ctx, stage1); err != nil && err != context.Canceled {
 			errCh <- fmt.Errorf("stage1: %w", err)
 		}
 	}()
-	go func() {
-		defer wg.Done()
-		if err := serveStage2(s, ctx, stage2); err != nil && err != context.Canceled {
-			errCh <- fmt.Errorf("stage2: %w", err)
-		}
-	}()
+	for _, c := range conns[1:] {
+		c := c
+		go func() {
+			defer wg.Done()
+			if err := serveStage2(s, ctx, c); err != nil && err != context.Canceled {
+				errCh <- fmt.Errorf("stage2: %w", err)
+			}
+		}()
+	}
 	wg.Wait()
 	select {
 	case err := <-errCh:
@@ -1022,7 +1053,17 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 			s.logf("stage1 tail: %v", err)
 			continue
 		}
-		red, err := redirectPacket(j.blockKey, s.cfg.Redirect)
+		// A re-entry goes to the OTHER BaseApp: the client keeps a packet
+		// receiver per address, and the battle's watermark would reject the
+		// fresh login's sequence numbers on the same one.
+		target := s.cfg.Redirect
+		s.mu.Lock()
+		if j.st.reentry && s.cfg.RedirectLeave != nil {
+			target = s.cfg.RedirectLeave
+			j.st.reentry = false
+		}
+		s.mu.Unlock()
+		red, err := redirectPacket(j.blockKey, target)
 		if err != nil {
 			s.logf("stage1 tail: %v", err)
 			continue
@@ -1032,7 +1073,7 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 			continue
 		}
 		s.logf("stage1 %s: tick %dB + space %dB (%q) + redirect %dB → %s",
-			j.addr, len(tick), len(space), s.cfg.Stage1Space, len(red), s.cfg.Redirect)
+			j.addr, len(tick), len(space), s.cfg.Stage1Space, len(red), target)
 	}
 }
 
@@ -1221,6 +1262,7 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 			return nil
 		}
 		s.mu.Lock()
+		st.conn = conn
 		if st.stage2Key == 0 {
 			nk, err := mintRotationKey(rq.sessionKey)
 			if err != nil {
@@ -3885,6 +3927,15 @@ func (s *BaseAppServer) mintPostLarge(conn Transport, to *net.UDPAddr, st *clien
 
 // sweepStage2 fires due post-flood ticks (genuine cadence 100 ms).
 func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
+	// Every send goes out of the socket its session arrived on: a leave's
+	// re-entry is served on the second listener, and a tick or a resend from
+	// the first one would come from the wrong source port.
+	connFor := func(st *clientState) Transport {
+		if st != nil && st.conn != nil {
+			return st.conn
+		}
+		return conn
+	}
 	// Synthetic vehicles still to create, a few per sweep (see pendingBots).
 	s.mu.Lock()
 	var botStates []*clientState
@@ -3895,7 +3946,7 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 	}
 	s.mu.Unlock()
 	for _, st := range botStates {
-		s.spawnPendingBots(conn, st)
+		s.spawnPendingBots(connFor(st), st)
 	}
 	type tickJob struct {
 		st    *clientState
@@ -3977,7 +4028,7 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		if a.addr == nil {
 			continue
 		}
-		next, err := s.enterArenaSpace(conn, a.addr, a.st, a.h, a.seq, a.cum)
+		next, err := s.enterArenaSpace(connFor(a.st), a.addr, a.st, a.h, a.seq, a.cum)
 		if err != nil {
 			s.logf("stage2 %s: arena space (sweep): %v", a.addr, err)
 			continue
@@ -3997,7 +4048,7 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		if err != nil {
 			continue
 		}
-		if _, err := conn.WriteToUDP(pkt, j.addr); err != nil {
+		if _, err := connFor(j.st).WriteToUDP(pkt, j.addr); err != nil {
 			continue
 		}
 		s.resend.track(j.st.resendKey, j.addr.String(), j.seq, pkt)
@@ -4010,7 +4061,10 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		if err != nil {
 			continue
 		}
-		if _, err := conn.WriteToUDP(job.Pkt, addr); err != nil {
+		s.mu.Lock()
+		st := s.byAddr[job.Addr]
+		s.mu.Unlock()
+		if _, err := connFor(st).WriteToUDP(job.Pkt, addr); err != nil {
 			continue
 		}
 		s.logf("stage2 %s: resent reliable seq %d (%dB)", addr, job.Seq, len(job.Pkt))
