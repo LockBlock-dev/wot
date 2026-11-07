@@ -13,7 +13,7 @@ func TestHullDrivesForward(t *testing.T) {
 	h.Flags = moveForward
 	// 20 s at 4 m/s² reaches 37 m/s in ~9.25 s, then holds.
 	for i := 0; i < 200; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if math.Abs(float64(h.Speed-37)) > 0.01 {
 		t.Fatalf("speed = %v, want 37", h.Speed)
@@ -32,16 +32,24 @@ func TestHullTurns(t *testing.T) {
 	h := hull{Limits: motionLimits{SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5}}
 	h.Flags = moveRotateRight
 	for i := 0; i < 10; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
-	if math.Abs(float64(h.Direction[2]-0.5)) > 1e-4 {
-		t.Fatalf("yaw = %v, want 0.5 (0.5 rad/s for 1 s)", h.Direction[2])
+	// The rate rises over `rotationRise`, so a second of turning covers a
+	// little less than the full 0.5 rad; the steady rate is the chassis's.
+	if math.Abs(float64(h.YawRate-0.5)) > 1e-4 {
+		t.Fatalf("yawRate = %v, want 0.5 rad/s", h.YawRate)
+	}
+	if h.Direction[2] < 0.4 || h.Direction[2] > 0.5 {
+		t.Fatalf("yaw = %v, want ~0.45 after a second of turning", h.Direction[2])
 	}
 	// Backing up steers like a car: right swings the rear right, so the nose
 	// goes left.
 	h.Direction[2] = 0
+	h.YawRate = 0
 	h.Flags = moveRotateRight | moveBackward
-	h.step(0.1)
+	for i := 0; i < 5; i++ {
+		h.step(0.1, groundFirm)
+	}
 	if h.Direction[2] >= 0 {
 		t.Fatalf("yaw = %v, want negative when reversing right", h.Direction[2])
 	}
@@ -66,12 +74,12 @@ func TestHullEngineModeAndGear(t *testing.T) {
 		t.Fatalf("idle engine = (%d, %v), want (0, %v)", gear, rpm, idleRPM)
 	}
 	h.Flags = moveForward
-	h.step(0.1)
+	h.step(0.1, groundFirm)
 	if got := h.engineMode(); got[0] != 3 || got[1] != moveForward {
 		t.Fatalf("accelerating engineMode = %v, want {3, %d}", got, moveForward)
 	}
 	for i := 0; i < 200; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if got := h.engineMode(); got[0] != 2 {
 		t.Fatalf("cruising engineMode = %v, want mode 2", got)
@@ -222,7 +230,7 @@ func TestHullHandbrakeSlidesInsteadOfStopping(t *testing.T) {
 	h := hull{Limits: motionLimits{SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5}}
 	h.Flags = moveForward
 	for i := 0; i < 100; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if h.Speed < 30 {
 		t.Fatalf("speed = %v, want the tank up to speed before the handbrake", h.Speed)
@@ -231,7 +239,7 @@ func TestHullHandbrakeSlidesInsteadOfStopping(t *testing.T) {
 	// steering still bites while the hull is moving, and the velocity lags.
 	h.Flags = moveForward | moveRotateRight | moveBlockTracks
 	yaw := h.Direction[2]
-	h.step(0.1)
+	h.step(0.1, groundFirm)
 	if h.YawRate == 0 {
 		t.Fatal("yawRate = 0, want the steering to bite while moving")
 	}
@@ -244,14 +252,24 @@ func TestHullHandbrakeSlidesInsteadOfStopping(t *testing.T) {
 	// The velocity is not along the heading: the hull is sliding. Keep the
 	// handbrake on and the slide builds instead of being gripped away.
 	for i := 0; i < 10; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if lateral := lateralSpeed(&h); abs32(lateral) < 3 {
 		t.Fatalf("lateral speed = %v, want a slide", lateral)
 	}
-	// The brake still wins in the end.
+	// With the throttle still held it pivots on the blocked inner track at
+	// the pivot speed — `PIVOT_RADIUS` in the reference — rather than
+	// stopping dead.
 	for i := 0; i < 100; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
+	}
+	if want := h.Limits.RotationSpeed * rotationOnMove * pivotRadius; math.Abs(float64(h.Speed-want)) > 0.01 {
+		t.Fatalf("speed = %v, want the pivot speed %v", h.Speed, want)
+	}
+	// Let the throttle go and the brake does stop it.
+	h.Flags = moveRotateRight | moveBlockTracks
+	for i := 0; i < 100; i++ {
+		h.step(0.1, groundFirm)
 	}
 	if h.Speed != 0 || h.Velocity != [2]float32{} {
 		t.Fatalf("speed = %v velocity = %v, want the hull stopped", h.Speed, h.Velocity)
@@ -259,7 +277,7 @@ func TestHullHandbrakeSlidesInsteadOfStopping(t *testing.T) {
 	// Releasing it lets the tank drive again.
 	h.Flags = moveForward
 	for i := 0; i < 20; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if h.Speed <= 0 {
 		t.Fatalf("speed = %v, want the tank moving again after the handbrake", h.Speed)
@@ -274,7 +292,7 @@ func TestHullHandbrakeCannotPivotInPlace(t *testing.T) {
 	h.Flags = moveRotateRight | moveBlockTracks
 	yaw := h.Direction[2]
 	for i := 0; i < 50; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if h.Direction[2] != yaw {
 		t.Fatalf("yaw = %v, want %v (no pivot with the tracks locked)", h.Direction[2], yaw)
@@ -287,11 +305,11 @@ func TestHullGripHoldsTheTurn(t *testing.T) {
 	h := hull{Limits: motionLimits{SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5}}
 	h.Flags = moveForward
 	for i := 0; i < 100; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	h.Flags = moveForward | moveRotateRight
 	for i := 0; i < 10; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 	}
 	if lateral := lateralSpeed(&h); abs32(lateral) > 2 {
 		t.Fatalf("lateral speed = %v, want the tracks to hold the turn", lateral)
@@ -327,7 +345,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	}
 	// Drive to the cliff.
 	for i := 0; i < 40 && !h.Airborne; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 		if !h.settle(tm, 0.1) {
 			t.Fatalf("off the map at tick %d", i)
 		}
@@ -338,7 +356,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	y0 := h.Position[1]
 	// Falling: the height drops and the vertical speed is negative.
 	for i := 0; i < 5; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 		if !h.settle(tm, 0.1) {
 			t.Fatalf("off the map while falling at tick %d", i)
 		}
@@ -351,7 +369,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	}
 	// It lands on the lower ground.
 	for i := 0; i < 40 && h.Airborne; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 		if !h.settle(tm, 0.1) {
 			t.Fatalf("off the map while landing at tick %d", i)
 		}
@@ -390,7 +408,7 @@ func TestHullFollowsASteepSlopeWithoutBouncing(t *testing.T) {
 	// leave the ground for real.
 	maxOff := float32(0)
 	for i := 0; i < 30; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 		if !h.settle(tm, 0.1) {
 			t.Fatalf("off the map at tick %d", i)
 		}
@@ -422,12 +440,54 @@ func TestHullJumpsOffASmallLedge(t *testing.T) {
 		t.Fatal("no ground at spawn")
 	}
 	for i := 0; i < 40 && !h.Airborne; i++ {
-		h.step(0.1)
+		h.step(0.1, groundFirm)
 		if !h.settle(tm, 0.1) {
 			t.Fatalf("off the map at tick %d", i)
 		}
 	}
 	if !h.Airborne {
 		t.Fatal("the hull followed a 2 m ledge instead of jumping off it")
+	}
+}
+
+// TestHullTurnsSlowerOnSoftGround pins the ground materials: the chassis'
+// rotation speed is its firm-ground one, and the softer grounds turn slower as
+// their `terrainResistance` rises.
+func TestHullTurnsSlowerOnSoftGround(t *testing.T) {
+	limits := motionLimits{
+		SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5,
+		RotationSpeedByGround: [3]float32{0.5, 0.4, 0.25},
+	}
+	turn := func(ground uint8) float32 {
+		h := hull{Limits: limits}
+		h.Flags = moveRotateRight
+		for i := 0; i < 30; i++ {
+			h.step(0.1, ground)
+		}
+		return h.YawRate
+	}
+	if firm, soft := turn(groundFirm), turn(groundSoft); !(firm > soft) {
+		t.Fatalf("firm yaw rate %v, soft %v: want firm to turn faster", firm, soft)
+	}
+	if got := turn(groundSoft); math.Abs(float64(got-0.25)) > 1e-4 {
+		t.Fatalf("soft yaw rate = %v, want 0.25", got)
+	}
+}
+
+// TestHullStopsAtTheMapEdge pins `keepWithin`: the hull is clamped inside the
+// bounds and the speed into the edge stops.
+func TestHullStopsAtTheMapEdge(t *testing.T) {
+	h := hull{Limits: motionLimits{SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5}}
+	h.Flags = moveForward
+	h.Position = [3]float32{0, 0, 98}
+	for i := 0; i < 50; i++ {
+		h.step(0.1, groundFirm)
+		h.keepWithin(-100, -100, 100, 100)
+	}
+	if h.Position[2] > 100-boundsMargin+0.001 {
+		t.Fatalf("z = %v, want it clamped inside the bounds", h.Position[2])
+	}
+	if h.Velocity[1] > 0 {
+		t.Fatalf("velocity z = %v, want the speed into the edge stopped", h.Velocity[1])
 	}
 }

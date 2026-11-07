@@ -693,7 +693,7 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// `trackTurret`. The terrain is what the hull rests on, so it is resolved
 	// once for the battle rather than per tick.
 	if haveSpec {
-		go s.trackTurret(conn, from, st, h.ArenaID, spec, TerrainFor(h.Map))
+		go s.trackTurret(conn, from, st, h.ArenaID, spec, TerrainFor(h.Map), ArenaDefFor(h.Map))
 	}
 	s.logf("stage2 %s: Vehicle %d created (createEntityDetailed %dB, selectEntity, updateEntity %dB, enterAoI)",
 		from, vehicle.ID, len(create), len(update))
@@ -906,6 +906,20 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 			s.mu.Unlock()
 			s.logf("stage2 %s: OwnVehicle attached to %d as NRL id %d (%dB, node %d, %d props, %d methods)",
 				from, vehicle.ID, OwnVehicleNrlID, len(ownApp), ownComp.Node, ownComp.Props, ownComp.Methods)
+			// The player's own health as the HUD reads it: the component's
+			// `vehicleHealthInfo`, separate from the `Vehicle.health`
+			// property every client sees.
+			maxHealth := h.Player.MaxHealth
+			if maxHealth <= 0 {
+				maxHealth = 1000
+			}
+			if el, err := vehicleHealthInfoElement(ownComp, vehicle.ID, maxHealth, true); err == nil {
+				if err := s.sendReliableEntity(conn, from, st, el, seq, cumul); err != nil {
+					return seq, err
+				}
+				seq++
+				s.logf("stage2 %s: OwnVehicle.vehicleHealthInfo = %d (%dB)", from, maxHealth, len(el))
+			}
 		}
 	}
 

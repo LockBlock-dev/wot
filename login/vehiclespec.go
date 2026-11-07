@@ -53,6 +53,11 @@ type gunSpec struct {
 	// Dispersion is the gun's dispersion model, from the same defs. It is
 	// what the NRL gun marker's `dispersionAngle` is computed from.
 	Dispersion dispersionSpec
+	// MinPitchCurve and MaxPitchCurve are the gun's elevation limits per
+	// turret yaw: the defs' `pitchLimits` are curves, not one range, so a gun
+	// that clears its hull at the front can still depress over the side.
+	MinPitchCurve pitchCurve
+	MaxPitchCurve pitchCurve
 }
 
 // shellSpec is the default shell's damage model: the gun's mounted `shots`
@@ -207,16 +212,19 @@ func vehicleGunSpeeds(compDescr []byte) (gunSpec, bool) {
 	if err != nil {
 		return gunSpec{}, false
 	}
+	curvesLo, curvesHi, _ := pitchCurvesIn(pkg, base+r.Vehicle+".xml", turret, gun)
 	s := gunSpec{
-		Turret:     turretDeg * math.Pi / 180,
-		Gun:        gunDeg * math.Pi / 180,
-		YawMin:     yawMin * math.Pi / 180,
-		YawMax:     yawMax * math.Pi / 180,
-		PitchMin:   pitchMin,
-		PitchMax:   pitchMax,
-		GunHeight:  gunHeight,
-		Limits:     limits,
-		Dispersion: disp,
+		Turret:        turretDeg * math.Pi / 180,
+		Gun:           gunDeg * math.Pi / 180,
+		YawMin:        yawMin * math.Pi / 180,
+		YawMax:        yawMax * math.Pi / 180,
+		PitchMin:      pitchMin,
+		PitchMax:      pitchMax,
+		GunHeight:     gunHeight,
+		Limits:        limits,
+		Dispersion:    disp,
+		MinPitchCurve: curvesLo,
+		MaxPitchCurve: curvesHi,
 	}
 	gunSpeedCache.Store(key, s)
 	return s, true
@@ -486,11 +494,79 @@ func motionLimitsIn(pkg, name, chassis string) (motionLimits, error) {
 	// speedLimits` reports 10.28 for a 37 — and `rotationSpeed` in degrees per
 	// second. Both have to be converted, or the hull drives 3.6x too fast and
 	// the client's physics fights every position update.
-	return motionLimits{
+	lim := motionLimits{
 		SpeedForward:  float32(fwd / 3.6),
 		SpeedBackward: float32(bwd / 3.6),
 		RotationSpeed: float32(rot * math.Pi / 180),
-	}, nil
+	}
+	// The per-ground turn rate: the chassis' own on firm ground, slower on
+	// the others as their `terrainResistance` rises (the client's
+	// `vehicles.py` `rotationSpeedLimit`).
+	res := cs.Child("terrainResistance")
+	if res != nil {
+		if v, err := vec3String(res); err == nil && v[0] > 0 {
+			for i, r := range v {
+				if r > 0 {
+					lim.RotationSpeedByGround[i] = lim.RotationSpeed * v[0] / r
+				} else {
+					lim.RotationSpeedByGround[i] = lim.RotationSpeed
+				}
+			}
+		}
+	}
+	if lim.RotationSpeedByGround[0] == 0 {
+		lim.RotationSpeedByGround = [3]float32{lim.RotationSpeed, lim.RotationSpeed, lim.RotationSpeed}
+	}
+	// The rolling friction per ground and the carrying point, from the
+	// vehicle's own `physics/detailed` section.
+	if phys := findSectionDeep(f.Root, "physics"); phys != nil {
+		if det := phys.Child("detailed"); det != nil {
+			if ch := findSection(det, chassis); ch != nil {
+				if g := ch.Child("grounds"); g != nil {
+					for i, name := range []string{"firm", "medium", "soft"} {
+						if sec := g.Child(name); sec != nil {
+							if v, err := floatChild(sec, "rollingFriction"); err == nil {
+								lim.RollingFrictionByGround[i] = float32(v)
+							}
+						}
+					}
+				}
+			}
+			if eng := findSection(det, "engines"); eng != nil {
+				// The engine the vehicle mounts, by the name its
+				// `<engines>` block gives it.
+				if e := f.Root.Child("engines"); e != nil && len(e.Children) > 0 {
+					if es := eng.Child(e.Children[0].Name); es != nil {
+						if v, err := floatChild(es, "smplEnginePower"); err == nil {
+							lim.EnginePower = float32(v)
+						}
+					}
+				}
+			}
+		}
+	}
+	if cp := cs.Child("topRightCarryingPoint"); cp != nil {
+		if v, err := vec2String(cp); err == nil {
+			lim.CarryingPoint = v
+		}
+	}
+	return lim, nil
+}
+
+// findSectionDeep returns the first section with this name anywhere in the tree.
+func findSectionDeep(s *entdef.Section, name string) *entdef.Section {
+	if s == nil {
+		return nil
+	}
+	if s.Name == name {
+		return s
+	}
+	for _, c := range s.Children {
+		if got := findSectionDeep(c, name); got != nil {
+			return got
+		}
+	}
+	return nil
 }
 
 // floatChild reads one numeric child.

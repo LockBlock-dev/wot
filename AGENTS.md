@@ -1230,6 +1230,20 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
   HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
   put every hole a few tenths of a metre off the aim point.
+- **The hull drives on the real physics.** `login/drive.go` now ports the
+  reference's model: the engine's power over the vehicle's weight gives the
+  drive (`POWER_FACTOR`, capped at `MAX_ACCELERATION`), the ground's rolling
+  friction the resistance, the slope pulls it down, the yaw rate rises and
+  falls over `ROTATION_RISE`/`ROTATION_FALL`, and a handbraking hull driving
+  into a turn pivots on the blocked inner track at `PIVOT_RADIUS`. The
+  per-ground figures come from the defs (`terrainResistance` scales the
+  chassis' `rotationSpeed`, `physics/detailed` gives the rolling friction per
+  ground, the engine's `smplEnginePower` and the module weights), the settle
+  samples the chassis' `topRightCarryingPoint`, `keepWithin` clamps the hull
+  to the arena's bounds with edge friction, and the ground materials come from
+  the terrain's own `terrain2/dominanttextures` map (`login/ground.go`).
+  The gun's elevation limits are the defs' per-yaw `pitchLimits` curves
+  (`login/pitchcurve.go`), not one range.
 - **Fires are a dynamic component.** A wrecked engine (0.15) or fuel tank
   (0.25) can set the dummy alight: the server attaches the `Fire` component
   (NRL type id 64, `docs/ENTITY_TYPE_IDS.md`) to the vehicle's node with

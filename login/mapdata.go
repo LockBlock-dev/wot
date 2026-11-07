@@ -252,6 +252,10 @@ type HeightMap struct {
 type Terrain struct {
 	ChunkSize float32
 	Chunks    map[[2]int16]*HeightMap
+	// Grounds is each chunk's ground materials, from the same
+	// `cdata_processed` block the heights come from. A chunk without one
+	// drives as unpainted ground.
+	Grounds map[[2]int16]*GroundMap
 }
 
 // LoadTerrain reads every chunk of a space out of the map package.
@@ -261,7 +265,11 @@ func LoadTerrain(mapPkg, spaceDir string) (*Terrain, error) {
 		return nil, fmt.Errorf("mapdata: %s: %w", mapPkg, err)
 	}
 	defer zr.Close()
-	t := &Terrain{ChunkSize: defaultChunkSize, Chunks: map[[2]int16]*HeightMap{}}
+	t := &Terrain{
+		ChunkSize: defaultChunkSize,
+		Chunks:    map[[2]int16]*HeightMap{},
+		Grounds:   map[[2]int16]*GroundMap{},
+	}
 	prefix := spaceDir + "/"
 	for _, f := range zr.File {
 		name := strings.TrimPrefix(f.Name, prefix)
@@ -298,6 +306,12 @@ func LoadTerrain(mapPkg, spaceDir string) (*Terrain, error) {
 			continue
 		}
 		t.Chunks[[2]int16{int16(x), int16(z)}] = hm
+		// The ground materials ride the same chunk, in their own block.
+		if dom, err := readFromZipBytes(raw, "terrain2/dominanttextures"); err == nil {
+			if gm, err := decodeGroundMap(dom); err == nil {
+				t.Grounds[[2]int16{int16(x), int16(z)}] = gm
+			}
+		}
 	}
 	if len(t.Chunks) == 0 {
 		return nil, fmt.Errorf("mapdata: %s has no terrain chunks", spaceDir)
@@ -518,4 +532,25 @@ func ArenaDefFor(spacePath string) *ArenaDef {
 	}
 	arenaDefCache.Store(spacePath, d)
 	return d
+}
+
+// vec3String reads a section whose value is three space-separated floats, as
+// the chassis' `terrainResistance` is.
+func vec3String(s *entdef.Section) ([3]float32, error) {
+	if s == nil {
+		return [3]float32{}, fmt.Errorf("missing")
+	}
+	fields := strings.Fields(s.StrVal())
+	if len(fields) < 3 {
+		return [3]float32{}, fmt.Errorf("%q is not a triple", s.StrVal())
+	}
+	var out [3]float32
+	for i := 0; i < 3; i++ {
+		v, err := strconv.ParseFloat(fields[i], 32)
+		if err != nil {
+			return out, err
+		}
+		out[i] = float32(v)
+	}
+	return out, nil
 }

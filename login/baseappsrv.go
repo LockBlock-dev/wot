@@ -2743,7 +2743,7 @@ func stepTurret(cur, target, step float64) float64 {
 // about 18 degrees at a real turret speed. A server that echoes the aim point's
 // bearing is therefore always a whole swing ahead, and the client jumps to it.
 // Stepping the server's yaw at the same rate keeps the two within one tick.
-func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, spec gunSpec, terrain *Terrain) {
+func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, spec gunSpec, terrain *Terrain, arenaDef *ArenaDef) {
 	// `SERVER_TICK_LENGTH` is 0.1 in the client's own `common/constants.pyc`
 	// and the reference ticks at 100 ms, but the client draws the tank at
 	// whatever the last position update said (see `arenaTickPeriod`), so the
@@ -2812,8 +2812,17 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 			dy := float64(st.aimWorld[1] - st.hull.Position[1] - float32(spec.GunHeight))
 			dz := float64(st.aimWorld[2] - st.hull.Position[2])
 			want := -math.Atan2(dy, math.Hypot(dx, dz))
-			if spec.PitchMax > spec.PitchMin {
-				want = math.Min(math.Max(want, spec.PitchMin), spec.PitchMax)
+			// The limits are curves in the turret's yaw, not one range: the
+			// gun's elevation and depression change as the turret swings.
+			lo, hi := spec.PitchMin, spec.PitchMax
+			if len(spec.MinPitchCurve.Points) > 0 {
+				lo = float64(spec.MinPitchCurve.at(float32(cur)))
+			}
+			if len(spec.MaxPitchCurve.Points) > 0 {
+				hi = float64(spec.MaxPitchCurve.at(float32(cur)))
+			}
+			if hi > lo {
+				want = math.Min(math.Max(want, lo), hi)
 			}
 			step := spec.Gun * dt
 			switch d := want - pitch; {
@@ -2836,7 +2845,17 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		// keep its height and drive out into nothing, which is how it ended up
 		// 9 km off the map and underground.
 		before := st.hull
-		moved := st.hull.step(float32(dt))
+		// The ground the hull stands on decides its turn rate and rolling
+		// resistance: firm, medium or soft, from the terrain's own paint.
+		ground := groundNone
+		if terrain != nil {
+			ground = terrain.GroundAt(st.hull.Position[0], st.hull.Position[2])
+		}
+		moved := st.hull.step(float32(dt), ground)
+		// Keep it inside the map's bounds, with the edge's friction.
+		if arenaDef != nil {
+			st.hull.keepWithin(arenaDef.MinX, arenaDef.MinZ, arenaDef.MaxX, arenaDef.MaxZ)
+		}
 		// Refuse a move that steps OFF the map, and only that: the hull is
 		// restored when the terrain had ground under it a moment ago and has
 		// none now. Refusing whenever the ground is missing froze the tank at

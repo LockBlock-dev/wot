@@ -80,6 +80,67 @@ const (
 	hullMaxFollowSlope float32 = 1.0
 )
 
+// The reference's fitted physics, ported: the engine's power over its weight
+// gives the drive, the ground's rolling friction the resistance, and the turn
+// rate rises and falls over these times instead of snapping.
+const (
+	// powerFactor scales the engine's power into the drive the reference
+	// measured on the real server.
+	powerFactor float32 = 1.13
+	// maxAcceleration caps the drive, in m/s².
+	maxAcceleration float32 = 10.0
+	// hullCoasting and hullBraking are the decelerations without a drive and
+	// against it, in m/s².
+	hullCoasting float32 = 14.0
+	hullBraking2 float32 = 14.0
+	// rotationOnMove is the share of the on-the-spot turn rate a moving hull
+	// keeps.
+	rotationOnMove float32 = 0.85
+	// turningResistance is the extra resistance a turning hull fights, m/s².
+	turningResistance float32 = 0.8
+	// rotationRise and rotationFall are the times the yaw rate takes to reach
+	// its goal and to fall back, in seconds.
+	rotationRise float32 = 0.3
+	rotationFall float32 = 0.2
+	// pivotRadius is how far the blocked inner track is from the hull's
+	// centre, in metres: driving into a turn with the tracks locked pivots it
+	// on that track.
+	pivotRadius float32 = 2.5
+	// onSpotSpeed is the speed below which a turning hull counts as turning on
+	// the spot.
+	onSpotSpeed float32 = 0.5
+	// boundsMargin keeps the hull this far inside the map's bounds, in metres.
+	boundsMargin float32 = 2.0
+	// edgeFriction is the share of the speed into the map's edge the tracks
+	// lose along it.
+	edgeFriction float32 = 0.5
+)
+
+// groundIndex maps a terrain ground to the defs' firm/medium/soft order.
+func groundIndex(g uint8) int {
+	switch g {
+	case groundMedium:
+		return 1
+	case groundSoft:
+		return 2
+	}
+	return 0
+}
+
+// approach moves v toward target by at most step.
+func approach(v, target, step float32) float32 {
+	if v < target {
+		if v+step > target {
+			return target
+		}
+		return v + step
+	}
+	if v-step < target {
+		return target
+	}
+	return v - step
+}
+
 // Where the hull is sampled to tilt it with the ground: half its length and
 // width, a typical tank's rather than the vehicle's own.
 const (
@@ -102,6 +163,21 @@ type motionLimits struct {
 	SpeedForward  float32
 	SpeedBackward float32
 	RotationSpeed float32
+	// RotationSpeedByGround is the turn rate on firm, medium and soft ground,
+	// in rad/s: the chassis' `rotationSpeed` on firm and slower on the others
+	// as their `terrainResistance` rises, which is how the client's
+	// `vehicles.py` derives `rotationSpeedLimit`.
+	RotationSpeedByGround [3]float32
+	// RollingFrictionByGround is the share of its weight each ground holds the
+	// hull back with, from the vehicle's `physics/detailed` section.
+	RollingFrictionByGround [3]float32
+	// EnginePower is the engine's power in W and Weight the vehicle's mass in
+	// kg, from the same section.
+	EnginePower float32
+	Weight      float32
+	// CarryingPoint is where the front right track rests on the ground, from
+	// the vehicle's centre: across to the track's centre, and along.
+	CarryingPoint [2]float32
 }
 
 // hull is the player's tank as this server simulates it.
@@ -157,7 +233,7 @@ func (h *hull) targetSpeed() float32 {
 
 // step advances the hull by dt seconds. It reports whether the hull moved or
 // turned, which is what decides whether a position update is worth sending.
-func (h *hull) step(dt float32) bool {
+func (h *hull) step(dt float32, ground uint8) bool {
 	if dt <= 0 {
 		return false
 	}
@@ -171,6 +247,11 @@ func (h *hull) step(dt float32) bool {
 		h.YawRate = 0
 		return true
 	}
+	gi := groundIndex(ground)
+	rotationSpeed := h.Limits.RotationSpeedByGround[gi]
+	if rotationSpeed == 0 {
+		rotationSpeed = h.Limits.RotationSpeed
+	}
 	yaw := h.Direction[2]
 	// The hull frame: +Z at yaw 0, +X to the right.
 	fx, fz := sin32(yaw), cos32(yaw)
@@ -183,38 +264,6 @@ func (h *hull) step(dt float32) bool {
 
 	handbrake := h.Flags&moveBlockTracks != 0
 
-	// Longitudinal: the engine drives toward the speed the flags ask for,
-	// the brakes slow the hull. With the handbrake on the target is zero and
-	// the tracks brake, but the hull keeps its momentum.
-	target := h.targetSpeed()
-	rate := hullAcceleration
-	if abs32(target) < abs32(vLong) || target*vLong < 0 {
-		rate = hullBraking
-	}
-	if handbrake {
-		rate = hullHandbrakeBraking
-	}
-	vLong += clamp32(target-vLong, -rate*dt, rate*dt)
-
-	// Lateral: the tracks hold the hull against sideways motion. Locking
-	// them drops that grip, so the hull keeps its velocity vector while the
-	// yaw turns under it — the slide that reads as a drift.
-	grip := hullGrip
-	if handbrake {
-		grip = hullHandbrakeGrip
-	}
-	vLat -= clamp32(vLat, -grip*dt, grip*dt)
-
-	// Recompose in the frame the forces acted in. The yaw update below does
-	// NOT rotate this vector: the hull turns under its momentum, and the
-	// lateral component that leaves behind is what the next tick grips
-	// against.
-	h.Velocity[0] = fx*vLong + rx*vLat
-	h.Velocity[1] = fz*vLong + rz*vLat
-	h.Speed = vLong
-
-	// Yaw: the steering turns the hull. A locked-track hull cannot pivot on
-	// the spot; while moving it still steers, with reduced authority.
 	var turn float32
 	switch h.Flags & (moveRotateLeft | moveRotateRight) {
 	case moveRotateLeft:
@@ -226,19 +275,161 @@ func (h *hull) step(dt float32) bool {
 	if h.Flags&moveBackward != 0 {
 		turn = -turn
 	}
+	var driveWay float32
+	switch h.Flags & (moveForward | moveBackward) {
+	case moveForward:
+		driveWay = 1
+	case moveBackward:
+		driveWay = -1
+	}
+	// On its handbrake, driving into a turn pivots it on the blocked inner
+	// track, its outer one carrying it around at this speed.
+	pivot := driveWay * abs32(turn) * rotationSpeed * rotationOnMove * pivotRadius
+
+	// The slope pulls it down: the pitch is positive nose down, so a downhill
+	// accelerates it forward.
+	slope := gravity * sin32(h.Direction[1])
+
+	// Lateral: the tracks hold the hull against sideways motion. Locking them
+	// drops that grip, so the hull keeps its velocity vector while the yaw
+	// turns under it — the slide that reads as a drift.
+	gripAcross := hullGrip
+	if handbrake {
+		gripAcross = hullHandbrakeGrip
+	}
+	vLat = approach(vLat, 0, gripAcross*dt)
+
+	target := h.targetSpeed()
+	way := float32(0)
+	if target > 0 {
+		way = 1
+	} else if target < 0 {
+		way = -1
+	}
+	switch {
+	case handbrake:
+		vLong = approach(vLong+slope*dt, pivot, hullHandbrakeBraking*dt)
+	case target == 0:
+		vLong = approach(vLong+slope*dt, 0, hullCoasting*dt)
+	case vLong*way < 0:
+		vLong = approach(vLong+slope*dt, 0, hullBraking2*dt)
+	default:
+		// Along its way: the drive, less the ground's resistance, and the
+		// slope. The drive is the engine's power over its weight and its
+		// speed, capped; without the defs' figures it falls back to the
+		// stand-in acceleration.
+		along := abs32(vLong)
+		drive := hullAcceleration
+		if h.Limits.EnginePower > 0 && h.Limits.Weight > 0 {
+			drive = powerFactor * h.Limits.EnginePower / h.Limits.Weight / max32(along, 1e-3)
+			if drive > maxAcceleration {
+				drive = maxAcceleration
+			}
+		}
+		resistance := h.Limits.RollingFrictionByGround[gi] * gravity
+		if turn != 0 {
+			resistance += turningResistance
+		}
+		if along > abs32(target) {
+			along = approach(along, abs32(target), hullBraking2*dt)
+		} else {
+			// Short of power it stalls, unless the slope takes it back down
+			// past what its tracks hold.
+			floor := float32(0)
+			if slope*way+hullBraking2 < 0 {
+				floor = -1e9
+			}
+			along = clamp32(along+(drive-resistance+slope*way)*dt, floor, abs32(target))
+		}
+		vLong = along * way
+	}
+
+	// Recompose in the frame the forces acted in. The yaw update below does
+	// NOT rotate this vector: the hull turns under its momentum, and the
+	// lateral component that leaves behind is what the next tick grips
+	// against.
+	h.Velocity[0] = fx*vLong + rx*vLat
+	h.Velocity[1] = fz*vLong + rz*vLat
+	h.Speed = vLong
+
+	// Yaw: the steering turns the hull, and the rate rises and falls over the
+	// reference's times instead of snapping.
+	goal := turn * rotationSpeed
 	if handbrake {
 		if abs32(vLong) < handbrakePivotSpeed {
-			turn = 0
+			goal = 0
 		} else {
-			turn *= handbrakeSteer * min32(abs32(vLong)/handbrakeFullSteerSpeed, 1)
+			goal *= handbrakeSteer * min32(abs32(vLong)/handbrakeFullSteerSpeed, 1)
 		}
+	} else if abs32(vLong) >= onSpotSpeed || target != 0 {
+		goal *= rotationOnMove
 	}
-	h.YawRate = turn * h.Limits.RotationSpeed
+	rise := rotationRise
+	if goal == 0 || goal*h.YawRate < 0 {
+		rise = rotationFall
+	}
+	h.YawRate = approach(h.YawRate, goal, rotationSpeed/rise*dt)
 	h.Direction[2] = wrapAngle(yaw + h.YawRate*dt)
 
 	h.Position[0] += h.Velocity[0] * dt
 	h.Position[2] += h.Velocity[1] * dt
 	return h.Velocity[0] != 0 || h.Velocity[1] != 0 || h.YawRate != 0
+}
+
+// keepWithin clamps the hull's centre inside the map's bounds, `boundsMargin`
+// inside them: what of its velocity goes into an edge stops, and the rest is
+// slowed by edgeFriction along it.
+func (h *hull) keepWithin(minX, minZ, maxX, maxZ float32) {
+	minX += boundsMargin
+	minZ += boundsMargin
+	maxX -= boundsMargin
+	maxZ -= boundsMargin
+	var stopped [2]float32
+	if h.Position[0] < minX {
+		h.Position[0] = minX
+		if h.Velocity[0] < 0 {
+			stopped[0] = h.Velocity[0]
+			h.Velocity[0] = 0
+		}
+	} else if h.Position[0] > maxX {
+		h.Position[0] = maxX
+		if h.Velocity[0] > 0 {
+			stopped[0] = h.Velocity[0]
+			h.Velocity[0] = 0
+		}
+	}
+	if h.Position[2] < minZ {
+		h.Position[2] = minZ
+		if h.Velocity[1] < 0 {
+			stopped[1] = h.Velocity[1]
+			h.Velocity[1] = 0
+		}
+	} else if h.Position[2] > maxZ {
+		h.Position[2] = maxZ
+		if h.Velocity[1] > 0 {
+			stopped[1] = h.Velocity[1]
+			h.Velocity[1] = 0
+		}
+	}
+	if stopped[0] == 0 && stopped[1] == 0 {
+		return
+	}
+	// Along the edge, slowed as much as its friction takes of what it stopped.
+	along := [2]float32{}
+	if stopped[0] != 0 {
+		along[1] = h.Velocity[1]
+	} else {
+		along[0] = h.Velocity[0]
+	}
+	share := edgeFriction * float32(math.Hypot(float64(stopped[0]), float64(stopped[1])))
+	if n := float32(math.Hypot(float64(along[0]), float64(along[1]))); n > share && n > 0 {
+		k := (n - share) / n
+		h.Velocity[0] *= k
+		h.Velocity[1] *= k
+	} else {
+		h.Velocity[0] *= 0
+		h.Velocity[1] *= 0
+	}
 }
 
 // settle rests the hull on the terrain: at its height, rolled and pitched with
@@ -301,15 +492,21 @@ func (h *hull) settle(tr *Terrain, dt float32) bool {
 		h.Position[1] = center
 	}
 	yaw := h.Direction[2]
-	fx, fz := sin32(yaw)*hullHalfLength, cos32(yaw)*hullHalfLength
-	rx, rz := cos32(yaw)*hullHalfWidth, -sin32(yaw)*hullHalfWidth
+	// The corners its tracks rest on: the chassis' `topRightCarryingPoint`
+	// when the defs give it, else a typical tank's half length and width.
+	along, across := hullHalfLength, hullHalfWidth
+	if h.Limits.CarryingPoint[0] > 0 && h.Limits.CarryingPoint[1] > 0 {
+		across, along = h.Limits.CarryingPoint[0], h.Limits.CarryingPoint[1]
+	}
+	fx, fz := sin32(yaw)*along, cos32(yaw)*along
+	rx, rz := cos32(yaw)*across, -sin32(yaw)*across
 	front, ok1 := height(fx, fz)
 	back, ok2 := height(-fx, -fz)
 	right, ok3 := height(rx, rz)
 	left, ok4 := height(-rx, -rz)
 	if ok1 && ok2 {
 		// Pitched positively nose down.
-		h.Direction[1] = -atan32((front - back) / (2 * hullHalfLength))
+		h.Direction[1] = -atan32((front - back) / (2 * along))
 	}
 	if ok3 && ok4 {
 		// Rolled positively with its right side up.
@@ -606,6 +803,7 @@ func putVec3(dst []byte, v [3]float32) {
 
 func abs32(v float32) float32    { return float32(math.Abs(float64(v))) }
 func min32(a, b float32) float32 { return float32(math.Min(float64(a), float64(b))) }
+func max32(a, b float32) float32 { return float32(math.Max(float64(a), float64(b))) }
 func sin32(v float32) float32    { return float32(math.Sin(float64(v))) }
 func cos32(v float32) float32    { return float32(math.Cos(float64(v))) }
 func atan32(v float32) float32   { return float32(math.Atan(float64(v))) }
