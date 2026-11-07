@@ -596,10 +596,11 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	// and the client is told which one (`onExtraHitted`) and, for a wrecked
 	// track, to break its visual (`startOrUpdateExtraFromOutside`).
 	var moduleEls []byte
+	var fire *fireStart
 	if res.Pierced {
 		// The shell's own damage, not the HP damage: a device hit (the gun)
 		// deals no HP damage but still wrecks the device.
-		moduleEls = s.damageModule(st, dummy, arenaID, res, int(sh.Damage))
+		moduleEls, fire = s.damageModule(st, dummy, arenaID, res, int(sh.Damage), attacker)
 	}
 	if maxHealth <= 0 {
 		maxHealth = 1000
@@ -640,6 +641,17 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	// The module/crew calls are Vehicle client methods, so they ride behind
 	// the dummy's selection.
 	dummyApp = append(dummyApp, moduleEls...)
+	// A fire is a dynamic component on the dummy: attaching it is what starts
+	// the flame effect, and its burn runs on its own timer.
+	var fireNode uint16
+	if fire != nil {
+		if el, node, err := s.startFireElement(st, dummyID, fire.Extra, fire.Attacker); err == nil {
+			dummyApp = append(dummyApp, el...)
+			fireNode = node
+		} else {
+			s.logf("arena %d: fire start: %v", arenaID, err)
+		}
+	}
 	if el, err := showDamageFromShotElement(dummy, attacker, point, sh.EffectsIndex, damage, uint8(damageFactor), sh.Speed); err == nil {
 		dummyApp = append(dummyApp, el...)
 	}
@@ -737,6 +749,9 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		}
 	}
 	st.sendMu.Unlock()
+	if fireNode != 0 {
+		go s.burnFire(conn, from, st, arenaID, dummy, dummyID, fire.Attacker, fireNode)
+	}
 	s.logf("arena %d: shot %s hit dummy %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
 		arenaID, sh.Name, dummyID, damage, oldHealth, newHealth, res.Pierced, res.Armor)
 }

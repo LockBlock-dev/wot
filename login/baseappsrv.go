@@ -378,6 +378,9 @@ type clientState struct {
 	// modules is the dummy's module and crew damage, one entry per
 	// dummyModules entry; nil until the first module hit.
 	modules []moduleState
+	// nrlAlloc hands out the arena's NRL node ids; it outlives the entry so a
+	// component created later (a fire) gets a fresh node.
+	nrlAlloc *nrlNodeAlloc
 	// postHold stops the login phase's 10 Hz ticks until the client speaks
 	// again. It is set when a login reply goes out (the leave's Account
 	// re-entry) and cleared by the client's first LOBBY call: the client's

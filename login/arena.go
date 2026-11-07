@@ -702,6 +702,9 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// space, so every entity node, component node and component child in this
 	// battle comes from here.
 	alloc := newNrlNodeAlloc()
+	s.mu.Lock()
+	st.nrlAlloc = alloc
+	s.mu.Unlock()
 
 	// The vehicle list. `ClientArena.vehicles` is what the battle-loading
 	// screen builds both team panels from, and the only thing that fills it

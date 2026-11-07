@@ -1230,6 +1230,15 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
   HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
   put every hole a few tenths of a metre off the aim point.
+- **Fires are a dynamic component.** A wrecked engine (0.15) or fuel tank
+  (0.25) can set the dummy alight: the server attaches the `Fire` component
+  (NRL type id 64, `docs/ENTITY_TYPE_IDS.md`) to the vehicle's node with
+  `fireInfo` = `{deviceExtraIndex, notificationIndex, attackerID,
+  equipmentID, startTime}` (`FIRE_INFO`), which is what starts the flame —
+  the client's `isOnFire()` is `'fire' in self.dynamicComponents`. The burn
+  runs on its own timer: 1% of max health a second, sent as `onHealthChanged`
+  with `ATTACK_REASON.FIRE` (1), and the fire goes out after 10 s or when the
+  tank dies by unlinking the component (`0x22`).
 - **Modules and crew take damage.** `login/modules.go` holds the TOG II's
   module/crew table with the client's `typeDescr.extras` indices (the common
   `item_defs/vehicles/common/vehicle.xml` `<extras>` list, index 0 the

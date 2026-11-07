@@ -192,18 +192,27 @@ func pickModule(part uint8, face int, localNormal [3]float32, localY float32) st
 	return table[len(table)-1].Name
 }
 
+// fireChance is how likely a wrecked module is to set the tank alight, by
+// module. The engine's own `<fireStartingChance>` is 0.15; a torn-open fuel
+// tank is likelier.
+var fireChance = map[string]float64{
+	"engineHealth":   0.15,
+	"fuelTankHealth": 0.25,
+}
+
 // damageModule applies one hit's module damage and returns the client calls
-// that show it: the `onExtraHitted` hit point, and the extra start when the
+// that show it — the `onExtraHitted` hit point, and the extra start when the
 // module is DESTROYED (a broken track, the only extra whose client side has a
-// visual).
-func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uint64, res shotResult, damage int) []byte {
+// visual) — plus a fire when the wreck is a flammable one and the roll says
+// so.
+func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uint64, res shotResult, damage int, attacker uint32) ([]byte, *fireStart) {
 	name := pickModule(res.Part, res.Face, res.LocalNormal, res.Local[1])
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 	idx := moduleIndex(name)
 	if idx < 0 {
-		return nil
+		return nil, nil
 	}
 	s.mu.Lock()
 	if st.modules == nil {
@@ -215,7 +224,7 @@ func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uin
 	m := &st.modules[idx]
 	if m.Destroyed {
 		s.mu.Unlock()
-		return nil // a wrecked module takes no more hits
+		return nil, nil // a wrecked module takes no more hits
 	}
 	amount := float32(damage) * moduleDamageShare
 	if amount < 1 {
@@ -245,7 +254,7 @@ func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uin
 		out = append(out, el...)
 	}
 	if !destroyed {
-		return out
+		return out, nil
 	}
 	// A destroyed track breaks its visual: `TrackHealth._start` calls
 	// `addCrashedTrack`. The extra's args are unused, so a pickled None.
@@ -257,7 +266,11 @@ func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uin
 			out = append(out, el...)
 		}
 	}
-	return out
+	// A wrecked engine or fuel tank can set the tank alight.
+	if chance, ok := fireChance[name]; ok && rand.Float64() < chance {
+		return out, &fireStart{Extra: dummyModules[idx].Extra, Attacker: attacker}
+	}
+	return out, nil
 }
 
 // allCrewDead reports whether every crewman of the dummy is dead, which kills

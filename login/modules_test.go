@@ -2,6 +2,7 @@ package login
 
 import (
 	"testing"
+	"time"
 
 	"github.com/LockBlock-dev/wot/entdef"
 )
@@ -54,7 +55,7 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		LocalNormal: [3]float32{0, 0, 1},
 		Point:       [3]float32{0, 2.5, 3},
 	}
-	el := s.damageModule(st, dummy, 1, res, 200)
+	el, _ := s.damageModule(st, dummy, 1, res, 200, 1)
 	if len(el) == 0 {
 		t.Fatal("no client call for a module hit")
 	}
@@ -66,11 +67,11 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		t.Fatalf("gun HP = %v, want it reduced", m.HP)
 	}
 	// A second hit wrecks it and no further damage is taken.
-	el = s.damageModule(st, dummy, 1, res, 200)
+	el, _ = s.damageModule(st, dummy, 1, res, 200, 1)
 	if m, _ = moduleStateByName(st, "gunHealth"); !m.Destroyed {
 		t.Fatalf("gun state = %+v, want destroyed", m)
 	}
-	if el = s.damageModule(st, dummy, 1, res, 200); len(el) != 0 {
+	if el, _ = s.damageModule(st, dummy, 1, res, 200, 1); len(el) != 0 {
 		t.Fatal("a wrecked module took another hit")
 	}
 	// The track's destruction is the one with a visual: the extra start.
@@ -81,7 +82,7 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		Local:       [3]float32{1.5, dummyParts[0].Bounds[0][1] + 0.1, 0},
 		Point:       [3]float32{1.5, 0.6, 0},
 	}
-	if el := s.damageModule(st2, dummy, 1, trackRes, 400); len(el) == 0 {
+	if el, _ := s.damageModule(st2, dummy, 1, trackRes, 400, 1); len(el) == 0 {
 		t.Fatal("no track hit call")
 	}
 	if m, _ := moduleStateByName(st2, "rightTrack0Health"); !m.Destroyed {
@@ -121,11 +122,11 @@ func TestModuleCallsSurviveTheClientReader(t *testing.T) {
 		dummy.Set(p.Name, entdef.ZeroValue(p.Type))
 	}
 	st := &clientState{}
-	el := s.damageModule(st, dummy, 1, shotResult{
+	el, _ := s.damageModule(st, dummy, 1, shotResult{
 		Hit: true, Pierced: true, Part: 3, Face: 2,
 		LocalNormal: [3]float32{0, 0, 1},
 		Point:       [3]float32{0, 2.5, 3},
-	}, 500)
+	}, 500, 1)
 	if len(el) == 0 {
 		t.Fatal("no elements")
 	}
@@ -138,5 +139,86 @@ func TestModuleCallsSurviveTheClientReader(t *testing.T) {
 	app := append(sel, el...)
 	if err := CheckClientApp(d, app); err != nil {
 		t.Fatalf("the client would drop the module calls: %v (app % x)", err, app)
+	}
+}
+
+// TestFireComponentStartsAndStops pins the fire: the `Fire` dynamic component
+// (type 64) with its `fireInfo`, and the unlink that puts it out.
+//
+// A fire is a component, not a property — the client's `Fire` is a
+// `DynamicScriptComponent` and `isOnFire()` is `'fire' in
+// self.dynamicComponents` — so the server attaches it to the burning vehicle's
+// NRL node and unlinks it to stop the flames.
+func TestFireComponentStartsAndStops(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	d := s.cfg.Dispatch
+	dummy := NewEntity(100004, d.Entity("Vehicle"))
+	st := &clientState{nrlAlloc: newNrlNodeAlloc()}
+	el, node, err := s.startFireElement(st, dummy.ID, 62, 100003)
+	if err != nil {
+		t.Fatalf("startFireElement: %v", err)
+	}
+	if len(el) == 0 || node == 0 {
+		t.Fatalf("element %d B, node %d", len(el), node)
+	}
+	if el[0] != elNrlCreateNode {
+		t.Fatalf("element id = %#02x, want %#02x (NRL create node)", el[0], elNrlCreateNode)
+	}
+	// The element opens with the entity node, then the component node:
+	// [0x21][u16 len][0][entityNode u16][root u16][kind 1][entityID u32]
+	// [0][compNode u16][entityNode u16][kind 2][type u16 LE].
+	if len(el) < 21 {
+		t.Fatalf("element too short: % x", el)
+	}
+	if got := uint16(el[18]) | uint16(el[19])<<8; got != FireNrlID {
+		t.Fatalf("component type = %d, want %d (element % x)", got, FireNrlID, el[:24])
+	}
+	// The client's reader must accept it.
+	if err := CheckClientApp(d, el); err != nil {
+		t.Fatalf("the client would drop the fire component: %v (element % x)", err, el)
+	}
+	// The unlink carries the component's node.
+	out, err := EncodeNrlUnlinkTree(node)
+	if err != nil {
+		t.Fatalf("EncodeNrlUnlinkTree: %v", err)
+	}
+	if out[0] != elNrlUnlinkTree {
+		t.Fatalf("unlink element id = %#02x, want %#02x", out[0], elNrlUnlinkTree)
+	}
+	if got := uint16(out[3])<<8 | uint16(out[4]); got != node {
+		t.Fatalf("unlink node = %d, want %d", got, node)
+	}
+}
+
+// TestFireInfoCarriesTheDeviceAndAttacker pins the `FIRE_INFO` fields the
+// client's `Fire.set_fireInfo` reads.
+func TestFireInfoCarriesTheDeviceAndAttacker(t *testing.T) {
+	v := fireInfoValue(62, 100003, time.Unix(1700000000, 0))
+	for _, want := range []struct {
+		name string
+		kind entdef.ValueKind
+	}{
+		{"deviceExtraIndex", entdef.VInt},
+		{"notificationIndex", entdef.VUint},
+		{"attackerID", entdef.VInt},
+		{"equipmentID", entdef.VUint},
+		{"startTime", entdef.VFloat},
+	} {
+		f, ok := v.Get(want.name)
+		if !ok {
+			t.Fatalf("fireInfo has no %s", want.name)
+		}
+		if f.Kind != want.kind {
+			t.Fatalf("%s kind = %v, want %v", want.name, f.Kind, want.kind)
+		}
+	}
+	if f, _ := v.Get("deviceExtraIndex"); f.Int != 62 {
+		t.Fatalf("deviceExtraIndex = %d, want 62 (the engine)", f.Int)
+	}
+	if f, _ := v.Get("attackerID"); f.Int != 100003 {
+		t.Fatalf("attackerID = %d, want 100003", f.Int)
+	}
+	if f, _ := v.Get("startTime"); f.Float != 1700000000 {
+		t.Fatalf("startTime = %v, want 1700000000", f.Float)
 	}
 }
