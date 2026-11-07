@@ -212,3 +212,43 @@ func TestNormalizeName(t *testing.T) {
 		}
 	}
 }
+
+// TestSQLiteRememberToken pins the "remember me" token2: it resolves to its
+// account, and issuing a new one retires the old (single-use-forward).
+func TestSQLiteRememberToken(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	a := &Account{Name: "remember@wot.test", PassHash: "x"}
+	if err := st.CreateAccount(ctx, a); err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if err := st.SetRememberToken(ctx, a.ID, "tok-one"); err != nil {
+		t.Fatalf("SetRememberToken: %v", err)
+	}
+	got, err := st.AccountByRememberToken(ctx, "tok-one")
+	if err != nil {
+		t.Fatalf("AccountByRememberToken: %v", err)
+	}
+	if got.ID != a.ID {
+		t.Fatalf("token resolved to %d, want %d", got.ID, a.ID)
+	}
+	if got.RememberToken != "tok-one" {
+		t.Fatalf("RememberToken = %q", got.RememberToken)
+	}
+	if got.RememberIssued.IsZero() {
+		t.Fatal("RememberIssued not set")
+	}
+	// Single-use-forward: the next issue overwrites the old token.
+	if err := st.SetRememberToken(ctx, a.ID, "tok-two"); err != nil {
+		t.Fatalf("SetRememberToken#2: %v", err)
+	}
+	if _, err := st.AccountByRememberToken(ctx, "tok-one"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old token = %v, want ErrNotFound", err)
+	}
+	if _, err := st.AccountByRememberToken(ctx, "tok-two"); err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	if _, err := st.AccountByRememberToken(ctx, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty token = %v, want ErrNotFound", err)
+	}
+}

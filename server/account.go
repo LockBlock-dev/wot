@@ -17,6 +17,11 @@ type Account struct {
 	PassHash string
 	Created  time.Time
 	Roles    []string
+	// RememberToken is the token2 the client stored for "remember me".
+	// Every login overwrites it (single-use-forward), so an old value
+	// stops matching. RememberIssued is when it was set.
+	RememberToken  string
+	RememberIssued time.Time
 }
 
 // NormalizeName canonicalises a login name for lookup. The client sends

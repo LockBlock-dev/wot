@@ -764,7 +764,7 @@ func tokenLoginDatagram(t *testing.T, rid uint32, ch Challenge, digest [16]byte)
 // refused as an unknown account, and with only the name mapped it is
 // refused as a bad password (the token carries no password).
 func TestLoginAppTokenLogin(t *testing.T) {
-	var gotName string
+	var gotName, gotToken2, issued string
 	var verifyCalls int
 	srv, err := NewLoginAppServer(ServerConfig{
 		MaxNonce:     serverTestMaxNonce,
@@ -774,9 +774,12 @@ func TestLoginAppTokenLogin(t *testing.T) {
 			verifyCalls++
 			return 0, errors.New(textBadPassword)
 		},
-		TokenLogin: func(name string) (int64, error) {
-			gotName = name
+		TokenLogin: func(name, token2 string) (int64, error) {
+			gotName, gotToken2 = name, token2
 			return 42, nil
+		},
+		OnTokenIssued: func(accountID int64, token2 string) {
+			issued = token2
 		},
 	}, testRSAKey(t))
 	if err != nil {
@@ -804,6 +807,12 @@ func TestLoginAppTokenLogin(t *testing.T) {
 	if gotName != "admin" {
 		t.Fatalf("TokenLogin saw %q, want the mapped account", gotName)
 	}
+	if gotToken2 == "" {
+		t.Fatal("TokenLogin saw no token2")
+	}
+	if issued == "" {
+		t.Fatal("OnTokenIssued was not called with the minted token2")
+	}
 	if verifyCalls != 0 {
 		t.Fatalf("VerifyCredentials called %d times, want 0 (no password to check)", verifyCalls)
 	}
@@ -821,7 +830,7 @@ func TestLoginAppTokenLoginUnmapped(t *testing.T) {
 			gotUser = user
 			return 0, errors.New(textBadPassword)
 		},
-		TokenLogin: func(name string) (int64, error) {
+		TokenLogin: func(name, token2 string) (int64, error) {
 			t.Fatalf("TokenLogin called with no TokenAccount configured")
 			return 0, nil
 		},

@@ -37,8 +37,16 @@ type Store interface {
 	ListAccounts(ctx context.Context) ([]*Account, error)
 
 	// UpdateAccount rewrites the mutable account fields (password hash,
-	// roles). The name is immutable.
+	// roles, remember token). The name is immutable.
 	UpdateAccount(ctx context.Context, a *Account) error
+
+	// SetRememberToken stores the account's current "remember me"
+	// token2, replacing the previous one (single-use-forward).
+	SetRememberToken(ctx context.Context, accountID int64, token string) error
+
+	// AccountByRememberToken finds the account whose stored token2 is
+	// token, or ErrNotFound.
+	AccountByRememberToken(ctx context.Context, token string) (*Account, error)
 
 	// LoadState returns the account's player state, or ErrNotFound when
 	// the account has never been provisioned.

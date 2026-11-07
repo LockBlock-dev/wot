@@ -118,11 +118,17 @@ type ServerConfig struct {
 	// refused as an unknown account. Empty = no mapping (the login is
 	// refused as before).
 	TokenAccount string
-	// TokenLogin resolves TokenAccount without a password. A token login
-	// carries the token, not a password, so VerifyCredentials would
-	// refuse it as a bad password even once the name is mapped. nil =
+	// TokenLogin resolves a token login without a password. The token2 is
+	// the credential when it is a stored one (the client's "remember me");
+	// a first Steam login has none and falls back to TokenAccount. nil =
 	// fall back to VerifyCredentials with the (empty) password.
-	TokenLogin func(name string) (int64, error)
+	TokenLogin func(name, token2 string) (int64, error)
+
+	// OnTokenIssued fires after a login with the token2 just minted into
+	// the LOGGED_ON servermsg, so the account store can remember it for
+	// the client's "remember me" (single-use-forward: the next login
+	// overwrites it).
+	OnTokenIssued func(accountID int64, token2 string)
 
 	// VerifyCredentials authenticates a login. It receives the plain
 	// account name (extracted from the client's JSON identity document)
@@ -544,11 +550,12 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		s.logf("%s: login rid=%d token login (no username) → account %q", from, req.rid, mapped)
 		name = mapped
 	}
+	token2 := token2Of(params.Username)
 	var accountID int64
 	if s.cfg.VerifyCredentials != nil {
 		if name != userNameOf(params.Username) && s.cfg.TokenLogin != nil {
 			// The token is the credential; there is no password to check.
-			id, err := s.cfg.TokenLogin(name)
+			id, err := s.cfg.TokenLogin(name, token2)
 			if err != nil {
 				s.logf("%s: login rid=%d token account %q rejected", from, req.rid, name)
 				return refusePacket(req.rid, statusBadPassword, textBadPassword)
@@ -688,6 +695,9 @@ func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, proto [
 			SessionKey: key, BlockKey: params.EncKey, Name: name,
 			AccountID: accountID, Version: s.versionName(proto, params.Digest),
 		})
+	}
+	if s.cfg.OnTokenIssued != nil && accountID > 0 {
+		s.cfg.OnTokenIssued(accountID, token2)
 	}
 	s.logf("%s: LOGGED_ON rid=%d %s:%d plain %d B msg %d B", from, rid, net.IP(ip[:]), port, len(plain), len(msg))
 	return buildReplyPacket(rid, statusLoggedOn, body)
@@ -864,6 +874,19 @@ func tokenLoginName(usernameJSON, fallback string) string {
 		return ""
 	}
 	return fallback
+}
+
+// token2Of extracts the token2 from the client's JSON identity document.
+// A token login carries it in `token2`; older shapes use `token`.
+func token2Of(usernameJSON string) string {
+	var doc map[string]string
+	if err := json.Unmarshal([]byte(usernameJSON), &doc); err != nil {
+		return ""
+	}
+	if t := doc["token2"]; t != "" {
+		return t
+	}
+	return doc["token"]
 }
 
 // accountIDFor maps a stored account id into the 9-digit space the

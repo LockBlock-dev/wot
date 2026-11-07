@@ -23,11 +23,13 @@ type SQLiteStore struct {
 
 const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS accounts (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	name       TEXT    NOT NULL UNIQUE,
-	pass_hash  TEXT    NOT NULL,
-	roles      TEXT    NOT NULL DEFAULT '',
-	created_at INTEGER NOT NULL
+	id              INTEGER PRIMARY KEY AUTOINCREMENT,
+	name            TEXT    NOT NULL UNIQUE,
+	pass_hash       TEXT    NOT NULL,
+	roles           TEXT    NOT NULL DEFAULT '',
+	created_at      INTEGER NOT NULL,
+	remember_token  TEXT    NOT NULL DEFAULT '',
+	remember_issued INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS player_state (
 	account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
@@ -51,7 +53,51 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("server: migrate: %w", err)
 	}
-	return &SQLiteStore{db: db}, nil
+	s := &SQLiteStore{db: db}
+	if err := s.migrate(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// migrate adds the columns a database created before them lacks. The
+// CREATE TABLE IF NOT EXISTS above does not touch an existing table.
+func (s *SQLiteStore) migrate(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(accounts)`)
+	if err != nil {
+		return fmt.Errorf("server: migrate: %w", err)
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, typ        string
+			dflt             any
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("server: migrate: %w", err)
+		}
+		have[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("server: migrate: %w", err)
+	}
+	rows.Close()
+	for _, c := range []struct{ name, ddl string }{
+		{"remember_token", `ALTER TABLE accounts ADD COLUMN remember_token TEXT NOT NULL DEFAULT ''`},
+		{"remember_issued", `ALTER TABLE accounts ADD COLUMN remember_issued INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if have[c.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("server: migrate %s: %w", c.name, err)
+		}
+	}
+	return nil
 }
 
 // Close releases the database handle.
@@ -74,9 +120,13 @@ func (s *SQLiteStore) CreateAccount(ctx context.Context, a *Account) error {
 	if a.Created.IsZero() {
 		a.Created = time.Now().UTC()
 	}
+	issued := int64(0)
+	if !a.RememberIssued.IsZero() {
+		issued = a.RememberIssued.Unix()
+	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO accounts (name, pass_hash, roles, created_at) VALUES (?, ?, ?, ?)`,
-		name, a.PassHash, strings.Join(a.Roles, ","), a.Created.Unix())
+		`INSERT INTO accounts (name, pass_hash, roles, created_at, remember_token, remember_issued) VALUES (?, ?, ?, ?, ?, ?)`,
+		name, a.PassHash, strings.Join(a.Roles, ","), a.Created.Unix(), a.RememberToken, issued)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrExists
@@ -95,7 +145,7 @@ func (s *SQLiteStore) CreateAccount(ctx context.Context, a *Account) error {
 // AccountByName looks an account up by its normalized name.
 func (s *SQLiteStore) AccountByName(ctx context.Context, name string) (*Account, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, pass_hash, roles, created_at FROM accounts WHERE name = ?`,
+		`SELECT id, name, pass_hash, roles, created_at, remember_token, remember_issued FROM accounts WHERE name = ?`,
 		NormalizeName(name))
 	return scanAccount(row)
 }
@@ -103,14 +153,14 @@ func (s *SQLiteStore) AccountByName(ctx context.Context, name string) (*Account,
 // AccountByID looks an account up by its primary key.
 func (s *SQLiteStore) AccountByID(ctx context.Context, id int64) (*Account, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, pass_hash, roles, created_at FROM accounts WHERE id = ?`, id)
+		`SELECT id, name, pass_hash, roles, created_at, remember_token, remember_issued FROM accounts WHERE id = ?`, id)
 	return scanAccount(row)
 }
 
 // ListAccounts returns every account, ordered by id.
 func (s *SQLiteStore) ListAccounts(ctx context.Context) ([]*Account, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, pass_hash, roles, created_at FROM accounts ORDER BY id`)
+		`SELECT id, name, pass_hash, roles, created_at, remember_token, remember_issued FROM accounts ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("server: list accounts: %w", err)
 	}
@@ -131,9 +181,13 @@ func (s *SQLiteStore) ListAccounts(ctx context.Context) ([]*Account, error) {
 
 // UpdateAccount rewrites the mutable fields (password hash, roles).
 func (s *SQLiteStore) UpdateAccount(ctx context.Context, a *Account) error {
+	issued := int64(0)
+	if !a.RememberIssued.IsZero() {
+		issued = a.RememberIssued.Unix()
+	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE accounts SET pass_hash = ?, roles = ? WHERE id = ?`,
-		a.PassHash, strings.Join(a.Roles, ","), a.ID)
+		`UPDATE accounts SET pass_hash = ?, roles = ?, remember_token = ?, remember_issued = ? WHERE id = ?`,
+		a.PassHash, strings.Join(a.Roles, ","), a.RememberToken, issued, a.ID)
 	if err != nil {
 		return fmt.Errorf("server: update account: %w", err)
 	}
@@ -195,8 +249,10 @@ func scanAccount(row rowScanner) (*Account, error) {
 		a       Account
 		roles   string
 		created int64
+		token   sql.NullString
+		issued  sql.NullInt64
 	)
-	err := row.Scan(&a.ID, &a.Name, &a.PassHash, &roles, &created)
+	err := row.Scan(&a.ID, &a.Name, &a.PassHash, &roles, &created, &token, &issued)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -207,5 +263,41 @@ func scanAccount(row rowScanner) (*Account, error) {
 	if roles != "" {
 		a.Roles = strings.Split(roles, ",")
 	}
+	if token.Valid {
+		a.RememberToken = token.String
+	}
+	if issued.Valid && issued.Int64 > 0 {
+		a.RememberIssued = time.Unix(issued.Int64, 0).UTC()
+	}
 	return &a, nil
+}
+
+// SetRememberToken stores the account's current "remember me" token2,
+// replacing the previous one (single-use-forward).
+func (s *SQLiteStore) SetRememberToken(ctx context.Context, accountID int64, token string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE accounts SET remember_token = ?, remember_issued = ? WHERE id = ?`,
+		token, time.Now().UTC().Unix(), accountID)
+	if err != nil {
+		return fmt.Errorf("server: set remember token: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("server: set remember token: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AccountByRememberToken finds the account whose stored token2 is token.
+func (s *SQLiteStore) AccountByRememberToken(ctx context.Context, token string) (*Account, error) {
+	if token == "" {
+		return nil, ErrNotFound
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, name, pass_hash, roles, created_at, remember_token, remember_issued FROM accounts WHERE remember_token = ?`,
+		token)
+	return scanAccount(row)
 }

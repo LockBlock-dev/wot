@@ -271,14 +271,29 @@ func main() {
 			}
 			return acct.ID, nil
 		},
-		// A token login carries no password, so the mapped account is
-		// resolved by name alone.
-		TokenLogin: func(name string) (int64, error) {
+		// A token login carries no password. The token2 is the credential
+		// when it is a stored one: the client's "remember me" sends back
+		// what the last LOGGED_ON minted. A first Steam login has none, so
+		// fall back to the operator's token account.
+		TokenLogin: func(name, token2 string) (int64, error) {
+			if token2 != "" {
+				if acct, err := store.AccountByRememberToken(context.Background(), token2); err == nil {
+					return acct.ID, nil
+				}
+			}
 			acct, err := store.AccountByName(context.Background(), name)
 			if err != nil {
 				return 0, err
 			}
 			return acct.ID, nil
+		},
+		// Remember the token2 the LOGGED_ON just minted, so the client's
+		// "remember me" can present it on the next login. Single-use-
+		// forward: this overwrites the previous one.
+		OnTokenIssued: func(accountID int64, token2 string) {
+			if err := store.SetRememberToken(context.Background(), accountID, token2); err != nil {
+				logger.Warn("remember token", "account", accountID, "err", err)
+			}
 		},
 	}
 	if *flagDigest == "any" {

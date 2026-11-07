@@ -243,6 +243,9 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   isDemoAccount,name,security_msg,session_id,token2 compact unescaped
   (199 B with the ExampleUser census cite captures/game_20260920.log:413
   — values SYNTHESIZED, shape faithful); no account DB: any identity.
+  The "remember me" token2 is stored per account
+  (`server.SetRememberToken`) and resolved by `TokenLogin(name, token2)`;
+  every LOGGED_ON overwrites it (single-use-forward).
   Tests offline (`loginapp_test.go`): challenge 55-B echo + fresh-mint
   replacement, unencrypted 64 / version 65 / digest 70 texts, ping 16 B
   echo incl. a chained ping+login datagram, probe silence, bad-solution
