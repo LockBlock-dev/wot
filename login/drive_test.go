@@ -363,3 +363,71 @@ func TestHullJumpsOffACliff(t *testing.T) {
 		t.Fatalf("landed at %v, want the lower ground", h.Position[1])
 	}
 }
+
+// TestHullFollowsASteepSlopeWithoutBouncing drives down a constant 30° slope:
+// the hull's vertical speed is the ground's own rate, so it stays on it
+// instead of going airborne every tick.
+func TestHullFollowsASteepSlopeWithoutBouncing(t *testing.T) {
+	const n = 34
+	const spacing = 100.0 / (n - 5)
+	hm := &HeightMap{Width: n, Height: n, Heights: make([]float32, n*n)}
+	// The ground falls 30° along +Z (tan 30° = 0.577) from row 10.
+	for pz := 0; pz < n; pz++ {
+		for px := 0; px < n; px++ {
+			z := float64(pz-(n-1)/2) * spacing
+			if z > 0 {
+				hm.Heights[pz*n+px] = float32(-z * 0.577)
+			}
+		}
+	}
+	tm := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
+	h := hull{Position: [3]float32{50, 0, 10}, Velocity: [2]float32{0, 20}, Flags: moveForward, Limits: motionLimits{SpeedForward: 25}}
+	if !h.settle(tm, 0.1) {
+		t.Fatal("no ground at spawn")
+	}
+	// The heightmap's triangulation zigzags, so a "constant" slope has small
+	// ridges: the hull may hop a few centimetres off them, but it must never
+	// leave the ground for real.
+	maxOff := float32(0)
+	for i := 0; i < 30; i++ {
+		h.step(0.1)
+		if !h.settle(tm, 0.1) {
+			t.Fatalf("off the map at tick %d", i)
+		}
+		if ground, ok := tm.HeightAt(h.Position[0], h.Position[2]); ok {
+			if off := h.Position[1] - ground; off > maxOff {
+				maxOff = off
+			}
+		}
+	}
+	if maxOff > 0.3 {
+		t.Fatalf("the hull got %.2f m off a constant slope, want it to follow it", maxOff)
+	}
+}
+
+// TestHullJumpsOffASmallLedge drives off a 2 m ledge at speed: the ground
+// drops far faster than the hull's own vertical speed can follow, so it goes
+// airborne instead of sticking to the ledge.
+func TestHullJumpsOffASmallLedge(t *testing.T) {
+	const n = 34
+	hm := &HeightMap{Width: n, Height: n, Heights: make([]float32, n*n)}
+	for pz := 17; pz < n; pz++ {
+		for px := 0; px < n; px++ {
+			hm.Heights[pz*n+px] = -2
+		}
+	}
+	tm := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
+	h := hull{Position: [3]float32{10, 0, 10}, Velocity: [2]float32{0, 20}, Flags: moveForward, Limits: motionLimits{SpeedForward: 25}}
+	if !h.settle(tm, 0.1) {
+		t.Fatal("no ground at spawn")
+	}
+	for i := 0; i < 40 && !h.Airborne; i++ {
+		h.step(0.1)
+		if !h.settle(tm, 0.1) {
+			t.Fatalf("off the map at tick %d", i)
+		}
+	}
+	if !h.Airborne {
+		t.Fatal("the hull followed a 2 m ledge instead of jumping off it")
+	}
+}

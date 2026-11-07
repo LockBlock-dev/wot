@@ -65,12 +65,19 @@ const (
 	handbrakeFullSteerSpeed float32 = 15.0
 	// gravity is the engine's, m/s².
 	gravity float32 = 9.81
-	// hullMaxDropPerMetre is the steepest drop the tracks can follow, as a
-	// slope (tan of the angle): 1.0 is 45°. Ground that falls away faster is
-	// a cliff, and the hull goes airborne instead of snapping down.
-	hullMaxDropPerMetre float32 = 1.0
 	// hullLandingEpsilon is how close to the ground counts as landed.
 	hullLandingEpsilon float32 = 0.05
+	// hullSuspensionTravel is how far the hull can drop relative to the ground
+	// in one tick before the tracks leave it, in metres: the suspension's
+	// travel. A convex break (a ledge) drops the ground further than this in
+	// one tick and the hull goes airborne.
+	hullSuspensionTravel float32 = 0.3
+	// hullMaxFollowSlope is the steepest slope the tracks can drive down, as
+	// tan(angle): 1.0 is 45°. Ground steeper than this is fallen off, not
+	// driven down — the heightmap turns a cliff into a steep ramp over one
+	// cell, and without this the tank follows that ramp instead of flying off
+	// it.
+	hullMaxFollowSlope float32 = 1.0
 )
 
 // Where the hull is sampled to tilt it with the ground: half its length and
@@ -239,11 +246,15 @@ func (h *hull) step(dt float32) bool {
 // none, and the caller has to refuse the move rather than let the tank drive
 // out over the edge and fall.
 //
-// The vertical axis is not a snap: when the ground falls away faster than the
-// tracks can follow (a cliff), the hull goes airborne and gravity owns its
-// height until it lands on the ground below. dt is the tick the move took, so
-// the drop the tracks could follow is their horizontal step times the steepest
-// slope.
+// The vertical axis is a BODY ON THE GROUND, not a snap. While it follows the
+// terrain its vertical speed is the ground's own slope rate, so a constant
+// slope (however steep) is driven down smoothly. The hull only leaves the
+// ground when the terrain drops away faster than that speed plus what gravity
+// adds in the tick — a convex break, i.e. a ledge or a cliff — and then
+// gravity owns its height until it lands. The old rule compared the drop to
+// the hull's HORIZONTAL step against a fixed 45° slope, which followed every
+// ledge a tank could drive over: the tank was glued to the ground and could
+// never jump.
 func (h *hull) settle(tr *Terrain, dt float32) bool {
 	if tr == nil {
 		return false
@@ -256,6 +267,8 @@ func (h *hull) settle(tr *Terrain, dt float32) bool {
 		return false
 	}
 	if h.Airborne {
+		h.VerticalVelocity -= gravity * dt
+		h.Position[1] += h.VerticalVelocity * dt
 		if h.Position[1] <= center+hullLandingEpsilon && h.VerticalVelocity <= 0 {
 			h.Position[1] = center
 			h.VerticalVelocity = 0
@@ -267,19 +280,26 @@ func (h *hull) settle(tr *Terrain, dt float32) bool {
 			}
 			return true
 		}
+	} else {
+		// Grounded: the terrain falls at `drop` over this tick. A hull
+		// following the ground would descend by the terrain's own drop along
+		// its travel, so the suspension only has to absorb the DIFFERENCE —
+		// a convex break (a ledge) drops further than the suspension's travel
+		// and the hull goes airborne, while a slope, however steep, is
+		// followed exactly.
+		drop := h.Position[1] - center
+		expected := h.groundDrop(height, dt)
+		// The steepest descent the tracks can follow this tick.
+		if speed := float32(math.Hypot(float64(h.Velocity[0]), float64(h.Velocity[1]))); speed*dt*hullMaxFollowSlope < expected {
+			expected = speed * dt * hullMaxFollowSlope
+		}
+		if drop > expected+hullSuspensionTravel {
+			h.Airborne = true
+			return true
+		}
+		h.VerticalVelocity = -drop / dt
+		h.Position[1] = center
 	}
-	// On the ground (or just landed): follow the terrain, unless it falls
-	// away faster than the tracks can — a cliff — in which case the hull goes
-	// airborne instead of snapping down.
-	drop := h.Position[1] - center
-	move := float32(math.Hypot(float64(h.Velocity[0]), float64(h.Velocity[1]))) * dt
-	if drop > move*hullMaxDropPerMetre+hullLandingEpsilon {
-		h.Airborne = true
-		h.VerticalVelocity = 0
-		return true
-	}
-	h.Position[1] = center
-	h.VerticalVelocity = 0
 	yaw := h.Direction[2]
 	fx, fz := sin32(yaw)*hullHalfLength, cos32(yaw)*hullHalfLength
 	rx, rz := cos32(yaw)*hullHalfWidth, -sin32(yaw)*hullHalfWidth
@@ -362,6 +382,32 @@ func (h *hull) engine() (byte, float32) {
 	}
 	inGear := clamp32((share-low)/(high-low), 0, 1)
 	return byte(gear + 1), shiftRPM + (1-shiftRPM)*inGear
+}
+
+// groundDrop is how far the ground descends along the hull's travel over dt,
+// from the terrain's gradient at the position the hull CAME FROM: what a hull
+// following the ground would drop this tick. A convex break drops further than
+// this, and that difference is what the suspension has to absorb.
+//
+// The gradient is sampled behind the hull on purpose. Sampled at the new
+// position it already sees the ledge's face, calls the drop followable and the
+// tank drives down the cliff instead of flying off it.
+func (h *hull) groundDrop(height func(dx, dz float32) (float32, bool), dt float32) float32 {
+	speed := float32(math.Hypot(float64(h.Velocity[0]), float64(h.Velocity[1])))
+	if speed < 0.01 {
+		return 0
+	}
+	const probe float32 = 0.5
+	backX, backZ := -h.Velocity[0]/speed*probe, -h.Velocity[1]/speed*probe
+	// Forward and back along the travel line, around where the hull was.
+	ax, az := h.Velocity[0]/speed*probe, h.Velocity[1]/speed*probe
+	behind, ok1 := height(backX-ax, backZ-az)
+	ahead, ok2 := height(backX+ax, backZ+az)
+	if !ok1 || !ok2 {
+		return 0
+	}
+	// The descent along the travel direction, positive going downhill.
+	return -(ahead - behind) / (2 * probe) * speed * dt
 }
 
 // auxPhysicsData is the hull's attitude and its tracks' speeds, as the avatar's
