@@ -375,9 +375,17 @@ type clientState struct {
 	// what `OwnVehicle.battleEventsSummary` carries: the personal efficiency
 	// panel's damage counter reads it and nothing else.
 	damageDealt uint32
-	infoDummy   int
-	infoPlayer  int
-	infoKills   int
+	// postHold stops the login phase's 10 Hz ticks until the client speaks
+	// again. It is set when a login reply goes out (the leave's Account
+	// re-entry) and cleared by the client's own next datagram: the client's
+	// `LoginReplyFilter` only passes packets whose byte 146 is the login-reply
+	// flag while the login is in flight, and a 28 B tick has no byte 146 at
+	// all, so it is dropped as "unexpected packet on external interface" and
+	// the client reports REASON_GENERAL_NETWORK and disconnects.
+	postHold   bool
+	infoDummy  int
+	infoPlayer int
+	infoKills  int
 	// shotID numbers the tracers this session fires.
 	shotID int32
 	// reloadGen numbers the reloads this session starts, so a completion
@@ -1304,6 +1312,9 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear []byte) {
 	s.mu.Lock()
 	st.lastSeen = time.Now()
+	// The client's first datagram after a login reply ends the login: its
+	// LoginReplyFilter is gone from then on, so the ticks may resume.
+	st.postHold = false
 	s.mu.Unlock()
 	if len(clear) < 6 {
 		return
@@ -1462,6 +1473,10 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		}
 		s.logf("stage2 %s: CreateBasePlayer + showGUI %dB (entity %d, Account, %d components, seq %d) % x",
 			from, len(app), st.entityID, s.cfg.AccountComponents, seq, app[:min(len(app), 24)])
+		// Hold the ticks until the client speaks: see clientState.postHold.
+		s.mu.Lock()
+		st.postHold = true
+		s.mu.Unlock()
 		seq++
 	}
 	return seq, nil
@@ -3693,6 +3708,11 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 			continue
 		}
 		if st.postAt.IsZero() || now.Before(st.postAt) {
+			continue
+		}
+		// A login reply just went out and the client has not spoken since:
+		// its LoginReplyFilter would drop this tick (see postHold).
+		if st.postHold {
 			continue
 		}
 		st.postAt = now.Add(st.tickPeriod)

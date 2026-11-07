@@ -174,3 +174,53 @@ func TestShowGUIUsesTheMethodsVarLen(t *testing.T) {
 		t.Errorf("showGUI payload = % x, want 00 00", call[3:])
 	}
 }
+
+// TestLoginReplyHoldsTheTicksUntilTheClientSpeaks pins the tick gate after a
+// login reply.
+//
+// The client's `LoginReplyFilter` (`sub_142D32190`) passes only packets whose
+// byte 146 is the login-reply flag while the login is in flight, and drops
+// everything else as "unexpected packet on external interface" — which the
+// channel reports as REASON_GENERAL_NETWORK and the client disconnects. A
+// 28 B tick has no byte 146 at all, so the 10 Hz login-phase ticker must stay
+// quiet until the client's own next datagram ends the login.
+func TestLoginReplyHoldsTheTicksUntilTheClientSpeaks(t *testing.T) {
+	s := enterTestServer(t)
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	st := &clientState{
+		entityID: 0x1234, name: "playerone", blockKey: "0123456789abcdef",
+		stage2Addr: addr, tickPeriod: PostTickPeriod,
+	}
+	tr := &fakeTransport{}
+	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
+		t.Fatalf("enterAccount: %v", err)
+	}
+	if !st.postHold {
+		t.Fatal("the login reply did not hold the ticks")
+	}
+	s.mu.Lock()
+	s.byAddr[addr.String()] = st
+	s.mu.Unlock()
+	// A tick is due, but the client has not spoken: nothing goes out.
+	s.mu.Lock()
+	st.postAt = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	before := len(tr.writes)
+	s.sweepStage2(tr, time.Now())
+	if len(tr.writes) != before {
+		t.Fatalf("%d packets after the login reply, want none (the filter would drop them)",
+			len(tr.writes)-before)
+	}
+	// The client speaks: the login is over and the ticks resume.
+	s.noteReliable(st, addr, []byte{0x58, 0x04, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00})
+	if st.postHold {
+		t.Fatal("the client's datagram did not release the ticks")
+	}
+	s.mu.Lock()
+	st.postAt = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	s.sweepStage2(tr, time.Now())
+	if len(tr.writes) == before {
+		t.Fatal("the ticks did not resume after the client spoke")
+	}
+}
