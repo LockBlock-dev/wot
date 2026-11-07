@@ -481,6 +481,11 @@ func lerp3(a, b [3]float32, t float32) [3]float32 {
 	}
 }
 
+// neg3 negates a direction.
+func neg3(v [3]float32) [3]float32 {
+	return [3]float32{-v[0], -v[1], -v[2]}
+}
+
 // hitParams is the `VEHICLE_HIT_POINT.params` word: the caliber in tenths of
 // a millimetre, the shell kind and the hit effect, as `hit_point` packs them.
 func hitParams(sh shellSpec, effect uint8) uint32 {
@@ -749,7 +754,15 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	// property), one `VEHICLE_HIT_POINT` per pierced hit whose segment
 	// context is the sticker id. The client's `addDamageSticker` draws it.
 	if res.Pierced && sh.HasPiercedSticker {
-		sticker := hitPointValue(encodeHitSegment(res.Bounds, res.Local, res.LocalDir, res.Part, sh.PiercedSticker), hitParams(sh, hitEffectPierced))
+		// The sticker's segment is written EXIT→ENTRY, the reverse of the
+		// shell's own path. `showDamageFromShot`'s hit point is read from its
+		// START (the client's `parseHitPoints` collides from `segStart`), but
+		// the persistent decal is anchored at its END: with an entry→exit
+		// segment — what `encodeHitSegment` writes, and what the reference's
+		// `VehicleHit::encode_segment` writes — the hole is drawn on the FAR
+		// side of the tank. Measured by the player: "if I shoot on the north
+		// side, the hole appears on the south side".
+		sticker := hitPointValue(encodeHitSegment(res.Bounds, res.Local, neg3(res.LocalDir), res.Part, sh.PiercedSticker), hitParams(sh, hitEffectPierced))
 		s.logf("arena %d: sticker %d on part %d (local %v, dir %v, bounds %v..%v)",
 			arenaID, sh.PiercedSticker, res.Part, res.Local, res.LocalDir, res.Bounds[0], res.Bounds[1])
 		s.mu.Lock()
