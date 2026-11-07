@@ -1233,6 +1233,13 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 			st.stage2Key = nk
 			st.stage2Addr = cloneAddr(from)
 			s.byAddr[from.String()] = st
+			// The client adopts the rotation key as its session key, and
+			// carries it into the NEXT handshake. A leave switches the client
+			// back to stage-1, where its 22B then names this key — without the
+			// entry the lookup misses and the server stays silent while the
+			// client retries 60 times and disconnects (`22B for unknown
+			// session key …`). `bySession` already checks this map.
+			s.byStageKey[nk] = st
 		}
 		nk := st.stage2Key
 		s.mu.Unlock()
