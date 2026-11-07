@@ -1170,8 +1170,13 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   also stays armed until the client speaks again and only passes packets
   with the login-reply flag at that offset — a 28 B tick has no such byte —
   so `clientState.postHold` stops the 10 Hz login-phase ticks from the login
-  reply until the client's next datagram (`noteReliable` clears it);
-  `TestLoginReplyHoldsTheTicksUntilTheClientSpeaks` pins both halves.
+  reply until the client's next APP CALL — `noteReliable` clears it only when
+  the datagram carries more than the 5-byte authenticate element, because the
+  client acks the login reply at once while the filter stays armed for another
+  second. The resend queue is dropped with the login reply too: everything in
+  it was minted for the battle the client just left, and a retransmission is
+  dropped the same way. `TestLoginReplyHoldsTheTicksUntilTheClientSpeaks`
+  pins both halves.
 - **Siege mode (X) works.** The client sends
   `Avatar.vehicle_changeSetting(VEHICLE_SETTING.SIEGE_MODE_ENABLED=3, enable)` —
   cell index 12, `UINT8` code + `INT32` value, fixed 5 bytes. The reply is
