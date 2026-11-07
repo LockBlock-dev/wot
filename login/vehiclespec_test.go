@@ -46,11 +46,13 @@ func TestVehicleGunSpeedsFromDefs(t *testing.T) {
 	if want := 0.10471975511965978; math.Abs(sp.PitchMax-want) > 1e-6 {
 		t.Errorf("pitchMax = %v, want %v", sp.PitchMax, want)
 	}
-	// The gun's pivot sits above the hull's origin (turretPositions + the
-	// gun's own gunPosition); measuring the elevation from the hull instead
-	// reads a level aim as several degrees of depression.
-	if sp.GunHeight <= 0.5 || sp.GunHeight > 4 {
-		t.Errorf("gunHeight = %v m, want the turret + gun offset", sp.GunHeight)
+	// The gun's pivot sits above the CHASSIS origin: the chassis's
+	// `hullPosition` (0.824) plus the hull's `turretPositions` plus the
+	// turret's `gunPosition`. Missing the `hullPosition` term puts the muzzle
+	// a metre low and the elevation needed to reach a turret roof then
+	// exceeds the gun's limit, so the pitch clamps and the shell flies over.
+	if want := 1.884602; math.Abs(sp.GunHeight-want) > 1e-5 {
+		t.Errorf("gunHeight = %v m, want %v (hullPosition + turret + gun)", sp.GunHeight, want)
 	}
 	// The hull's envelope comes from the same defs: 37 km/h forward and 14
 	// back, which is 10.28 and 3.89 m/s — the numbers the client's own

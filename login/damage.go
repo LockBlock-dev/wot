@@ -608,6 +608,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	}
 	hullNow := st.hull
 	yaw, pitch := st.gunYaw, st.gunPitch
+	aimWorld := st.aimWorld
 	spec := st.gunSpec
 	dummy := st.dummy
 	dummyID := st.dummyID
@@ -641,6 +642,12 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	terrain := st.terrain
 	s.mu.Unlock()
 	landing := flyShell(sh, marker.Position, v, terrain, dummyBoxes(dummyPos, dummyYaw))
+	// The aim and the muzzle are the two numbers that decide whether a shot at
+	// a top surface lands or sails over: the elevation is measured from the
+	// gun pivot above the CHASSIS origin, and the pitch is clamped to the
+	// gun's own limits.
+	s.logf("arena %d: shot %s aim=%v gunYaw=%.3f gunPitch=%.3f muzzle=%v dummy=%v",
+		arenaID, sh.Name, aimWorld, yaw, pitch, marker.Position, dummyPos)
 	if landing.Kind != landingVehicle {
 		// A miss: the client drew its own shot, so only the end and, for the
 		// ground, the explosion go out. `explodeProjectile`'s shot id is
@@ -751,7 +758,10 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		s.mu.Unlock()
 		dummy.Set("damageStickers", entdef.Value{Kind: entdef.VSeq, Seq: stickers})
 		if el, err := EncodePropertyUpdate(dummy, "damageStickers"); err == nil {
+			s.logf("arena %d: damageStickers update %dB: % x", arenaID, len(el), el)
 			dummyApp = append(dummyApp, el...)
+		} else {
+			s.logf("arena %d: damageStickers update failed: %v", arenaID, err)
 		}
 	}
 	if damage > 0 {

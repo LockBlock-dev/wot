@@ -43,10 +43,14 @@ type gunSpec struct {
 	// low six bits of `gunAnglesPacked` against.
 	PitchMin float64
 	PitchMax float64
-	// GunHeight is how far the gun's pivot sits above the hull's origin, in
-	// metres: the turret's `turretPositions/turret` plus the gun's own
-	// `gunPosition`. The elevation is measured from there, not from the hull,
-	// or a level aim reads as several degrees of depression.
+	// GunHeight is how far the gun's pivot sits above the CHASSIS origin (the
+	// vehicle's world position, which is what `hull.Position` holds), in
+	// metres: the chassis's `hullPosition` plus the hull's
+	// `turretPositions/turret` plus the turret's `gunPosition`. All three are
+	// needed — the turret and gun positions are relative to the HULL, not to
+	// the chassis, so omitting `hullPosition` puts the muzzle 1.36 m low on a
+	// TOG II: the elevation needed to reach a turret roof then exceeds the
+	// gun's limit, the pitch clamps, and the shell flies over the tank.
 	GunHeight float64
 	// Limits is the hull's movement envelope, from the same defs.
 	Limits motionLimits
@@ -251,6 +255,14 @@ func vehicleGunSpeeds(compDescr []byte) (gunSpec, bool) {
 	if err != nil {
 		return gunSpec{}, false
 	}
+	// The turret and gun positions are relative to the hull, and the hull's
+	// origin sits `hullPosition` above the chassis origin — the point the
+	// vehicle entity is placed at and the one the pitch is measured from.
+	hullY, err := hullPositionYIn(pkg, base+r.Vehicle+".xml", r.Chassis.Name)
+	if err != nil {
+		return gunSpec{}, false
+	}
+	gunHeight += hullY
 	disp, err := dispersionIn(pkg, base+r.Vehicle+".xml", base+"components/guns.xml", r.Chassis.Name, gun)
 	if err != nil {
 		return gunSpec{}, false
@@ -437,6 +449,37 @@ func gunHeightIn(pkg, name, turret, gun string) (float64, error) {
 		}
 	}
 	return turretY + gunY, nil
+}
+
+// hullPositionYIn reads the chassis block's `<hullPosition>` Y: how far the
+// hull's origin sits above the chassis origin (the vehicle's world position).
+//
+// This is the offset the turret and gun positions are missing: the defs give
+// `turretPositions/turret` in the HULL's frame and `gunPosition` in the
+// TURRET's, so the gun pivot is `hullPosition + turretPosition + gunPosition`
+// above the chassis origin.
+func hullPositionYIn(pkg, name, chassis string) (float64, error) {
+	raw, err := readFromZip(pkg, name)
+	if err != nil {
+		return 0, err
+	}
+	f, err := entdef.ParseFile(raw)
+	if err != nil {
+		return 0, fmt.Errorf("vehiclespec: %s: %w", name, err)
+	}
+	if f.Root == nil {
+		return 0, fmt.Errorf("vehiclespec: %s: no root", name)
+	}
+	cs := findSectionHaving(f.Root, chassis, "hullPosition")
+	if cs == nil {
+		// The block is named after the chassis option (`Chassis_GB63_TOG_II`);
+		// fall back to any block that carries the child.
+		cs = findSectionHaving(f.Root, "Chassis", "hullPosition")
+	}
+	if cs == nil {
+		return 0, fmt.Errorf("vehiclespec: %s has no %s/hullPosition", name, chassis)
+	}
+	return vectorY(cs.Child("hullPosition"))
 }
 
 // findChildDeep is `Child` over the whole tree: `turretPositions` lives under
