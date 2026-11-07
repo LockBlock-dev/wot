@@ -1247,7 +1247,12 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   follows `vehicle_changeSetting` codes 0/1 (`CURRENT_SHELLS`/`NEXT_SHELLS`),
   which re-send `vehicleSettings`; a `CURRENT_SHELLS` change also restarts
   the FULL reload, and `reloadGen` stops the previous completion timer from
-  closing it.
+  closing it. FIRING promotes the NEXT shell: load A, select B (one press
+  sends `NEXT_SHELLS`), fire, and the official server reloads B — the client
+  does not do it itself (`AmmoController.setCurrentShellCD` is driven by
+  `vehicleSettings`), so the shot consumes the loaded shell, sets
+  `loadedShell = nextShell` and re-sends the settings before the reload
+  (`TestFiringPromotesTheNextShell`).
 - **The entity property runs are DELTAS.** `createEntity`/`updateEntity` carry
   `[u8 count]` + `[u8 propID][value]` pairs, so the server writes only the
   properties it has a value for and the client keeps its own default for the
