@@ -223,6 +223,41 @@ func TestDamageMethodCalls(t *testing.T) {
 	if el[0] <= entityMethodBase || el[0] > entityMethodBase+0x58 {
 		t.Fatalf("stopTracer id = %#x, outside the client method range", el[0])
 	}
+
+	el, err = showShootingElement(vehicle, 1, 0, 2)
+	if err != nil {
+		t.Fatalf("showShooting: %v", err)
+	}
+	if el[0] <= entityMethodBase || el[0] > entityMethodBase+0x58 {
+		t.Fatalf("showShooting id = %#x, outside the client method range", el[0])
+	}
+	if len(el) < 4 {
+		t.Fatalf("showShooting = %d B, want the three arguments", len(el))
+	}
+}
+
+// TestDamageStickersUpdate pins the shell-hole property: the vehicle's
+// `damageStickers` is an ALL_CLIENTS property, so it rides a property update
+// (the `[id][u16 len][value]` form), not a client method call.
+func TestDamageStickersUpdate(t *testing.T) {
+	d := testDispatch(t)
+	vehType := d.Entity("Vehicle")
+	if vehType == nil {
+		t.Fatal("defs have no Vehicle")
+	}
+	vehicle := NewEntity(100, vehType)
+	sticker := hitPointValue(0x0102030405060708, hitParams(shellSpec{Caliber: 76.2, KindIndex: 2}, hitEffectPierced))
+	vehicle.Set("damageStickers", entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{sticker}})
+	el, err := EncodePropertyUpdate(vehicle, "damageStickers")
+	if err != nil {
+		t.Fatalf("damageStickers update: %v", err)
+	}
+	if el[0] <= entityPropertyBase {
+		t.Fatalf("damageStickers id = %#x, want above the property base %#x", el[0], entityPropertyBase)
+	}
+	if len(el) < 12 {
+		t.Fatalf("damageStickers = %d B, want the hit point payload", len(el))
+	}
 }
 
 // TestDamageMethodCallsNeedTheDefs guards the argument shapes: a wrong count
@@ -268,6 +303,10 @@ func TestDispersionShellData(t *testing.T) {
 	if d.Shell.Caliber != 76.2 {
 		t.Fatalf("caliber = %v, want 76.2", d.Shell.Caliber)
 	}
+	if !d.Shell.HasPiercedSticker {
+		t.Fatal("the AP shell has no pierced sticker")
+	}
+	t.Logf("pierced sticker index = %d", d.Shell.PiercedSticker)
 	if d.Shell.EffectsIndex == 0 {
 		t.Fatalf("effects index = 0, want the shot_effects position")
 	}

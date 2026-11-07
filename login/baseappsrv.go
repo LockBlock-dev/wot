@@ -356,6 +356,9 @@ type clientState struct {
 	dummyYaw       float32
 	dummyHealth    int
 	dummyMaxHealth int
+	// dummyStickers is the dummy's accumulated `damageStickers` (the shell
+	// holes); every pierced hit re-sends the whole list.
+	dummyStickers []entdef.Value
 	// shotID numbers the tracers this session fires.
 	shotID int32
 	// reloadGen numbers the reloads this session starts, so a completion

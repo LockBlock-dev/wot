@@ -1182,6 +1182,11 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   the dummy's hull box (TOG II: 76.2/50.8/25.4 mm), rolls penetration ±25% and
   damage ±25%, and streams `Vehicle.showDamageFromShot`/`health`/
   `onHealthChanged` plus `Avatar.showShotResults`/`showTracer`/`stopTracer`.
+  The muzzle smoke is `Vehicle.showShooting(burst, gunIndex, shellKind)` on
+  the own vehicle, and the shell hole is the `Vehicle.damageStickers`
+  `ALL_CLIENTS` property (one `VEHICLE_HIT_POINT` per pierced hit, the
+  segment context the `damage_stickers.xml` index of the shell's
+  `targetStickers/armorPierced`).
   The exposed ids are the defs' indexes; `selectEntity(dummy)` must precede the
   Vehicle calls and `selectPlayerEntity` the Avatar's, in the SAME packet.
   `health` is a bare `[0xB5][i16]` — `EncodePropertyUpdate`'s

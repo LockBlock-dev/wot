@@ -348,6 +348,18 @@ func showDamageFromShotElement(vehicle *Entity, attacker uint32, point entdef.Va
 	return EncodeClientMethodCall(vehicle, "showDamageFromShot", args)
 }
 
+// showShootingElement is `Vehicle.showShooting`, the muzzle flash and smoke
+// the client plays on the shooter. The reference server sends it with the
+// burst count, the gun installation index and the shell kind.
+func showShootingElement(vehicle *Entity, burst, gunIndex, shellKind uint8) ([]byte, error) {
+	args := []entdef.Value{
+		{Kind: entdef.VUint, Uint: uint64(burst)},
+		{Kind: entdef.VInt, Int: int64(int8(gunIndex))},
+		{Kind: entdef.VUint, Uint: uint64(shellKind)},
+	}
+	return EncodeClientMethodCall(vehicle, "showShooting", args)
+}
+
 // onHealthChangedElement is `Vehicle.onHealthChanged`, the health the client
 // shows and the death it triggers.
 func onHealthChangedElement(vehicle *Entity, newHealth, oldHealth int, attacker uint32) ([]byte, error) {
@@ -428,7 +440,8 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	dummyYaw := st.dummyYaw
 	oldHealth := st.dummyHealth
 	maxHealth := st.dummyMaxHealth
-	attacker := st.vehicle.ID
+	vehicle := st.vehicle
+	attacker := vehicle.ID
 	avatar := st.avatar
 	st.shotID++
 	shotID := st.shotID
@@ -485,6 +498,21 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if el, err := showDamageFromShotElement(dummy, attacker, point, sh.EffectsIndex, damage, uint8(damageFactor), sh.Speed); err == nil {
 		dummyApp = append(dummyApp, el...)
 	}
+	// The shell hole. `showDamageFromShot` only plays the impact effect; the
+	// persistent hole is the vehicle's `damageStickers` (an ALL_CLIENTS
+	// property), one `VEHICLE_HIT_POINT` per pierced hit whose segment
+	// context is the sticker id. The client's `addDamageSticker` draws it.
+	if res.Pierced && sh.HasPiercedSticker {
+		sticker := hitPointValue(encodeHitSegment(dummyBounds(), res.Local, res.LocalDir, 1, sh.PiercedSticker), hitParams(sh, hitEffectPierced))
+		s.mu.Lock()
+		st.dummyStickers = append(st.dummyStickers, sticker)
+		stickers := append([]entdef.Value(nil), st.dummyStickers...)
+		s.mu.Unlock()
+		dummy.Set("damageStickers", entdef.Value{Kind: entdef.VSeq, Seq: stickers})
+		if el, err := EncodePropertyUpdate(dummy, "damageStickers"); err == nil {
+			dummyApp = append(dummyApp, el...)
+		}
+	}
 	if damage > 0 {
 		dummy.SetInt("health", int64(newHealth))
 		// A bare property is `[id][value]`, with NO length:
@@ -497,6 +525,15 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		if el, err := onHealthChangedElement(dummy, newHealth, oldHealth, attacker); err == nil {
 			dummyApp = append(dummyApp, el...)
 		}
+	}
+	// The shooter's own gun: its muzzle flash and smoke. `showShooting` is a
+	// Vehicle client method, so the own vehicle is selected for it; the
+	// tracer that follows is an Avatar method and re-selects the player.
+	if el, err := showShootingElement(vehicle, 1, 0, sh.KindIndex); err == nil {
+		if sel, serr := EncodeSelectEntity(vehicle.ID); serr == nil {
+			avatarApp = append(avatarApp, sel...)
+		}
+		avatarApp = append(avatarApp, el...)
 	}
 	// The shooter's own view: the shell and the hit marker.
 	avatarApp = append(avatarApp, EncodeSelectPlayerEntity()...)

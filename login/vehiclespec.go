@@ -69,6 +69,12 @@ type shellSpec struct {
 	Gravity      float64
 	MaxDistance  float64
 	EffectsIndex uint8
+	// PiercedSticker is the shell's `armorPierced` damage sticker index in
+	// `common/damage_stickers.xml` — the shell hole `Vehicle.addDamageSticker`
+	// draws. HasPiercedSticker is false when the shell's effects entry names
+	// none.
+	PiercedSticker    uint8
+	HasPiercedSticker bool
 }
 
 // dispersionSpec is the client's own dispersion model, read from the defs the
@@ -707,6 +713,8 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 		shell.KindIndex = data.KindIndex
 		shell.Caliber = data.Caliber
 		shell.EffectsIndex = data.EffectsIndex
+		shell.PiercedSticker = data.PiercedSticker
+		shell.HasPiercedSticker = data.HasPiercedSticker
 	}
 	shellCD := int32(0)
 	if nation != "" {
@@ -824,14 +832,71 @@ func shellDataIn(pkg, nation, name string) (shellSpec, error) {
 	if e := sh.Child("effects"); e != nil {
 		effects = strings.TrimSpace(e.AsString())
 	}
-	return shellSpec{
+	shell := shellSpec{
 		Name:         name,
 		Damage:       damage,
 		Kind:         kind,
 		KindIndex:    shellKindIndex(kind),
 		Caliber:      caliber,
 		EffectsIndex: shotEffectsIndex(pkg, effects),
-	}, nil
+	}
+	shell.PiercedSticker, shell.HasPiercedSticker = piercedStickerIndex(pkg, effects)
+	return shell, nil
+}
+
+// piercedStickerIndex is the shell's `armorPierced` damage sticker: the
+// `targetStickers/armorPierced` name under its `shot_effects.xml` entry,
+// resolved to its position in `common/damage_stickers.xml`. The client's
+// `Vehicle.addDamageSticker` takes that index as the sticker id, see the
+// reference server's `add_sticker`.
+func piercedStickerIndex(pkg, effects string) (uint8, bool) {
+	if effects == "" {
+		return 0, false
+	}
+	raw, err := readFromZip(pkg, "scripts/item_defs/vehicles/common/shot_effects.xml")
+	if err != nil {
+		return 0, false
+	}
+	f, err := entdef.ParseFile(raw)
+	if err != nil || f.Root == nil {
+		return 0, false
+	}
+	sticker := ""
+	for _, c := range f.Root.Children {
+		if c.Name != effects {
+			continue
+		}
+		ts := c.Child("targetStickers")
+		if ts == nil {
+			break
+		}
+		if a := ts.Child("armorPierced"); a != nil {
+			sticker = strings.TrimSpace(a.AsString())
+		}
+		break
+	}
+	if sticker == "" {
+		return 0, false
+	}
+	raw, err = readFromZip(pkg, "scripts/item_defs/vehicles/common/damage_stickers.xml")
+	if err != nil {
+		return 0, false
+	}
+	f, err = entdef.ParseFile(raw)
+	if err != nil || f.Root == nil {
+		return 0, false
+	}
+	idx := 0
+	for _, c := range f.Root.Children {
+		if strings.HasPrefix(c.Name, "xmlns:") || c.Name == "texture" {
+			continue
+		}
+		if c.Name == sticker {
+			return uint8(idx), true
+		}
+		idx++
+	}
+	return 0, false
 }
 
 // shellKindIndex is the shell kind's index in the client's
