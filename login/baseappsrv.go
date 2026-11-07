@@ -1719,11 +1719,17 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 		// request as something else and the client never gets an answer. Check
 		// for it by name before the generic pass.
 		if av := s.cfg.Dispatch.Entity("Avatar"); av != nil {
-			if m := av.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil && m.Name == "leaveArena" {
-				args, err := m.ReadArgs(bytes.NewReader(body))
-				if err == nil {
-					return postCall{Method: m, Args: args, Elem: elemID, Body: body}, true
+			if m := av.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
+				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=%q", elemID, len(body), m.Name)
+				if m.Name == "leaveArena" {
+					args, err := m.ReadArgs(bytes.NewReader(body))
+					if err == nil {
+						return postCall{Method: m, Args: args, Elem: elemID, Body: body}, true
+					}
+					s.logf("post-flood leaveArena args: %v", err)
 				}
+			} else {
+				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=none", elemID, len(body))
 			}
 		}
 		for _, name := range []string{"Account", "Avatar"} {
@@ -2853,11 +2859,17 @@ func (s *BaseAppServer) decodeBaseCall(elemID byte, body []byte) (postCall, bool
 		// request as something else and the client never gets an answer. Check
 		// for it by name before the generic pass.
 		if av := s.cfg.Dispatch.Entity("Avatar"); av != nil {
-			if m := av.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil && m.Name == "leaveArena" {
-				args, err := m.ReadArgs(bytes.NewReader(body))
-				if err == nil {
-					return postCall{Method: m, Args: args, Elem: elemID, Body: body}, true
+			if m := av.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
+				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=%q", elemID, len(body), m.Name)
+				if m.Name == "leaveArena" {
+					args, err := m.ReadArgs(bytes.NewReader(body))
+					if err == nil {
+						return postCall{Method: m, Args: args, Elem: elemID, Body: body}, true
+					}
+					s.logf("post-flood leaveArena args: %v", err)
 				}
+			} else {
+				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=none", elemID, len(body))
 			}
 		}
 		for _, name := range []string{"Account", "Avatar"} {
@@ -3048,6 +3060,7 @@ func (s *BaseAppServer) answerPostCall(conn Transport, from *net.UDPAddr, st *cl
 	// request id followed by a CMD_* id, so they are dispatched by the
 	// defs' method name before the command switch.
 	if call.Method != nil {
+		s.logf("post-flood dispatch method=%q elem=%#02x", call.Method.Name, call.Elem)
 		switch call.Method.Name {
 		case "requestToken":
 			return s.answerRequestToken(conn, from, st, call)
