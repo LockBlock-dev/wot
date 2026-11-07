@@ -355,7 +355,18 @@ func ShopItemPrices(vehicles []OwnableVehicle) map[int64]map[string]int64 {
 		}
 		for i, kind := range []uint8{itemChassis, itemEngine, itemFuelTank, itemRadio, itemTurret, itemGun} {
 			id := binary.LittleEndian.Uint16(v.CompDescr[at+i*2:])
-			out[intCompactDescr(kind, nation, id)] = priceOf(modulePrice, 0)
+			// The module's own price from the item defs, when the generated
+			// table has it: the shop and the tech tree read it, and a flat
+			// stand-in makes every module cost the same.
+			price := int64(modulePrice)
+			if byNation, ok := AllModulePrices[kind]; ok {
+				if table, ok := byNation[nation]; ok {
+					if p, ok := table[id]; ok && p > 0 {
+						price = p
+					}
+				}
+			}
+			out[intCompactDescr(kind, nation, id)] = priceOf(price, 0)
 		}
 	}
 	// Crew skins are listed the same way: the crew-skin screen walks the

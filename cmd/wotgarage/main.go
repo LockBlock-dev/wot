@@ -210,6 +210,47 @@ func main() {
 	}
 	b.WriteString("}\n")
 
+	// The modules' prices, from the component defs: the shop's price table
+	// needs one per chassis, engine, fuel tank, radio, turret and gun, or the
+	// client filters the module out of the shop and the tech tree.
+	prices, err := modulePrices(*itemDefs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "wotgarage: module prices: %v\n", err)
+		os.Exit(1)
+	}
+	b.WriteString("\n// AllModulePrices is every component's price, by item kind and nation, as\n")
+	b.WriteString("// the shop's price table needs it: `[kind][nation][id] = credits`.\n")
+	b.WriteString("var AllModulePrices = map[uint8]map[uint8]map[uint16]int64{\n")
+	for _, kind := range []uint8{2, 3, 4, 5, 6, 7} {
+		byNation := prices[kind]
+		if len(byNation) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\t%d: {\n", kind)
+		for nation := uint8(0); nation < uint8(len(nations)); nation++ {
+			table := byNation[nation]
+			if len(table) == 0 {
+				continue
+			}
+			fmt.Fprintf(&b, "\t\t%d: {", nation)
+			first := true
+			for id := 0; id < 65536; id++ {
+				price, ok := table[uint16(id)]
+				if !ok {
+					continue
+				}
+				if !first {
+					b.WriteString(", ")
+				}
+				fmt.Fprintf(&b, "%d: %d", id, price)
+				first = false
+			}
+			b.WriteString("},\n")
+		}
+		b.WriteString("\t},\n")
+	}
+	b.WriteString("}\n")
+
 	// Crew skins: every skin the client's crewSkins.xml declares.
 	skins, err := crewSkinIDs(*itemDefs)
 	if err != nil {
@@ -398,6 +439,54 @@ func loadComponents(dir string) (map[string]map[string]uint16, error) {
 			table[sec.Name] = uint16(n)
 		}
 		out[kind] = table
+	}
+	return out, nil
+}
+
+// modulePrices reads every component's `<price>` from the nation's component
+// defs, keyed by item kind and nation. The item kinds are the client's
+// `ITEM_TYPE_NAMES`: 2 chassis, 3 engine, 4 fuel tank, 5 radio, 6 turret,
+// 7 gun.
+func modulePrices(itemDefs string) (map[uint8]map[uint8]map[uint16]int64, error) {
+	kinds := map[uint8]string{2: "chassis", 3: "engine", 4: "fuelTank", 5: "radio", 6: "turret", 7: "gun"}
+	out := map[uint8]map[uint8]map[uint16]int64{}
+	for nationIdx, nation := range nations {
+		dir := filepath.Join(itemDefs, "vehicles", nation, "components")
+		ids, err := loadComponents(filepath.Join(itemDefs, "vehicles", nation))
+		if err != nil {
+			return nil, err
+		}
+		for kind, file := range map[uint8]string{2: "chassis.xml", 3: "engines.xml", 4: "fuelTanks.xml", 5: "radios.xml", 6: "turrets.xml", 7: "guns.xml"} {
+			f, err := readPacked(filepath.Join(dir, file))
+			if err != nil {
+				continue
+			}
+			// The definitions live under the file's `<shared>` child; the
+			// root's other child is the `<ids>` table.
+			shared := f.Root.Child("shared")
+			if shared == nil {
+				continue
+			}
+			table := map[uint16]int64{}
+			for _, sec := range shared.Children {
+				id, ok := ids[kinds[kind]][sec.Name]
+				if !ok {
+					continue
+				}
+				if p := sec.Child("price"); p != nil {
+					if v, err := sectionInt(p); err == nil {
+						table[id] = v
+					}
+				}
+			}
+			if len(table) == 0 {
+				continue
+			}
+			if out[kind] == nil {
+				out[kind] = map[uint8]map[uint16]int64{}
+			}
+			out[kind][uint8(nationIdx)] = table
+		}
 	}
 	return out, nil
 }

@@ -1230,6 +1230,11 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
   HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
   put every hole a few tenths of a metre off the aim point.
+- **The shop's module prices come from the item defs.** `cmd/wotgarage` now
+  also emits `lobby.AllModulePrices` (`[kind][nation][id] = credits`) from
+  each component's `<price>` in the nation's `components/*.xml` — the
+  definitions live under the packed file's `<shared>` child, not its root —
+  and `ShopItemPrices` uses it instead of the flat 100-credit stand-in.
 - **The tank collides with the map's static models.** `login/havok.go` ports
   the Havok tagfile decoder, `login/collision.go` the `hknpCompressedMeshShape`
   triangles and the `HKBodyFlagsData` bounds, and `login/statics.go` the
