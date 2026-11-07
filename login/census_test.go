@@ -95,7 +95,7 @@ func TestBuildCensusRejectsWrongClassCount(t *testing.T) {
 // onEnqueued and onDequeued are Account client methods, so their element
 // ids are ENTITY_METHOD_BASE + the exposed id.
 func TestAccountQueueCallsAreValidElements(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -128,8 +128,9 @@ func TestAccountQueueCallsAreValidElements(t *testing.T) {
 		if want := byte(entityMethodBase + c.slot); elem[0] != want {
 			t.Errorf("%s element id = %#02x, want %#02x", c.method, elem[0], want)
 		}
-		if n := int(elem[1]) | int(elem[2])<<8; n != 1 {
-			t.Errorf("%s payload = %d B, want 1", c.method, n)
+		// Fixed-size method: no length field, the payload follows the id.
+		if len(elem) != 2 {
+			t.Errorf("%s element = %d B, want 2 (id + 1-byte payload)", c.method, len(elem))
 		}
 	}
 }

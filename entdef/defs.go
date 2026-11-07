@@ -27,6 +27,11 @@ const (
 	flagReplay      = 0x100 // DATA_REPLAY (ExposedForReplay)
 
 	distMask = flagGhosted | flagOtherClient | flagOwnClient | flagBase | flagClientOnly | flagEditorOnly
+
+	// cellToClientMask is EntityDescription::FROM_CELL_TO_CLIENT_DATA:
+	// the properties CreateCellPlayer carries. OWN_CLIENT is the player's
+	// own entity, ALL_CLIENTS is ghosted + other-client + own-client.
+	cellToClientMask = flagOwnClient | flagGhosted | flagOtherClient
 )
 
 var flagTable = map[string]int{
@@ -73,6 +78,11 @@ type Property struct {
 	VarLen    uint // VariableLengthHeaderSize, default 1
 	FullIndex int  // client-server full index (assigned after sorting)
 	Volatile  bool // per-property volatile (fork addition; usually false)
+	// DetailLevel is the property's <DetailLevel> (MY_VEHICLE, ...), empty
+	// when it has none. It decides which half of the replication a property
+	// rides: the ones with no detail level go in the entity creation
+	// message, the ones with one ride the update that follows.
+	DetailLevel string
 }
 
 // StreamSize mirrors DataDescription::streamSize (datatype size, or
@@ -133,12 +143,37 @@ type Entity struct {
 }
 
 // CSPropsOrdered returns the client-server properties in FullIndex
-// (wire) order: CSProps already holds Props indexes in that order
-// after finish. Used by the replay property table generator.
+// order: CSProps already holds Props indexes in that order after
+// finish. This is the digest/addressing order (fixed sizes first, then
+// variable by header width), used by the replay property table
+// generator and by property-update element ids.
 func (e *Entity) CSPropsOrdered() []Property {
 	out := make([]Property, 0, len(e.CSProps))
 	for _, pi := range e.CSProps {
 		out = append(out, e.Props[pi])
+	}
+	return out
+}
+
+// WireProps returns the client-server properties in the order they are
+// written on the wire, which is NOT the FullIndex order: an entity's
+// property table is built interfaces-first (each interface's Implements
+// then its Properties, recursively) and then the entity's own
+// Properties in declaration order. Props already holds them in that
+// order, so this is a filter, not a sort.
+//
+// The difference is load-bearing for createBasePlayer. Account's four
+// client properties come out as requiredVersion_2400, name,
+// incarnationID, initialServerSettings on the wire, while FullIndex
+// puts the fixed-width incarnationID first. Encoding them in FullIndex
+// order shifts every field and the client reads the version string as
+// an entity id.
+func (e *Entity) WireProps() []Property {
+	out := make([]Property, 0, len(e.CSProps))
+	for i := range e.Props {
+		if e.Props[i].isClientServerData() {
+			out = append(out, e.Props[i])
+		}
 	}
 	return out
 }
@@ -341,6 +376,9 @@ func (e *Entity) parseProperties(list *Section) error {
 		p := Property{Name: ps.Name, Flags: flags, Type: typ, VarLen: 1}
 		if v := ps.Child("Volatile"); v != nil && isTrueSection(v) {
 			p.Volatile = true
+		}
+		if dl := ps.Child("DetailLevel"); dl != nil {
+			p.DetailLevel = dl.StrVal()
 		}
 		if vs := ps.Child("VariableLengthHeaderSize"); vs != nil {
 			v, err := varLenValue(vs)

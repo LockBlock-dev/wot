@@ -535,6 +535,21 @@ func TestServerMsgMintedShapes(t *testing.T) {
 	if got := userNameOf("plain-name"); got != "plain-name" {
 		t.Fatalf("userNameOf fallback %q", got)
 	}
+	// A token2 login sends the identity document with an EMPTY `login`.
+	// Returning the document there is what put the whole JSON — session id
+	// and token2 included — into the Account entity's `name`, which the
+	// hangar renders in its top-left corner.
+	tokenDoc := `{"session": "e65b", "token2": "123456789:409:140", "gameId": "wot", "login": "", "auth_method": "token2"}`
+	if got := userNameOf(tokenDoc); got != "" {
+		t.Fatalf("userNameOf token document = %q, want \"\" (no name in it)", got)
+	}
+	// The in-game name drops the login form's @domain.
+	if got := displayNameOf("admin@wot.test"); got != "admin" {
+		t.Fatalf("displayNameOf = %q, want admin", got)
+	}
+	if got := displayNameOf("ExampleUser"); got != "ExampleUser" {
+		t.Fatalf("displayNameOf bare = %q", got)
+	}
 	if got := pseudoAccountID("ExampleUser"); got != pseudoAccountID("ExampleUser") {
 		t.Fatal("pseudo id unstable for a fixed name")
 	}
@@ -833,7 +848,11 @@ func TestLoginAppTokenLoginUnmapped(t *testing.T) {
 	if rid != 54 || status != statusBadPassword {
 		t.Fatalf("rid=%d status=%d, want 68", rid, status)
 	}
-	if gotUser == "" || gotUser == "admin" {
-		t.Fatalf("VerifyCredentials saw %q, want the client's own (empty) name", gotUser)
+	// A token document carries no name: `login` is empty and the credential
+	// is the token. The hook must see that emptiness, not the document —
+	// handing it the raw JSON is what put the session id and token2 into
+	// the Account entity's `name`.
+	if gotUser != "" {
+		t.Fatalf("VerifyCredentials saw %q, want \"\" (the document has no login)", gotUser)
 	}
 }

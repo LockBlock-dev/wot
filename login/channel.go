@@ -1,5 +1,7 @@
 package login
 
+import "encoding/binary"
+
 // Mercury channel flag bits (WoT fork) and the footer-length rule they
 // drive.
 //
@@ -63,4 +65,30 @@ func ChannelTrailerLen(flags uint16) int {
 		n += 8
 	}
 	return n
+}
+
+// fragRange reads a fragment frame's [first,last] range and its seq.
+// The trailer is [first][last][seq][cumul], so the range sits at n-tr and
+// the seq is the 4 bytes before cumul when CUMUL is set.
+func fragRange(clear []byte) (first, last, seq uint32, ok bool) {
+	n := len(clear)
+	if n < 14 {
+		return 0, 0, 0, false
+	}
+	flags := binary.LittleEndian.Uint16(clear[0:2])
+	if flags&chFlagFragment == 0 {
+		return 0, 0, 0, false
+	}
+	tr := ChannelTrailerLen(flags)
+	if n < 2+tr || tr < 12 {
+		return 0, 0, 0, false
+	}
+	first = binary.LittleEndian.Uint32(clear[n-tr : n-tr+4])
+	last = binary.LittleEndian.Uint32(clear[n-tr+4 : n-tr+8])
+	if flags&chFlagCumulAck != 0 {
+		seq = binary.LittleEndian.Uint32(clear[n-8 : n-4])
+	} else {
+		seq = binary.LittleEndian.Uint32(clear[n-4:])
+	}
+	return first, last, seq, true
 }

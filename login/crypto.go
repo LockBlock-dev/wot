@@ -83,6 +83,15 @@ func decryptBlowfish(key string, src []byte) ([]byte, error) {
 	return dst[:len(dst)-(wastage+4)], nil
 }
 
+// DecryptChannelFrame is decryptBlowfish for tools: it strips the 4 B
+// datagram nonce and returns a channel frame's clear bytes.
+func DecryptChannelFrame(key string, datagram []byte) ([]byte, error) {
+	if len(datagram) < 4 {
+		return nil, fmt.Errorf("wotlogin: datagram %d B, want at least the 4 B nonce", len(datagram))
+	}
+	return decryptBlowfish(key, datagram[4:])
+}
+
 // encryptBlowfish is the mirror of decryptBlowfish (EncryptionFilter::encrypt,
 // IDA sub_142AD67F0): XOR-chain plaintext blocks, Blowfish-ECB encrypt,
 // then zero-pad + ENCRYPTION_MAGIC u32 LE + wastage byte so the total is a

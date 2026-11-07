@@ -12,10 +12,13 @@ package login
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"github.com/LockBlock-dev/wot/entdef"
 	"github.com/LockBlock-dev/wot/lobby"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -127,86 +130,122 @@ func TestBaseAppRedirectShape(t *testing.T) {
 }
 
 // TestBaseAppPostFloodCarrier pins the v2 chain loaders against the
-// genuine flows3-s2 decrypts: the tail terminator 317B clear, the 12B
-// plain tick (tag 7a, seq 503, cumul 3), the [13][7b] rev answer and
-// the 1a/5b stats answer (what the post-flood mint replays and seeds),
-// plus the v2.1 pre-flood templates: info app verbatim, the descriptor
-// with its packed "ExampleUser" name slot, and the 1a/76 session-dict
-// small (the dict's personal riders — clan block, offer — are cut).
-func TestBaseAppPostFloodCarrier(t *testing.T) {
-	dumpPath, keyPath := "../../captures/flows3-s2.txt", "../../captures/key3.txt"
-	if _, err := os.Stat(dumpPath); err != nil {
-		t.Skipf("no stage-2 capture (%v)", err)
+// TestBaseAppAuthoredContent pins the stage-2 content the server now
+// AUTHORS: the flood bundle (from the defs + the settings document), the
+// session dict, the revisions answer and the stats answer. No capture is
+// read.
+func TestBaseAppAuthoredContent(t *testing.T) {
+	settings, err := lobby.EncodeDocument(lobby.NewDict().
+		Set("file_server", lobby.NewDict().Set("host", lobby.NewString("127.0.0.1"))).
+		Set("padding", lobby.NewString(strings.Repeat("x", 70000))))
+	if err != nil {
+		t.Fatalf("settings: %v", err)
 	}
 	base, err := NewBaseAppServer(BaseAppConfig{
-		Redirect:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 32990},
-		FloodPath:    dumpPath,
-		FloodKeyPath: keyPath,
+		Redirect: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 32990},
+		Dispatch: testDispatch(t),
+		Settings: settings,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.term) != 317 {
-		t.Fatalf("terminator clear %dB, want 317", len(base.term))
+	// The bundle: updateFrequencyNotification + tickSync + the oversize
+	// createBasePlayer element carrying the settings pickle.
+	stream, err := base.buildFlood(&clientState{entityID: 0x1234, name: "tester", version: "2.4.1"})
+	if err != nil {
+		t.Fatalf("buildFlood: %v", err)
 	}
-	if want, _ := hex.DecodeString(genuinePostTickRaw); !bytes.Equal(base.tickSeed, want) {
-		t.Fatalf("tick seed %x want %x", base.tickSeed, want)
+	if stream[0] != 0x02 || stream[8] != 0x13 || stream[10] != 0x05 {
+		t.Fatalf("bundle head % x, want 02… 13… 05…", stream[:16])
 	}
-	if base.postTag != 0x7a || base.postSeq != 503 || base.postCumul != 3 {
-		t.Fatalf("sequencer seed tag=%02x seq=%d cumul=%d; want 7a/503/3",
-			base.postTag, base.postSeq, base.postCumul)
+	if stream[11] != 0xFF || stream[12] != 0xFF {
+		t.Fatalf("createBasePlayer length field % x, want the oversize FF FF", stream[11:13])
 	}
-	if want, _ := hex.DecodeString(genuineRevReplyRaw); !bytes.Equal(base.revReply, want) {
-		t.Fatalf("rev reply %x want %x", base.revReply, want)
+	// The element's u32 must cover the rest of the stream exactly.
+	elemLen := int(binary.LittleEndian.Uint32(stream[13:17]))
+	if got, want := 17+elemLen, len(stream); got != want {
+		t.Fatalf("element ends at %d, stream is %d B", got, want)
 	}
-	if !hasSmall(base.pollAns, 0x1a, 0x5b) {
-		t.Fatalf("poll answer lacks 1a/5b: %x", base.pollAns)
+	// The entity id rides in the element's last four bytes (the oversize
+	// form's displaced head).
+	if got := binary.LittleEndian.Uint32(stream[len(stream)-4:]); got != 0x1234 {
+		t.Fatalf("entity id %d, want 0x1234", got)
 	}
-	if !base.preOK {
-		t.Fatal("pre-flood smalls not loaded")
+
+	// The session dict: 1a/76 with the u16 length, a status byte and a
+	// pickle holding the four live fields.
+	dict, err := BuildSessionDict(100000001, time.Unix(1789681556, 0), time.Unix(1789681556, 500000000))
+	if err != nil {
+		t.Fatalf("BuildSessionDict: %v", err)
 	}
-	if want, _ := hex.DecodeString(genuineInfoAppRaw); !bytes.Equal(base.infoApp, want) {
-		t.Fatalf("info app %x want %x", base.infoApp, want)
+	sm, n, err := lobby.ParseSmall(dict)
+	if err != nil || n != len(dict) {
+		t.Fatalf("session dict parse: %v (%d/%d)", err, n, len(dict))
 	}
-	if want, _ := hex.DecodeString(genuineDescrRaw); !bytes.Equal(base.descTpl, want) {
-		t.Fatalf("descriptor template %x want %x", base.descTpl, want)
+	if sm.Family != 0x1a || sm.Type != 0x76 {
+		t.Fatalf("session dict is %#02x/%#02x, want 1a/76", sm.Family, sm.Type)
 	}
-	if want, _ := hex.DecodeString(genuineDictSmallRaw); !bytes.Equal(base.dictTpl, want) {
-		t.Fatalf("dict template %x want %x", base.dictTpl, want)
+	// Body = [u8 pickle length][pickle] — the genuine 1a/76 shape
+	// (`1a 76 9c 00 9b <155B>`: 0x9b = 155 = 156 - 1). No status byte.
+	if int(sm.Body[0]) != len(sm.Body)-1 {
+		t.Fatalf("session dict body head % x (length byte %d, body %d B)", sm.Body[:4], sm.Body[0], len(sm.Body))
 	}
-	// descriptorFrame splices the name and drops the capture's fragment
-	// footer: the template is flags 0x0478 (IS_FRAGMENT) with the range
-	// [2,174] from flows3-s2, while the flood burst comes from
-	// proxy-1752 and says [1,185]. The client stores the first footer it
-	// sees and rejects every later fragment that disagrees, so the
-	// descriptor goes out as a plain reliable frame: 0x0458, trailer
-	// [seq][cumul] only.
-	tpl, _ := hex.DecodeString(genuineDescrRaw)
-	wantRound := append([]byte{0x58, 0x04}, tpl[2:45]...)
-	wantRound = append(wantRound, tpl[53:61]...)
-	round, err := descriptorFrame(base.descTpl, "ExampleUser")
-	if err != nil || !bytes.Equal(round, wantRound) {
-		t.Fatalf("descriptor round-trip = %x, %v; want %x", round, err, wantRound)
+	stk, _, err := lobby.DecodePrefix(sm.Body[1:])
+	if err != nil {
+		t.Fatalf("session dict pickle: %v", err)
 	}
-	short, err := descriptorFrame(base.descTpl, "loopback")
-	if err != nil || len(short) != 50 {
-		t.Fatalf("descriptor splice = %dB, %v; want 50B", len(short), err)
+	d, ok := stk[len(stk)-1].(*lobby.PDict)
+	if !ok || len(d.Entries) != 7 {
+		t.Fatalf("session dict stack top %T (%d entries), want *PDict with 7", stk[len(stk)-1], len(d.Entries))
 	}
-	if string(short[26:34]) != "loopback" || short[25] != 8 {
-		t.Fatalf("descriptor splice slot: nlen=%d name=%q", short[25], short[26:34])
+	val := func(k string) any {
+		for _, e := range d.Entries {
+			if e.Key == k {
+				return e.Value
+			}
+		}
+		return nil
 	}
-	// head: flags + app up to the name slot; tail: the 8B app tail plus
-	// [seq][cumul] (the capture's [first][last] range is dropped).
-	wantTail := append(append([]byte{}, tpl[37:45]...), tpl[53:61]...)
-	wantHead := append([]byte{0x58, 0x04}, tpl[2:25]...)
-	if !bytes.Equal(short[:25], wantHead) || !bytes.Equal(short[34:], wantTail) {
-		t.Fatalf("descriptor splice outskirts drift: head %x tail %x want %x", short[:25], short[34:], wantTail)
+	if v, _ := val("databaseID").(int64); v != 100000001 {
+		t.Fatalf("databaseID %v", val("databaseID"))
 	}
-	// 255-truncation guard: a 300B name is capped without error
-	// (nlen is a 1B field; sendCarrier-level name bytes are game-only).
-	long, err := descriptorFrame(base.descTpl, string(make([]byte, 300)))
-	if err != nil || long[25] != 255 || len(long) != 25+1+255+16 {
-		t.Fatalf("descriptor truncation: nlen=%d len=%d err=%v", long[25], len(long), err)
+	if v, _ := val("sessionStartedAt").(int64); v != 1789681556 {
+		t.Fatalf("sessionStartedAt %v", val("sessionStartedAt"))
+	}
+	if v, _ := val("serverUTC").(float64); v != 1789681556.5 {
+		t.Fatalf("serverUTC %v", val("serverUTC"))
+	}
+
+	// The revisions answer: 1a/5f, [req u32][status][len][pickle].
+	rev, err := BuildRevisionsAnswer(224, 88, 88)
+	if err != nil {
+		t.Fatalf("BuildRevisionsAnswer: %v", err)
+	}
+	rs, _, err := lobby.ParseSmall(rev)
+	if err != nil {
+		t.Fatalf("rev parse: %v", err)
+	}
+	if rs.Family != 0x1a || rs.Type != 0x5f {
+		t.Fatalf("rev answer is %#02x/%#02x, want 1a/5f", rs.Family, rs.Type)
+	}
+	if got := binary.LittleEndian.Uint32(rs.Body[:4]); got != 224 {
+		t.Fatalf("rev answer request id %d, want 224", got)
+	}
+	if rs.Body[4] != 0 || int(rs.Body[5]) != len(rs.Body)-6 {
+		t.Fatalf("rev answer body head % x", rs.Body[:6])
+	}
+
+	// The stats answer: 1a/5b, two u32 counters, no length byte.
+	st, err := BuildServerStatsAnswer(7, 9)
+	if err != nil {
+		t.Fatalf("BuildServerStatsAnswer: %v", err)
+	}
+	ss, _, err := lobby.ParseSmall(st)
+	if err != nil {
+		t.Fatalf("stats parse: %v", err)
+	}
+	if ss.Family != 0x1a || ss.Type != 0x5b || len(ss.Body) != 8 {
+		t.Fatalf("stats answer %#02x/%#02x body %d B", ss.Family, ss.Type, len(ss.Body))
 	}
 }
 
@@ -348,26 +387,20 @@ func udpLocal(conn *net.UDPConn) *net.UDPAddr {
 // the genuine post-flood reliable-seq walk (sync 3 / poll 4 / season 6)
 // so every minted cumul matches the capture's ramp.
 func TestBaseAppStageLoopback(t *testing.T) {
-	dumpPath, keyPath := "../../captures/flows3-s2.txt", "../../captures/key3.txt"
-	if _, err := os.Stat(dumpPath); err != nil {
-		t.Skipf("no stage-2 capture (%v): rebuild with ../captures/extract_flows3.py", err)
-	}
-	if _, err := os.Stat(keyPath); err != nil {
-		t.Skipf("no capture key (%v)", err)
-	}
-
 	blockKey := baseAppTestKey()
 	sessKey := uint32(0x69668ba0)
-	loopbackName := "loopback" // must equal the Admit session name
 
 	s1 := bindInWindow(t, 32875)
 	defer s1.Close()
 	s2 := bindInWindow(t, 32876)
 	defer s2.Close()
+	// A settings document big enough to force the fragment chain (the
+	// single-datagram path is covered by TestFloodFramesCarryTheBundleVerbatim).
 	base, err := NewBaseAppServer(BaseAppConfig{
-		Redirect:     udpLocal(s2),
-		FloodPath:    dumpPath,
-		FloodKeyPath: keyPath,
+		Redirect:         udpLocal(s2),
+		Dispatch:         testDispatch(t),
+		Settings:         bigSettings(t),
+		CreateBasePlayer: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -460,33 +493,10 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if !ok || k2 == k1 || k2 == 0 {
 		t.Fatalf("stage-2 rotation: key=%x ok=%v (must mint a fresh key)", k2, ok)
 	}
-	// Pre-flood smalls (v2.1) ride right behind the rotation-2 reply
-	// (capture order: info at +10 ms, descriptor at +40 ms — sendPre
-	// emits both with every rotation-2 reply, loss-robust). The server's
-	// descriptor substitution target is the session name "loopback"
-	// (loopbackName below is the splice anchor used twice).
-	infoPkt := readDatagram(t, c2, 3*time.Second)
-	infoClear := decryptTest(t, blockKey, infoPkt)
-	if want, _ := hex.DecodeString(genuineInfoClearRaw); !bytes.Equal(infoClear, want) {
-		t.Fatalf("info clear %x want %x", infoClear, want)
-	}
-	descPkt := readDatagram(t, c2, 3*time.Second)
-	// Our name (8B) splices into the template and the fragment footer is
-	// dropped → 50B clear → 60B wire: pad = (8−((50+5)%8))%8 = 1 →
-	// 50+1+4 magic+1 wastage+4 rfx.
-	if len(descPkt) != 60 {
-		t.Fatalf("descriptor wire %dB, want 60 (50B name-spliced clear)", len(descPkt))
-	}
-	descClear := decryptTest(t, blockKey, descPkt)
-	tpl, _ := hex.DecodeString(genuineDescrRaw)
-	wantDesc := append([]byte{0x58, 0x04}, tpl[2:25]...)
-	wantDesc = append(wantDesc, byte(len(loopbackName)))
-	wantDesc = append(wantDesc, []byte(loopbackName)...)
-	wantDesc = append(wantDesc, tpl[37:45]...)
-	wantDesc = append(wantDesc, tpl[53:61]...)
-	if !bytes.Equal(descClear, wantDesc) {
-		t.Fatalf("descriptor clear %x want %x (name spliced at [25])", descClear, wantDesc)
-	}
+	// Nothing rides between the rotation-2 reply and the burst: the
+	// chain's first fragment carries the info elements
+	// (updateFrequencyNotification + tickSync) and the createBasePlayer
+	// header, exactly as the 2.4.1 flow does.
 	// double-auth: the reliable [02][k2][0b] (stageOneDriver.sendOpening
 	// shape; the unreliable [02][k2] twin rides 10 ms ahead in the
 	// genuine client — either proves key2 to the server, we send one).
@@ -497,39 +507,75 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if _, err := c2.WriteToUDP(auth1, udpLocal(s2)); err != nil {
 		t.Fatal(err)
 	}
-	// Session dict (v2.1) lands at serveBulk START: [13][40] + the
-	// 1a/76 small (clan/offer riders cut) + footers [seq 2][cumul 1]
-	// (the auth itself is a reliable seq-0 send → watermark 1).
-	// Genuine position: MID-burst (idx 63, seq 176, cumul 1) —
-	// documented ordinal delta (§18.7).
-	dictPkt := readDatagram(t, c2, 5*time.Second)
-	if len(dictPkt) != 188 { // 172B clear = 2 flags + [13 40] + 160B tpl + footers
-		t.Fatalf("session dict wire %dB, want 188", len(dictPkt))
+	// flood: the burst opens with the carrier chain's FIRST fragment —
+	// the short one that carries the bundle's leading elements
+	// (updateFrequencyNotification, tickSync, the createBasePlayer
+	// header), not a full 1252B chunk. It must channel-decrypt under OUR
+	// key and name the chain's own range.
+	flood := readDatagram(t, c2, 5*time.Second)
+	clearFlood := decryptTest(t, blockKey, flood)
+	if len(clearFlood) < 14 || clearFlood[0]&0x20 == 0 {
+		t.Fatalf("flood clear head %x (want a fragment frame)", clearFlood)
 	}
+	first, last, seq, ok := fragRange(clearFlood)
+	if !ok || seq != first {
+		t.Fatalf("flood first fragment range [%d,%d] seq %d ok=%v (the client needs seq == first)", first, last, seq, ok)
+	}
+
+	// --- post-flood chain: drain the burst, then the session dict. ---
+	// The burst is the authored chain; the session dict follows it, then
+	// the tick stream takes over. Every frame must decrypt under OUR
+	// session key.
+	deadline := time.Now().Add(20 * time.Second)
+	var dictPkt []byte
+	burst := 0
+	for dictPkt == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("session dict never arrived after %d bulk frames", burst)
+		}
+		pkt := readDatagram(t, c2, 5*time.Second)
+		clear := decryptTest(t, blockKey, pkt)
+		if len(clear) >= 4 && clear[0] == 0x58 && clear[1] == 0x04 && clear[2] == 0x13 && clear[3] == 0x40 {
+			dictPkt = pkt // the session dict closes the burst
+			continue
+		}
+		if len(clear) < 14 || clear[0]&0x20 == 0 {
+			t.Fatalf("unexpected %dB in burst drain: %x", len(pkt), clear[:min(len(clear), 12)])
+		}
+		burst++
+	}
+	// Session dict: [13][40] + the 1a/76 small + footers [seq][cumul]
+	// (the auth itself is a reliable seq-0 send → watermark 1). The seq
+	// sits past the chain's range: a minted seq inside it would be a
+	// duplicate the client drops, and one sent first would push the
+	// chain's own fragments below its watermark.
 	dictClear := decryptTest(t, blockKey, dictPkt)
-	// Structural pin, not byte-exact: the mint stamps a live timestamp
-	// per send, so the four patched values differ by design; the frame
-	// head, the small's envelope + protocol head, the boolean tail
-	// (`71 08 89 75 2e` = logUXEvents FALSE + STOP — untouched by the
-	// patcher) and the footers are pinned. The patched VALUES are
-	// checked below through the decoded pickle.
-	if !bytes.Equal(dictClear[0:6], []byte{0x58, 0x04, 0x13, 0x40, 0x1a, 0x76}) ||
-		!bytes.Equal(dictClear[6:11], []byte{0x9c, 0x00, 0x9b, 0x80, 0x02}) ||
-		!bytes.Equal(dictClear[159:164], []byte{0x71, 0x08, 0x89, 0x75, 0x2e}) {
-		t.Fatalf("session dict envelope: head %x mid %x tail %x",
-			dictClear[:6], dictClear[6:11], dictClear[159:164])
+	if !bytes.Equal(dictClear[0:6], []byte{0x58, 0x04, 0x13, 0x40, 0x1a, 0x76}) {
+		t.Fatalf("session dict head %x, want 5804 1340 1a76", dictClear[:6])
 	}
-	if got := binary.LittleEndian.Uint32(dictClear[len(dictClear)-8:]); got != 2 {
-		t.Fatalf("session dict seq %d, want 2", got)
+	dictSeq := binary.LittleEndian.Uint32(dictClear[len(dictClear)-8:])
+	// The channel delivers in order: the dict must take the seq right
+	// after the chain, or everything after it stalls in the client's
+	// receive window and is never ACKed.
+	// burst counts the frames drained after the first one, which the
+	// test read above.
+	if want := floodFirstSeq + 1 + uint32(burst); dictSeq != want {
+		t.Fatalf("session dict seq %d, want %d (the seq right after the chain)", dictSeq, want)
 	}
 	if got := binary.LittleEndian.Uint32(dictClear[len(dictClear)-4:]); got != 1 {
 		t.Fatalf("session dict cumul %d, want 1 (auth1 is reliable seq 0)", got)
 	}
 	// The small's pickle decodes CLOSED; the four live fields must
-	// carry OUR admission values, not the capture's (decode the
-	// RECEIVED frame's pickle body: [4:164] small, 1 status byte +
-	// the 155B proto-2 pickle).
-	stk, _, perr := lobby.DecodePrefix(dictClear[9:164])
+	// carry OUR admission values.
+	dictSmall, _, serr := lobby.ParseSmall(dictClear[4 : len(dictClear)-8])
+	if serr != nil {
+		t.Fatalf("session dict small: %v", serr)
+	}
+	// Body = [u8 pickle length][pickle] (the genuine 1a/76 shape).
+	if int(dictSmall.Body[0]) != len(dictSmall.Body)-1 {
+		t.Fatalf("session dict length byte %d, body %d B", dictSmall.Body[0], len(dictSmall.Body))
+	}
+	stk, _, perr := lobby.DecodePrefix(dictSmall.Body[1:])
 	if perr != nil {
 		t.Fatalf("session-dict pickle decode: %v", perr)
 	}
@@ -562,52 +608,55 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if !isI || db != int64(pseudoAccountID("loopback")) {
 		t.Fatalf("databaseID %v; want pseudoAccountID(loopback) = %d", val("databaseID"), pseudoAccountID("loopback"))
 	}
-	// flood: first datagram must be 1252B and channel-decrypt under OUR
-	// key (the burst continues behind it; the gift-frame check is the win).
-	flood := readDatagram(t, c2, 5*time.Second)
-	if len(flood) != 1252 {
-		t.Fatalf("flood datagram %dB, want 1252", len(flood))
+	// 1a/69 stats small: the account's free XP, on the seq after the dict.
+	statsPkt := readDatagram(t, c2, 3*time.Second)
+	statsClear := decryptTest(t, blockKey, statsPkt)
+	statsSmall, _, err := lobby.ParseSmall(statsClear[4:])
+	if err != nil {
+		t.Fatalf("stats small: %v", err)
 	}
-	clearFlood := decryptTest(t, blockKey, flood)
-	if len(clearFlood) < 10 || !bytes.Equal(clearFlood[:2], []byte{0x78, 0x00}) {
-		t.Fatalf("flood clear head %x (want 7800 bulk frame)", clearFlood)
+	if statsSmall.Family != 0x1a || statsSmall.Type != 0x69 {
+		t.Fatalf("stats small is %#02x/%#02x, want 1a/69", statsSmall.Family, statsSmall.Type)
+	}
+	if got := binary.LittleEndian.Uint32(statsClear[len(statsClear)-8:]); got != dictSeq+1 {
+		t.Fatalf("stats small seq %d, want %d", got, dictSeq+1)
 	}
 
-	// --- post-flood chain (v2): drain the burst, then the tail. ---
-	// The burst continues behind the first 1252B; read until the
-	// terminator (332B companion), then ticks take over. Every frame
-	// must decrypt under OUR session key (re-keyed per session).
-	deadline := time.Now().Add(20 * time.Second)
-	sawTerm, ticks := false, 0
-	for !sawTerm {
-		if time.Now().After(deadline) {
-			t.Fatalf("terminator never arrived after %d bulk frames", ticks)
-		}
-		pkt := readDatagram(t, c2, 5*time.Second)
-		clear := decryptTest(t, blockKey, pkt)
-		// The burst is the carrier's fragment chain: full 1252B frames
-		// plus the chain's SHORT last fragment (a bundle does not end on
-		// a 1252B boundary), then the 332B terminator.
-		if len(pkt) == 332 {
-			sawTerm = true
-			if clear[0] != 0x78 || clear[1] != 0x04 {
-				t.Fatalf("terminator flags %x (want 7804 companion)", clear[:2])
-			}
-			continue
-		}
-		if len(clear) < 14 || clear[0]&0x20 == 0 {
-			t.Fatalf("unexpected %dB in burst drain: %x", len(pkt), clear[:min(len(clear), 12)])
-		}
+	// selectPlayerEntity + showGUI ride the SESSION-DICT frame itself:
+	// `[1a][76][u16 elementLen][u8 stringLen][pickle]`. 0x1A is
+	// selectPlayerEntity (FIXED 0) and 0x76 is showGUI, so the "dict"
+	// packet IS the call that makes the hangar appear — the genuine
+	// server sends the pair once, not as two extra frames.
+	if len(dictClear) < 8 || dictClear[4] != elSelectPlayerEntity || dictClear[5] != byte(entityMethodBase+40) {
+		t.Fatalf("session-dict frame % x, want 1a %#02x …", dictClear, byte(entityMethodBase+40))
 	}
-	// First tail tick is the carrier's seed tick, byte-exact (the
-	// mint starts at tag 7a / seq 503 / cumul 3, advancing after; our
-	// test client skips the genuine token/tokres reliable sends between
-	// the auth and the burst, so the floor max(live, 3) preserves the
-	// capture's cumul ramp — see serveBulk).
+	elemLen := int(binary.LittleEndian.Uint16(dictClear[6:8]))
+	strLen := int(dictClear[8])
+	if elemLen != 1+strLen {
+		t.Fatalf("showGUI element length %d, string length %d (want 1+%d)", elemLen, strLen, strLen)
+	}
+	if got, want := 9+strLen, len(dictClear)-8; got != want {
+		t.Fatalf("showGUI string ends at %d, frame body ends at %d", got, want)
+	}
+
+	// First tail tick: tag 0x7a, the seq right after the session dict,
+	// and the cumulative ack is OURS — "last processed peer reliable
+	// seq + 1", i.e. 1 after the auth1 at seq 0. A cumul ahead of the
+	// client's own outbound seq makes it drop the frame:
+	//
+	//   UDPChannel::handleCumulativeAck: Received ACK for packets not
+	//   yet sent. endSeq: #3 outSeq: #2
 	tailTick := readDatagram(t, c2, 3*time.Second)
 	clearTailTick := decryptTest(t, blockKey, tailTick)
-	if wantTick, _ := hex.DecodeString(genuinePostTickRaw); !bytes.Equal(clearTailTick, wantTick) {
-		t.Fatalf("post-flood tick clear %x want %x", clearTailTick, wantTick)
+	if len(clearTailTick) != 12 || clearTailTick[0] != 0x58 || clearTailTick[1] != 0x04 ||
+		clearTailTick[2] != 0x13 || clearTailTick[3] != 0x7a {
+		t.Fatalf("post-flood tick clear %x, want 5804 137a …", clearTailTick)
+	}
+	if got := binary.LittleEndian.Uint32(clearTailTick[4:8]); got != dictSeq+2 {
+		t.Fatalf("post-flood tick seq %d, want %d (after the stats frame)", got, dictSeq+2)
+	}
+	if got := binary.LittleEndian.Uint32(clearTailTick[8:12]); got != 1 {
+		t.Fatalf("post-flood tick cumul %d, want 1", got)
 	}
 	// The client re-syncs once: 84B [02][key2] bundle with the doCmdInt3
 	// A1 tag (genuine idx 1010: DoCmdInt3(224, 100, 88, 0x699a133b, 0)
@@ -626,10 +675,137 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	// Ticks interleave with the answers (genuine idx 1011 lands between
 	// the 1013/1015 ticks), so read until the answer's own frame shows.
 	rev := readUntil(t, c2, blockKey, 5*time.Second, func(wire int, clear []byte) bool {
-		return wire == 60
+		return len(clear) > 4 && clear[2] == 0x13 && clear[3] == 0x7b
 	})
-	if wantRev, _ := hex.DecodeString(genuineRevReplyRaw); !bytes.Equal(rev, wantRev) {
-		t.Fatalf("rev answer clear %x want %x", rev, wantRev)
+	// The answer is authored: [13][7b] + 1a/5f RES_STREAM, then the
+	// resource header and fragment carrying the full state. It rides the
+	// stream because a garage of every ownable vehicle is ~9 KB, far past
+	// the 1223-byte bundle payload.
+	reqID, resultID, errStr, _, err := ParseCommandResponse(rev[4:])
+	if err != nil {
+		t.Fatalf("sync answer: %v", err)
+	}
+	if reqID != 224 {
+		t.Fatalf("sync answer request id %d, want 224", reqID)
+	}
+	if resultID != 1 || errStr != "" {
+		t.Fatalf("sync answer result %d error %q, want 1 (RES_STREAM) and empty", resultID, errStr)
+	}
+	// The stream: a RESOURCE_HEADER then one RESOURCE_FRAGMENT per chunk,
+	// all under the request id. The payload is chunked at
+	// streamFragmentSize, so every fragment has to be collected in
+	// sequence order until the one flagged last.
+	var payload []byte
+	frags := map[int][]byte{}
+	lastSeq := -1
+	for lastSeq < 0 {
+		el := readUntil(t, c2, blockKey, 5*time.Second, func(wire int, clear []byte) bool {
+			return len(clear) > 4 && clear[2] == 0x13 && (clear[4] == 0x45 || clear[4] == 0x46)
+		})
+		sm, _, err := lobby.ParseSmall(el[4:])
+		if err != nil {
+			t.Fatalf("stream element: %v", err)
+		}
+		if sm.Family != 0x46 {
+			continue // the header only registers the stream
+		}
+		// [u16 id][u8 seq][u8 last][data]
+		seq := int(sm.Body[2])
+		frags[seq] = sm.Body[4:]
+		if sm.Body[3] != 0 {
+			lastSeq = seq
+		}
+	}
+	for i := 0; i <= lastSeq; i++ {
+		chunk, ok := frags[i]
+		if !ok {
+			t.Fatalf("stream fragment %d of %d missing", i, lastSeq)
+		}
+		payload = append(payload, chunk...)
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("stream zlib: %v", err)
+	}
+	raw, err := io.ReadAll(zr)
+	zr.Close()
+	if err != nil {
+		t.Fatalf("stream zlib read: %v", err)
+	}
+	revStk, _, err := lobby.DecodePrefix(raw)
+	if err != nil {
+		t.Fatalf("sync pickle: %v", err)
+	}
+	rd, ok := revStk[len(revStk)-1].(*lobby.PDict)
+	if !ok {
+		t.Fatalf("sync stack top %T", revStk[len(revStk)-1])
+	}
+	var sawStats, sawPrevRev bool
+	for _, e := range rd.Entries {
+		k, _ := e.Key.(string)
+		switch k {
+		case "stats":
+			sawStats = true
+		case "prevRev":
+			sawPrevRev = true
+		}
+	}
+	if !sawStats {
+		t.Fatal("sync answer has no stats: the client would show \"-\" for every resource")
+	}
+	if sawPrevRev {
+		t.Fatal("sync answer carries prevRev: AccountSyncData.isFullSyncDiff would be false")
+	}
+
+	// The FOLLOW-UP. AccountSyncData.__onSyncComplete ends with
+	// `self._synchronize()`, which asks again with the revision the stream
+	// just delivered. That request must be answered too — leaving it
+	// parked in __onCmdResponse is what stalled the hangar on
+	// "Synchronisation de l'équipement" once the sync moved to the stream.
+	followUp := lobby.BuildLobbyBundle(k2,
+		lobby.DoCmdInt3(225, lobby.CmdSyncData, fullSyncRev, 0, 0))
+	followPkt, err := buildChannelPacket(blockKey, flagsRel, followUp, nil, 4, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.WriteToUDP(followPkt, udpLocal(s2)); err != nil {
+		t.Fatal(err)
+	}
+	ack := readUntil(t, c2, blockKey, 5*time.Second, func(wire int, clear []byte) bool {
+		if len(clear) < 6 || clear[2] != 0x13 || clear[4] != 0x1a || clear[5] != 0x5f {
+			return false
+		}
+		id, _, _, _, err := ParseCommandResponse(clear[4:])
+		return err == nil && id == 225
+	})
+	ackID, ackResult, _, ackExt, err := ParseCommandResponse(ack[4:])
+	if err != nil {
+		t.Fatalf("follow-up answer: %v", err)
+	}
+	if ackID != 225 || ackResult != 0 {
+		t.Fatalf("follow-up answer id %d result %d, want 225 and 0 (RES_SUCCESS)", ackID, ackResult)
+	}
+	ackStk, _, err := lobby.DecodePrefix(ackExt)
+	if err != nil {
+		t.Fatalf("follow-up pickle: %v", err)
+	}
+	ackDict, ok := ackStk[len(ackStk)-1].(*lobby.PDict)
+	if !ok {
+		t.Fatalf("follow-up stack top %T", ackStk[len(ackStk)-1])
+	}
+	var ackRev, ackPrev int64 = -1, -1
+	for _, e := range ackDict.Entries {
+		k, _ := e.Key.(string)
+		v, _ := e.Value.(int64)
+		switch k {
+		case "rev":
+			ackRev = v
+		case "prevRev":
+			ackPrev = v
+		}
+	}
+	if ackRev != fullSyncRev || ackPrev != fullSyncRev {
+		t.Fatalf("follow-up ack {rev: %d, prevRev: %d}, want both %d", ackRev, ackPrev, fullSyncRev)
 	}
 	// A 501 server-stats poll draws the 1a/5b counters answer, minted:
 	// the BODY replays the capture's first stats answer verbatim
@@ -649,8 +825,13 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if len(ans) != 22 {
 		t.Fatalf("poll answer clear %dB, want 22", len(ans))
 	}
-	if wantPoll, _ := hex.DecodeString(genuinePollAnsRaw); !bytes.Equal(ans[4:14], wantPoll[4:14]) {
-		t.Fatalf("poll answer body %x want %x (1a/5b counters)", ans[4:14], wantPoll[4:14])
+	// The counters are authored (the account id and the live session
+	// count), so only the framing is pinned: [13][tag] + 1a/5b + two u32.
+	if !bytes.Equal(ans[4:6], []byte{0x1a, 0x5b}) {
+		t.Fatalf("poll answer body %x, want 1a/5b", ans[4:6])
+	}
+	if got := binary.LittleEndian.Uint32(ans[6:10]); got != uint32(0) {
+		t.Logf("poll counter 1 = %d", got)
 	}
 	if got := binary.LittleEndian.Uint32(ans[len(ans)-4:]); got != 5 {
 		t.Fatalf("poll answer cumul %d, want 5 (poll at seq 4)", got)
@@ -758,5 +939,293 @@ func TestCmdLabel(t *testing.T) {
 	}
 	if got := cmdLabel(9999); got != "cmd 9999" {
 		t.Fatalf("cmdLabel(9999) = %q", got)
+	}
+}
+
+// TestFloodFramesCarryTheBundleVerbatim pins the flood's assembly model:
+// the client's FragmentedBundle concatenates the chain's packet bodies in
+// seq order and walks the result as a stream of ClientInterface elements,
+// so the burst must carry every fragment of the chain, in chain order,
+// with one [first,last] range and contiguous seqs.
+//
+// The regression this guards: dropping the chain's leading fragment (the
+// short one that carries updateFrequencyNotification + tickSync + the
+// createBasePlayer header) and stripping a "chain header" off the next
+// one shifts every element by those bytes. The client then reads a
+// garbage length and walks off the end of the chain:
+//
+//	BundleDataPos::advance: Ran out of packets.
+//	MF_ASSERT_DEV FAILED: tailAdvanceSuccess
+//	interface_element.cpp(544)
+func TestFloodFramesCarryTheBundleVerbatim(t *testing.T) {
+	blockKey := baseAppTestKey()
+	stream, err := FloodBundle{
+		EntityID:    0x00298b89,
+		TypeID:      1,
+		Version:     "eu_2.4.1_2",
+		Name:        "ExampleUser",
+		Incarnation: 2618,
+		Settings:    bigSettings(t),
+		Components:  19,
+		Frequency:   10,
+		GameTime:    2238978,
+		TickTag:     2,
+	}.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	frames, err := FloodFrames(blockKey, stream, floodFirstSeq)
+	if err != nil {
+		t.Fatalf("frames: %v", err)
+	}
+	if len(frames) < 2 {
+		t.Fatalf("%d frames, want a multi-fragment chain", len(frames))
+	}
+	var got []byte
+	for i, frame := range frames {
+		clear, err := DecryptChannelFrame(blockKey, frame)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		first, last, seq, ok := fragRange(clear)
+		if !ok {
+			t.Fatalf("frame %d is not a fragment: % x", i, clear[:8])
+		}
+		if first != floodFirstSeq || last != floodFirstSeq+uint32(len(frames))-1 {
+			t.Fatalf("frame %d range [%d,%d], want [%d,%d]", i, first, last,
+				floodFirstSeq, floodFirstSeq+uint32(len(frames))-1)
+		}
+		if seq != first+uint32(i) {
+			t.Fatalf("frame %d seq %d, want %d (chain order)", i, seq, first+uint32(i))
+		}
+		tr := ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
+		got = append(got, clear[2:len(clear)-tr]...)
+	}
+	if !bytes.Equal(got, stream) {
+		t.Fatalf("reassembled %d B, authored %d B", len(got), len(stream))
+	}
+	// The bundle opens with the client's own elements, not a pickle, and
+	// the settings document is inside it.
+	if stream[0] == 0x80 {
+		t.Fatal("bundle opens with a pickle PROTO, want a ClientInterface element")
+	}
+	off := -1
+	for i := 0; i+1 < len(stream) && i < 512; i++ {
+		if stream[i] == 0x80 && stream[i+1] == 0x02 {
+			off = i
+			break
+		}
+	}
+	if off < 0 {
+		t.Fatal("no PROTO 2 document in the bundle head")
+	}
+	stack, marks, ops, n, stopped, err := lobby.DecodeFaithfulStream(stream[off:])
+	if err != nil {
+		t.Fatalf("pickle at %d: %v", off, err)
+	}
+	enc, err := lobby.EncodeFaithfulOpsStop(stack, marks, ops, stopped)
+	if err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !bytes.Equal(enc, stream[off:off+n]) {
+		t.Fatal("pickle re-encode is not byte-identical")
+	}
+	t.Logf("%d frames, %d B bundle, pickle at %d (%d B)", len(frames), len(stream), off, n)
+}
+
+// testDispatch loads the game's entity defs for the tests that author
+// wire content from them. Skips when the game tree is absent.
+func testDispatch(t *testing.T) *entdef.Dispatch {
+	t.Helper()
+	const dir = "../../scripts-2.4.1/entity_defs"
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("no entity defs (%v)", err)
+	}
+	l := &entdef.Loader{Dir: dir}
+	names, err := l.LoadEntities()
+	if err != nil {
+		t.Fatalf("defs: %v", err)
+	}
+	d, err := entdef.NewDispatch(l, names)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	return d
+}
+
+// bigSettings is a real settings pickle large enough to force a
+// multi-fragment flood chain.
+func bigSettings(t *testing.T) []byte {
+	t.Helper()
+	raw, err := lobby.EncodeDocument(lobby.NewDict().
+		Set("file_server", lobby.NewDict().Set("host", lobby.NewString("127.0.0.1"))).
+		Set("padding", lobby.NewString(strings.Repeat("x", 3000))))
+	if err != nil {
+		t.Fatalf("settings: %v", err)
+	}
+	return raw
+}
+
+// TestServedSeqsAreContiguous pins the reliable seq space the server
+// mints on the stage-2 channel: rotation-2 at 0, the flood chain from 1,
+// then the session dict and the tick stream with no gaps.
+//
+// The client's channel is reliable and delivers IN ORDER, so a gap
+// stalls everything after it: the frames sit in the receive window, the
+// client never ACKs them, and the server resends until the peer times
+// out. (Observed: chain [1,2] then the dict at 4 — the client accepted
+// the flood, created the Account entity, and then ignored every later
+// frame.)
+func TestServedSeqsAreContiguous(t *testing.T) {
+	blockKey := baseAppTestKey()
+	stream, err := FloodBundle{
+		EntityID:    0x1234,
+		TypeID:      1,
+		Version:     "eu_2.4.1_2",
+		Name:        "tester",
+		Incarnation: 1,
+		Settings:    bigSettings(t),
+		Components:  19,
+		Frequency:   10,
+		GameTime:    1,
+		TickTag:     2,
+	}.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	frames, err := FloodFrames(blockKey, stream, floodFirstSeq)
+	if err != nil {
+		t.Fatalf("frames: %v", err)
+	}
+	// The chain must start at floodFirstSeq and be contiguous.
+	for i, frame := range frames {
+		clear, err := DecryptChannelFrame(blockKey, frame)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		_, _, seq, ok := fragRange(clear)
+		if !ok || seq != floodFirstSeq+uint32(i) {
+			t.Fatalf("frame %d seq %d, want %d", i, seq, floodFirstSeq+uint32(i))
+		}
+	}
+	// The dict takes the next seq, and the ticks follow it.
+	lastSeq := floodFirstSeq + uint32(len(frames)) - 1
+	dictSeq := lastSeq + 1
+	if dictSeq != floodFirstSeq+uint32(len(frames)) {
+		t.Fatalf("dict seq %d leaves a gap after the chain's %d", dictSeq, lastSeq)
+	}
+	t.Logf("chain [%d,%d], dict %d, ticks from %d", floodFirstSeq, lastSeq, dictSeq, dictSeq+1)
+}
+
+// TestPostCallsReadsEveryCallInTheBundle pins the opener's shape: the
+// client sends the account sync (100), the shop sync (300) and the
+// dossier sync (600) in ONE datagram, each with its own waitForSync() on
+// the client side. Answering only the leading call leaves the other two
+// pending forever and the hangar never advances past SHOW GUI.
+func TestPostCallsReadsEveryCallInTheBundle(t *testing.T) {
+	k2 := uint32(0x78128370)
+	srv := &BaseAppServer{} // no dispatch: the hand-written fallback
+	app := append([]byte{}, lobby.DoCmdInt3(221, lobby.CmdSyncData, 0, 0, 0)...)
+	app = append(app, lobby.DoCmdInt3(222, lobby.CmdSyncShop, 0, 0, 0)...)
+	app = append(app, lobby.DoCmdInt3(223, lobby.CmdSyncDossiers, 0, 0, 0)...)
+	clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, app)...)
+	// A reliable trailer: [seq][cumul], so the walk must stop before it.
+	clear = append(clear, 0, 0, 0, 0, 0, 0, 0, 0)
+
+	calls := srv.postCalls(clear, k2)
+	if len(calls) != 3 {
+		t.Fatalf("%d calls decoded, want 3 (sync, shop, dossiers)", len(calls))
+	}
+	want := []struct {
+		req uint16
+		cmd uint16
+	}{{221, lobby.CmdSyncData}, {222, lobby.CmdSyncShop}, {223, lobby.CmdSyncDossiers}}
+	for i, w := range want {
+		if calls[i].Req != w.req || calls[i].Cmd != w.cmd {
+			t.Fatalf("call %d = %d/%d, want %d/%d", i, calls[i].Req, calls[i].Cmd, w.req, w.cmd)
+		}
+	}
+	if got := srv.postCalls(clear, k2^1); len(got) != 0 {
+		t.Fatalf("foreign stage key decoded %d calls", len(got))
+	}
+}
+
+// TestArenaTickPositionsRideTheUnreliableStream pins the split the captured
+// server uses for the arena tick: the position elements go out on the
+// UNRELIABLE stream (flags 0x1448, its own sequence counter, the aux word),
+// one datagram per tick, in the captured order — TickSync, the metre-rounded
+// reference, the player's own entity on it, then the Vehicle by alias at its
+// absolute position.
+//
+// The sequence is the point of the test. The unreliable stream has its own
+// space: reusing the reliable seq makes it jump by however many reliable sends
+// happened in between, and the client discards a packet whose sequence does not
+// advance — which is how an earlier attempt at this left the tank at spawn.
+func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
+	blockKey := baseAppTestKey()
+	s := &BaseAppServer{resend: newResendQueue(0, 0)}
+	st := &clientState{
+		blockKey:  blockKey,
+		resendKey: "session-1",
+		unrelSeq:  1,
+		postSeq:   42, // reliable sends so far: the aux word's source
+		postCumul: 7,
+	}
+	pos := [3]float32{336.83, -5.05, 686.5}
+	dir := [3]float32{0.02, -0.004, 3.13}
+	app := EncodeTickSync(9)
+	app = append(app, EncodeRelativePosition(roundVec3(pos))...)
+	app = append(app, EncodeAvatarUpdatePlayerDetailed(0, [3]float32{}, [3]float32{})...)
+	app = append(app, EncodeAvatarUpdateAliasDetailed(0, VehicleAlias, pos, dir)...)
+
+	tr := &fakeTransport{}
+	to := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40010}
+	for i := 0; i < 2; i++ {
+		if err := s.sendUnreliableLocked(tr, to, st, app); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if len(tr.writes) != 2 {
+		t.Fatalf("%d writes, want 2", len(tr.writes))
+	}
+	for i, frame := range tr.writes {
+		clear, err := DecryptChannelFrame(blockKey, frame)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		if flags := binary.LittleEndian.Uint16(clear[0:2]); flags != 0x1448 {
+			t.Fatalf("frame %d flags %#04x, want 0x1448 (ON|SEQ|CUMUL|AUX, no RELIABLE)", i, flags)
+		}
+		// The footers are [aux][seq][cumul] after the app (see
+		// buildChannelPacket); the aux word is the reliable-send counter.
+		n := len(clear)
+		if aux := binary.LittleEndian.Uint32(clear[n-12 : n-8]); aux != (uint32(42)-1)&0x0FFFFFFF {
+			t.Fatalf("frame %d aux %#x, want the reliable-send counter %#x", i, aux, (uint32(42)-1)&0x0FFFFFFF)
+		}
+		if seq := binary.LittleEndian.Uint32(clear[n-8 : n-4]); seq != uint32(1+i) {
+			t.Fatalf("frame %d seq %d, want %d (the unreliable counter, not the reliable one)", i, seq, 1+i)
+		}
+		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != 7 {
+			t.Fatalf("frame %d cumul %d, want the client's watermark 7", i, cumul)
+		}
+		body := clear[2 : n-12]
+		if len(body) != len(app) {
+			t.Fatalf("frame %d body %d B, want %d", i, len(body), len(app))
+		}
+		// The captured order, at the captured offsets: TickSync 2 B,
+		// RelativePosition 13 B, PlayerDetailed 26 B, AliasDetailed 27 B.
+		for _, want := range []struct {
+			at int
+			id byte
+		}{{0, 0x13}, {2, 0x16}, {15, 0x1e}, {41, 0x1d}} {
+			if body[want.at] != want.id {
+				t.Fatalf("frame %d element at %d is %#02x, want %#02x", i, want.at, body[want.at], want.id)
+			}
+		}
+	}
+	// Nothing is queued for retransmission: that is the whole point of the
+	// unreliable stream.
+	if got := s.resend.pending(); got != 0 {
+		t.Fatalf("%d packets queued for resend, want 0", got)
 	}
 }

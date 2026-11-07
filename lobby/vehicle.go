@@ -48,6 +48,23 @@ const (
 	compactFlagCamo = 128
 )
 
+// simpleItemTypes is `items.SIMPLE_ITEM_TYPE_INDICES` (shipped
+// common/items/__init__.pyc): the item types whose compact descriptor can
+// carry the EXTENDED_VEHICLE_TYPE_ID_FLAG in its low nibble. For those the
+// real type is `lo4 - 2`, which is what `getTypeOfCompactDescr` does:
+//
+//	itemTypeID = unpackByte(compactDescr[0]) & 15
+//	if itemTypeID == 0: itemTypeID = unpackByte(compactDescr[1])
+//	elif itemTypeID in SIMPLE_ITEM_TYPE_INDICES: itemTypeID -= 2
+//
+// Without the subtraction a vehicle whose type id is above 255 reads as
+// item type 3 (turret) instead of 1 (vehicle) — 111 of the 1238 ownable
+// vehicles are in that case.
+var simpleItemTypes = [16]bool{
+	2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
+	9: true, 10: true, 11: true, 14: true,
+}
+
 // Nation names by header hi4 (nations.pyc NAMES order).
 var compactNations = []string{
 	"ussr", "germany", "usa", "china", "france", "uk",
@@ -67,6 +84,10 @@ func ParseIntDescr(b []byte) (itemType, nation uint8, id uint16, err error) {
 		return 0, 0, 0, fmt.Errorf("lobby: extended compactDescr truncated")
 	}
 	itemType = uint8(head & compactItemTypeMask)
+	if simpleItemTypes[itemType] {
+		// The low nibble carries the extended-id flag on top of the type.
+		itemType -= compactExtFlag
+	}
 	nation = uint8(head >> compactNationShift & compactNationMask)
 	id = uint16(b[1])
 	if ext {
@@ -203,4 +224,53 @@ func SectionCompactDescr(b []byte, turrets int) (CompactSections, error) {
 	}
 	s.Total = off
 	return s, nil
+}
+
+// VehicleGunKey returns the turret and gun compact descriptors a vehicle's
+// ammunition layout is keyed by.
+//
+// The client keys `inventory[1].shellsLayout` by `(turretCD, gunCD)`, not by
+// vehicle: `vehicle_equipment.pyc __parseLayout` builds
+// `shellsLayoutKey = (vehDescr.turret.compactDescr, vehDescr.gun.compactDescr)`
+// and `post_progression_common.getLayoutCapacity` indexes the same pair. Two
+// tanks sharing a gun therefore share a layout.
+//
+// The component block is six little-endian u16s — chassis, turret, gun,
+// engine, fuel tank, radio — starting at CompOff. Those are the components'
+// own ids, NOT their compact descriptors, and the client compares against
+// `compactDescr`, so each has to be rebuilt with
+// `items.makeIntCompactDescrByID`: `(id << 8) + itemType + (nation << 4)`,
+// where `vehicleTurret` is item type 3 and `vehicleGun` 4, and the nation is
+// the vehicle's own, `(vehicleCD >> 4) & 15`.
+//
+// Returning the bare ids made every lookup miss, so the client fell back to
+// `__getDefaultShellsLayout` and an applied ammunition layout never showed up.
+func VehicleGunKey(compDescr []byte) (turret, gun int32, ok bool) {
+	s, err := SectionCompactDescr(compDescr, 1)
+	if err != nil {
+		return 0, 0, false
+	}
+	if len(compDescr) < s.CompOff+12 {
+		return 0, 0, false
+	}
+	if len(compDescr) < 4 {
+		return 0, 0, false
+	}
+	vehicleCD := int32(uint32(compDescr[0]) | uint32(compDescr[1])<<8 | uint32(compDescr[2])<<16 | uint32(compDescr[3])<<24)
+	nation := (vehicleCD >> 4) & 15
+	// The component block is `chassis, engine, fuelTank, radio, turret, gun`
+	// — turret and gun are the LAST two u16s, not the second and third.
+	// Measured against the live client on a Panhard EBR 105: its inventory
+	// descriptor is `41 4A 9D 00 65 00 CD 00 22 00 82 00 63 00 00`, and the
+	// client's own `descriptor.chassis/turret/gun.compactDescr` decode to ids
+	// 157 / 130 / 99 — bytes [2..3], [10..11] and [12..13].
+	turretID := int32(uint16(compDescr[s.CompOff+8]) | uint16(compDescr[s.CompOff+9])<<8)
+	gunID := int32(uint16(compDescr[s.CompOff+10]) | uint16(compDescr[s.CompOff+11])<<8)
+	const (
+		itemVehicleTurret = 3
+		itemVehicleGun    = 4
+	)
+	turret = (turretID << 8) + itemVehicleTurret + (nation << 4)
+	gun = (gunID << 8) + itemVehicleGun + (nation << 4)
+	return turret, gun, true
 }

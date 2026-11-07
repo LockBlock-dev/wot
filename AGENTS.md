@@ -21,7 +21,29 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   keys, TTL, in-memory only), `state.go` (credits/gold/free XP, garage,
   research — stored as a JSON document so the model grows without
   migrations), `server.go` (`Provision` one default account
-  idempotently, `Authenticate`, `BeginSession`). Wired into
+  idempotently, `Authenticate`, `BeginSession`), `unit.go` (squads:
+  `UnitManager` implements `login.UnitBackend` — one squad per account,
+  three roster slots, ready mask, comment, vehicles, invitations;
+  in-memory because a squad is a live session object), `social.go`
+  (implements `xmppserver.SocialStore` over the `social` table),
+  `economy.go` (the purchase surface: `Economy` implements
+  `login.EconomyBackend` — exchange, free XP, premium, slots, berths,
+  piggy bank; the rates are the server's, and premium expiry is
+  per-account state clamped to `MaxPremiumExpiry`), `crew.go` (the crew
+  assignment: `Crew` implements `login.CrewBackend` for
+  `CMD_EQUIP_TMAN`, storing one tankman instance id per slot in
+  `GarageVehicle.Crew` — the client derives a tankman's vehicle from the
+  vehicles' lists, so that is the only copy), `queue.go` (the
+  matchmaking queue: per QUEUE TYPE, platoon-grouped via
+  `EnqueueGroup`, with a census indexed by the client's own
+  `VEHICLE_CLASSES`), `matchmaker.go` (the pure formation rule: oldest
+  entry anchors a ±2 tier band, a squad goes to one team, sides fill
+  alternately — a formed battle is LOGGED, not handed off, because
+  `onArenaCreated` needs a cell app), `matchmaking.go` (the service
+  behind `login.QueueHooks`: validation, JOIN_FAILURE codes, squad
+  grouping), `arena.go` (the battle record: id, space, arena type, map,
+  roster, state, and the reconnect window that holds a dropped player's
+  slot). Wired into
   `cmd/wotserver` via `login.ServerConfig.VerifyCredentials`; a refusal
   rides status 68 with the live short wording. Scope and open problems:
   `../docs/PRIVATE_SERVER.md`.
@@ -53,6 +75,18 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `cmd/wotgendata` from 2.4.0.0 item_defs (1252 list rows minus the
   Observer pseudo-row); `GeneratedTable`/`GunSpec`
   replace XML at runtime),
+  `garage.go` `OwnableVehicle` carries `Class`/`Level` from the list
+  entry's `<tags>`/`<level>`, which is what the matchmaker's census
+  buckets by; `ParseIntDescr` subtracts
+  `EXTENDED_VEHICLE_TYPE_ID_FLAG` back off the low nibble for the simple
+  item types (111 of the 1256 vehicles have a type id above 255 and
+  would otherwise read as turrets),
+  `unit.go` (squad wire codec: the client's own binary format from
+  `common/UnitBase.pyc` `pack` + `common/ops_pack.pyc` — `_IDS '<IBB'`,
+  the roster, `_HEADER '<HHHHHHHHBiiiiii'`, `_PLAYER_DATA '<qiIHBHHHq?'`,
+  pascal strings, the empty badge block and a pascal-framed pickled
+  empty dict; `PackUnit`/`Op*` builders plus the UNIT_* constant
+  tables),
   `pickle.go` (hand-rolled proto 0-2 decoder, triple-verified vs
   CPython execution + independent emulator on 3 captures; LONG1/4
   sign fix Sep 28; `DecodeAt`/`DecodePrefix`/`Inventory` resync +
@@ -80,6 +114,24 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   stage-2 flow to `../captures/flows3-s2.txt`; re-run after any /tmp
   wipe),
   `scratch_flood_test.go`. Offline only.
+- `xmppserver/` — the LIVE XMPP chat service (this one owns sockets;
+  `xmpp/` below stays offline). It is what makes the contacts list work
+  at all: in 2.4 `messenger/proto/__init__.pyc`
+  `ServerSettings.useToShowContacts` picks XMPP exactly when
+  `xmpp_enabled` is set in the server-settings document, and the legacy
+  BW fallback calls `addFriend`/`requestUsersRoster`, methods that do not
+  exist in the 2.4 defs. `node.go` (generic XML tree + stream reader:
+  the stream root is never closed, so the caller reads the root
+  StartElement itself), `server.go` (listener, session registry, rooms,
+  `TokenFor` = per-run HMAC of the client DBID), `session.go` (stream
+  negotiation, SASL PLAIN, bind, presence relay with a server-authored
+  `wgexts` identity block — the client's own presence carries only
+  `wgexts-client`), `roster.go` (jabber:iq:roster get/set/push,
+  urn:xmpp:blocking, `#storage` notes, `#spa-resolver` nicknames,
+  disco), `muc.go` (XEP-0045 rooms: clan channel + user rooms),
+  `social.go` (`Social` model + `SocialStore`; `server.SQLiteStore`
+  implements it over the `social` table). Tests drive a real TCP
+  handshake.
 - `xmpp/` — offline XMPP chat layer, stdlib-only (NO network: no
   TCP/UDP/HTTP clients — builders/parsers only): `jid.go` (DBID@
   domain/resource), `settings.go` (`ServerSettings` + TCP-first
@@ -199,6 +251,52 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   over real Client + SolveChallenge (Short-skipped).
 - `login/rewrite.go` — `RewriteLoginReply` + `encryptLogin` (login-path
   Blowfish mirror, no magic trailer).
+- `login/flood_build.go` — the stage-2 bundle AUTHORED from the defs
+  (Nov-1): `FloodBundle` writes `updateFrequencyNotification` +
+  `tickSync` + the `createBasePlayer` element (entity id, type id, the
+  Account entity's wire-order properties, component count) with the
+  engine's oversize length form when the payload passes 64 KB
+  (`elementOversize`); `FloodFrames` splits it into the chain. No capture
+  is read: `TestFloodBundleMatchesCapture` proves the encoder reproduces
+  the genuine 246 531 B 2.4.1 stream byte for byte from the same settings
+  pickle. `login/lobby_content.go` authors the post-flood elements.
+  NOTE: `0x1A` is `selectPlayerEntity` (the exe's message-name table:
+  tickSync 19 = 0x13, selectPlayerEntity 26 = 0x1A), so a `1a XX …`
+  element is selectPlayerEntity followed by a CLIENT METHOD CALL (`XX` =
+  entityMethodBase 0x4E + id; 0x76 = showGUI, 0x69 =
+  onUnitBrowserResultsUpdate, 0x5b = receiveServerStats). Framing is
+  `[elemID][elementLen][stringLen][string]`, the method's
+  VariableLengthHeaderSize being the ELEMENT length width and the string
+  header always ONE byte — a fixed byte where the string length belongs
+  is a MemoryIStream over-read (`pCurr_ + nBytes <= pEnd_`).
+  `entdef.Entity.WireProps` is the wire property order (interfaces first,
+  then declaration) — distinct from the digest's FullIndex sort.
+- `server/settings.go` — `SettingsFromJSON`: the lobby's
+  `initialServerSettings` document from JSON to pickle. The committed
+  `wot/wotserver.settings.json` is generated by
+  `../tools/gen_server_settings.py` from the client's own bytecode: every
+  `gameParamsKey` schema with its `required=True` fields (plus the mode
+  packages', e.g. `story_mode.pkg`), and — for every key `set()` builds
+  with `makeTupleByDict` — either `{}` (when the class accepts an empty
+  dict: kwargs `__new__`, `__new__.__defaults__`, all-defaulted
+  signature, or a `settingsBlock` subclass) or the class's own
+  `defaults()` values — except `winback_config`, which `set()` hands to
+  `_logger.info(msg, value)`: `LogRecord.__init__` unwraps a single
+  NON-EMPTY mapping arg, so a non-empty dict formats fine but `{}` stays
+  wrapped in a tuple and `'winback_config' % ({},)` raises. Every
+  `res/packages/*.pkg` is scanned too (the halloween package's four
+  `usedInReplay=True` schemas are read directly by BattleReplay, and its
+  keys come from a constants module in a different package), plus the
+  keys the mode packages append to `constants.INBATTLE_CONFIGS` at import
+  time (comp7/comp7_light/fun_random) — BattleReplay iterates that list
+  too. One key the client cannot construct is fatal for
+  the WHOLE document: `ServerSettings.set()` raises, `__init__` never
+  returns, the client keeps no settings, and because `set()` also ends
+  with `schemaManager.set(...)` the schema models stay empty — which
+  surfaces as the unrelated-looking `SoftException('Schema
+  story_mode_settings was not registered')` from the app_loader's
+  predicate chain. `vehicle_post_progression_config` is read directly
+  (BattleReplay) and must be present.
 - `login/baseappsrv.go` — BaseApp SERVER half (Oct-17; transport-frame
   parity with `baseapp.go`'s client script so a LOGGED_ON client walks
   stage-1 → rotation → tick → `[44]` → stage-2 → double-auth → flood
@@ -286,7 +384,14 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   carrier, stage-2 answers the dance then errors on the flood loud);
   `-baseapp host:port` overrides the record endpoint (external
   advertise), `-maxnonce`, `-any-version`, `-digest any` gate bypass,
-  `-verbose`; signal-ctx graceful stop, LoginApp+BaseApp concurrent.
+  `-verbose`; `-xmpp 127.0.0.1:5222` runs the chat service (must match
+  `xmpp_connections` in the settings document; `""` = no chat),
+  `-clan-tag`/`-clan-name` seed the default account into a clan
+  (`""` = clanless), `-battle-team-size N` is how many players per side
+  the matchmaker needs (default 15; 0 = one queued player forms a battle,
+  which is how the arena entry and the reconnect are exercised with one
+  client — the client still starts in the hangar); signal-ctx graceful
+  stop, LoginApp+BaseApp+XMPP concurrent.
   Milestone v1 green Oct-17: our client's full decrypt-verified
   1252B flood over loopback (`TestBaseAppStageLoopback`), then the
   real CLI-binary walk (`go build wotlogin+wotserver`, scratch .env
@@ -389,6 +494,25 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `cmd/wotgendata/main.go` — codegen CLI (`-item-defs DIR -out
   lobby/vehicle_data_gen.go`): static vehicle/gun/shell tables from
   unpacked item_defs; rerun + `gofmt -w` after client updates.
+- `cmd/wotgarage/main.go` — codegen CLI (`-item-defs DIR -out
+  lobby/garage_gen.go`): every OWN-able vehicle from the client's
+  `item_defs/vehicles/<nation>/list.xml` (premium, collector, reward,
+  event, variant — only the `maps_training` bots are dropped).
+  `wotserver -garage-all` (or `GARAGE_ALL=1 ./start-server.sh`, or
+  `./restart-server.sh`, which always passes it) seeds
+  the default account's garage from it and raises `stats.slots` to
+  `len(garage)+100`, because the client's capacity check is
+  `getFreeSlots(stats.vehicleSlots)`. The inventory entry is the
+  vehicle TYPE compact descriptor (`[1|nation<<4(+2 if typeID>255)]
+  [typeID lo][typeID hi]`), not the module descriptor — the client's
+  `parseVehicleCompactDescr` reads nation+typeID and builds the stock
+  modules itself. It also emits `lobby.AllCrewSkinIDs` (from
+  `crewSkins/crewSkins.xml`), `lobby.AllDogTagComponentIDs` (from
+  `dog_tags/dog_tags.xml`), `lobby.AllTankmanGroups` (the name pools
+  from `tankmen/<nation>.xml`, whose `_<id>` element names are the ids a
+  tankman compact descriptor stores) and `lobby.AllEquipment` (the
+  regular consumables from `vehicles/common/equipments.xml`, minus the
+  `notForSale` built-ins).
 - `cmd/wotbattlefeed/main.go` — offline battle-feed CLI over a
   wotproxy dump (`-dump FILE -flow SUB -keyfile F | -recover-key …`,
   `-own NAME` sets ALLY side, `-side all|ally|enemy` + `-watch SUB`
@@ -888,6 +1012,314 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
    `STANCE_DANCE_STATE.state` (UINT8) inside
    `StanceDanceController.abilityState`; digest-neutral.
 
+## Battle — the gun and dynamic components (proven live, do not re-derive)
+
+Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
+"A throw in `Avatar.setClientReady`"); the id table is
+`../docs/ENTITY_TYPE_IDS.md`.
+
+- **The gun is driven by the `OwnVehicle` component, not by the
+  `Avatar.updateTargetingInfo` element.** `VehicleGunRotator` needs
+  `isOnArena` AND `__speedsInitialized`; the latter is set only in
+  `update()`, whose only caller is `Avatar.updateTargetingInfo`. That
+  method's def says nine FLOAT32 (36 B) and the client's table agrees,
+  but its Python takes the entity id plus ten floats — so 36 B raises
+  `TypeError` and 44 B corrupts the packet. The live path is
+  `OwnVehicle.targetingInfo`, whose setter
+  (`OwnVehicleBase.update_targetingInfo`) supplies the id itself.
+- **NRL component type id = index in the client's `EntityType` table**
+  (entities 0..52, then `scripts/components.xml` order): `OwnVehicle`
+  53, `InAoEZone` 54, `AvatarVehiclesInfo` 126. 50 is `HWDeathZone`.
+- **Child list = properties, then client methods, then a trailing
+  child** (`OwnVehicle`: 23 + 11 + 1 = 35). Method children carry their
+  exposed id as a packed u24.
+- **Properties are read size-sorted, not in declaration order** (fixed
+  ascending, then variable in declaration order). `syncVehicleAttrs` is
+  `OwnVehicle`'s only fixed-size property, so it leads.
+- **`ARENA_PERIOD.BATTLE` is 3, not 2** (`IDLE 0, WAITING 1, PREBATTLE 2,
+  BATTLE 3, AFTERBATTLE 4`). Announcing 2 leaves the client in PREBATTLE
+  with `isOnArena` False, and `Avatar.moveVehicle` then returns before it
+  sends `vehicle_moveWith` — the tank does not drive and nothing on the wire
+  says why. `ClientArena` fires `onPeriodChange` on a *change*, so the server
+  sends PREBATTLE at entry and BATTLE after the delay, repeated
+  (`arenaPeriodDelays`) because a BATTLE that lands before
+  `Avatar.setClientReady` is dropped. **The announcement must mint its seq
+  under `st.sendMu`** (`nextSeq` + `sendReliableLocked`): reading `postSeq`
+  and letting `sendReliable` take the lock afterwards races the 100 ms ticker
+  and the client drops the packet as a duplicate.
+- **Turret rotation speeds come from the item defs** (`login/vehiclespec.go`:
+  turret `rotationSpeed` under `turrets0/<Turret>`, gun in
+  `components/guns.xml`), and the server steps its own yaw at the turret's rate
+  (`trackTurret`) so the gun marker it reports is the angle the client is
+  settling on. **`vehicle_stopTrackingWithGun` is an Avatar cell method** — its
+  entity id is the Avatar's, and dropping it left the server re-deriving the
+  bearing from a world point the client had stopped updating, so the turret
+  swung away from the settled angle as soon as the hull turned and the client
+  snapped back: the jitter. The reported angles are adopted verbatim and
+  `aimSet` cleared.
+- **The gun's AIMING rides the NRL marker (`0x28`); `gunAnglesPacked` is a
+  bare `0xb4` element.** The captured server sends no `0x19`-led and no
+  `0x4b`-led datagrams, but it does send property updates — as **bare
+  elements**, `entityPropertyBase + index` + value with no length and no
+  wrapper: `0xba` the Avatar's `ownVehicleAuxPhysicsData` (8 B), `0xb4` the
+  Vehicle's `gunAnglesPacked` (2 B), `0xb6` its `engineMode` (2 B). Every tick
+  datagram ends in `0x28` `NRL_UNRELIABLE_MSG_TO_CLIENT` carrying
+  `shot_position`,
+  `shot_velocity` (barrel direction × shell muzzle velocity) and
+  `dispersion_angle`, which `Avatar.updateGunMarker` hands to
+  `VehicleGunRotator.setShotPosition`. `login/nrl.go` has the framing and the
+  constants; `docs/PRIVATE_SERVER.md` "The gun marker: NRL element `0x28`" has
+  the field-by-field decode. `0x13` TickSync's byte is the LOW BYTE of the same
+  10 Hz counter the marker carries in full. The dispersion is the client's own
+  model (`Avatar.getOwnVehicleShotDispersionAngle`), read from the defs'
+  `shotDispersionRadius`/`aimingTime`/`shotDispersionFactors`.
+- **`Avatar.ownVehicleAuxPhysicsData` zero is not level** — it unpacks to
+  `(-pi, -pi/2, -pi)`, tilting the stabilised matrix 90 degrees about X so
+  the turret only ever hits its limits. Send
+  `WoT.packAuxVehiclePhysicsData(0,0,0,0,0,0)` = `0x55558004004000` as an
+  `updateEntity` on the Avatar before the vehicle starts.
+- **`OwnVehicle.fixAngles` must be `None`**, not its zero value: the zero
+  is a dict of two zero floats, which is truthy, so
+  `update_fixAngles` calls `fixShotPosition(0, 0)` and pins the turret.
+- **Driving**: the client sends `Avatar.vehicle_moveWith(flags)` (cell 2,
+  element `0x12`); the server simulates the hull (`login/drive.go`) and
+  streams it. The Vehicle needs a real AoI alias (`VehicleAlias` 1) and
+  `AvatarUpdateAliasDetailed` (0x1D) carries the position **outright**, not
+  relative to the `RelativePosition` reference.
+- **Every tick bundle opens with `TickSync`** (element `0x13`, one byte),
+  as the reference's `write_tick` does. Without it the client's witness does
+  not know a tick has arrived and applies the position updates in bursts —
+  the tank sat still for seconds and then jumped twenty metres, which reads
+  as "it does not drive" while the server had it at full speed. With it the
+  same stream drives smoothly (10 m/s forward, 33 deg/s rotating, sampled
+  every 500 ms with no jumps).
+- **The tick rides the RELIABLE stream, and the reliable channel must stay
+  EMPTY.** The captured server sends one datagram per tick, `fl=0x0458`
+  (ON|RELIABLE|SEQ|CUMUL) in 7582 of 7702 cases and `fl=0x1448` in 109. Its
+  shape is `0x13` TickSync, `0x16` RelativePosition metre-rounded, `0x1e`
+  PlayerDetailed at zero from it, `0x1d` AliasDetailed with the vehicle's
+  absolute floats, ~20× `0x35` packed alias updates for the other tanks, then
+  `0x28` the gun marker. Its property updates are bare elements, not a bundle:
+  `1a` SelectPlayerEntity + `ba` aux, then `16`/`1e`/`1d`, then `b4`/`b6` on
+  the alias `0x1d` just selected. **The order is load-bearing** — a bare
+  element applies to whatever the last selection element named, so the aux
+  must precede `0x1d` and the Vehicle's two must follow it. Walking the whole
+  capture with that state machine: `0xba` lands on the Avatar 5052× and never
+  on the Vehicle, `0xb4`/`0xb6`/`0xa8` on the Vehicle 16477/2793/2122× and
+  never on the Avatar. `Vehicle.engineMode` is `Tuple[2]{UINT8}` (byte 0 mode
+  1/2/3, byte 1 the movement flags; capture values `0x0001`, `0x0102`,
+  `0x0103`), and `VehicleAppearance.changeEngineMode` feeds `mode[0]` to
+  `DetailedEngineState.mode`. That only works because nothing else is on the
+  reliable channel. Ours used to add a property bundle (`engineMode`,
+  `ownVehicleAuxPhysicsData`, `ownVehicleGear`, `gunAnglesPacked`) every tick
+  and the positions queued behind it: measured on the same tank, **3.10 Hz with
+  200/300/2700 ms gaps** against **9.86 Hz with 104 ms p50 and 106 ms max** once
+  the bundle was gone. The bundle is gone; the unreliable form survives only as
+  a deep-backlog fallback (`arenaTickReliableBacklog`), and it needs its OWN
+  sequence counter (`clientState.unrelSeq`, from 1) plus the aux word
+  (`auxFor(reliableSends)`); reusing the reliable seq makes it jump by however
+  many reliable sends happened in between and the client discards the packet.
+- **The engine sound works (CLOSED Nov-07).** It was silent while the
+  `OwnVehicle.siegeStateStatus` NRL write was corrupting the component — the
+  same write that destroyed every module when siege mode was switched off — and
+  while `Vehicle.wheelsScroll` was mis-framed and the client discarded the whole
+  tick bundle on `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_`, so no aux word
+  arrived at all. Both are fixed and the audition plays and follows the RPM. The
+  2026-11-06 probe table that concluded "the break is inside `VehicleAudition`'s
+  start path" was taken while the component was corrupted, so it does not hold;
+  it is kept as history in `docs/PRIVATE_SERVER.md` "The engine sound".
+- **`achievements20_config` must be in the settings document.** Its
+  `getRequiredCountOfBattles` is `self._config.get('requiredCountOfBattles')`
+  with **no default**, and `notifications_utils._NotificationNewSummaryPage.req`
+  subtracts it from an int every lobby tick — absent, the client throws
+  `TypeError: unsupported operand type(s) for -: 'NoneType' and 'int'` ~3×/s and
+  the hangar locks up (measured: applying an ammo loadout left the client unable
+  to exit). `TestSettingsDocumentLoads` now requires the key.
+- **Leaving a battle used to kick you to the login screen.** `leaveArena` →
+  `resetEntities` → `enableEntities` → `enterAccount(withCreate=true)` sends
+  `CreateBasePlayer` then the `1a/76` session dict, and the dict was going out
+  **bare**. Every other stage-2 datagram carries a `0x13` head (`answerApp`
+  prepends `EncodeTickSync(0)`, `serveBulk` uses `EncodeTickSync(0x40)` for the
+  same small on a fresh login). Without it the client ACKs `CreateBasePlayer`
+  and never ACKs the dict, the server resends that seq forever, and the client
+  logs `REASON_GENERAL_NETWORK` ×6 then `HANGAR LOADING STATE: DISCONNECTED`.
+  Fixed by prepending the head; `TestEnterAccountSendsTheSequence` pins it.
+- **Siege mode (X) works.** The client sends
+  `Avatar.vehicle_changeSetting(VEHICLE_SETTING.SIEGE_MODE_ENABLED=3, enable)` —
+  cell index 12, `UINT8` code + `INT32` value, fixed 5 bytes. The reply is
+  `Vehicle.siegeState` (property 4, bare `0xab`), which
+  `Avatar.__isOwnVehicleSwitchingSiegeMode` reads to block shooting mid-switch
+  and `Vehicle.set_siegeState` feeds to the prebattle panel. Switch times come
+  from the vehicle's `siege_mode/switchOnTime`/`switchOffTime`; they are 0 on
+  the wheeled French tanks, so the end state goes out directly (a SWITCHING
+  state with `timeLeft` 0 would leave the gun blocked).
+  `OwnVehicle.siegeStateStatus` (index 10) is **required**, not optional: it is
+  the only route to `Avatar.updateSiegeStateStatus`, which is not a def method.
+  Measured live with only `Vehicle.siegeState` sent, `Vehicle.siegeState` read 2
+  while `SiegeModeControl.__currentState` was still 0 — so the HUD never showed
+  siege, the composite descriptor never switched to `VEHICLE_MODE.SIEGE`, and
+  pressing X could only ever ask to ENABLE. It rides the NRL node update like
+  the reload. See `docs/PRIVATE_SERVER.md` "Siege mode (the X key)".
+- **The handbrake is `MOVEMENT_FLAGS.BLOCK_TRACKS` (64)** in the same
+  `cell.vehicle_moveWith` flag byte as forward/back/turn — the client's space
+  bar is `CMD_BLOCK_TRACKS`, which `Avatar.moveVehicle` folds in. `hull.step`
+  brakes to a stop and refuses to pivot while it is set; ignoring the bit leaves
+  the tank driving straight through the handbrake.
+- **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
+  element is `0xa7 + FullIndex` where `FullIndex` is
+  `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the
+  variable ones in declaration order). Four ids in
+  `captures/proxy-20261031-1358.hex` pin it: `0xa8` `isStrafing` (1 B), `0xb3`
+  `botDisplayStatus` (1 B), `0xb4` `gunAnglesPacked` (2 B), `0xb6`
+  `engineMode` (2 B). Walking every `S>C` tick with that table parses 1184
+  packets cleanly. A variable-length property's header is
+  `VariableLengthHeaderSize` bytes — 1 for `Tuple[0]`/`ARRAY` aliases
+  (`ElementLength::Variable8`) — and a `Tuple[0]`/`ARRAY` payload starts with
+  its element count (`write_packed_u24`), so the element is
+  `id <len8> <count> <count bytes>` with `len8` covering the count. Omitting the
+  count makes the client read the first element as the count and die on
+  `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_` — measured.
+- **Wheeled vehicles: `Vehicle.wheelsScroll` (`0xc2`) turns the wheels.** One
+  packed byte per **non-track** wheel — `getNonTrackWheelsCount()`, not every
+  `wheel` entry (the EBR 105 declares 16 and only 8 are non-track), because
+  `Vehicle.set_wheelsScroll` zips the tuple against `createWheelFilters`'
+  scroll-filter list. `WoT.unpackWheelScroll` is
+  `(int8)byte * 0.19607845 - 24.90196`; `packWheelScroll` in `login/drive.go`
+  is the inverse. `TestWheelScrollTupleMatchesTheClient` pins the id, the
+  header width and the 8-wheel count.
+- **Shooting works: the gun fires and reloads, nothing is hit.** The client
+  fires its own visual (`Avatar.__showTimedOutShooting` after a 0.12-0.2 s
+  timer), so the server only owes it the reload. `Avatar.vehicle_shoot` is cell
+  index 0 with **zero arguments** — nothing to decode. The blocker was the
+  ammunition: `AmmoController.canShoot` returns `(False, WAITING)` while
+  `__currShellCD` is None, and that is only set from
+  `VEHICLE_SETTING.CURRENT_SHELLS`, which first needs the shell in
+  `vehicleAmmoList`. Both were empty arrays, so the client refused every shot
+  before reaching `cell.vehicle_shoot`. `vehicleAmmoList` now carries the
+  **saved layout** — one `VEHICLE_AMMO` entry per `cd,count` pair from
+  `player_state.garage[].shells`, `index` = its position — because the client
+  shows exactly this list: sending only the gun's default shell made a
+  16/10/10 loadout read as 30 of the default. `CURRENT_SHELLS` is the gun's
+  default shell, which is the layout's first entry, so `shellInAmmo` finds it.
+  Shell CD is
+  `(id << 8) + 10 + (nation << 4)` — `items.makeIntCompactDescrByID('shell',
+  …)`, nation index from `nations.NAMES`, `id` from
+  `<nation>/components/shells.xml`; pinned against the live client's 85082.
+  The reload is `OwnVehicle.vehicleGunReloadTime` as an NRL node update
+  (`EncodeNrlPropertyUpdate`, index 2), and it must be **closed** as well as
+  started: `ReloadingTimeState.setTimes` stores `_actualTime` verbatim and
+  nothing counts it down (`isReloadingFinished()` is `_actualTime == 0`), so a
+  single `timeLeft = reload` update leaves the gun reloading forever.
+  `finishReload` sends the zeroed update after the reload elapses. See
+  `docs/PRIVATE_SERVER.md` "Shooting: the gun fires, nothing is hit".
+- **Collisions are PARKED, and they cannot be fixed client-side.** The tank's
+  position *is* the server's hull — `WGVehicleFilter` never integrates its own
+  physics, `bodyMatrix` is exactly the entity position — so the client has
+  nothing to collide against and the server has to refuse the move. That needs
+  the map's static collision geometry from the `spaces/<map>/*.cdata_processed`
+  chunks, a format distinct from the `terrain2/heights` `mapdata.go` already
+  reads and not yet decoded. Two cheap slices that skip it: an explicit
+  playable-area box test in `hull.step` (Karelia `(-500,-500)..(500,500)`), and
+  refusing a step whose slope exceeds the tank's climb angle — `settle` already
+  derives pitch and roll from the four corner samples. See
+  `docs/PRIVATE_SERVER.md` "Collisions (PARKED)".
+- **The reliable resend queue is keyed by SESSION, not by address.** The client
+  rebinds its socket on battle entry and a re-login abandons the old session
+  outright; an address-keyed queue outlived both and its packets were
+  retransmitted to a dead port until the attempt cap — a live run logged
+  **15,344 resends, 13,429 of them 28 B lobby poll answers, all to the previous
+  session's port**, and the position updates queued behind them. `Admit` now
+  retires the previous session for the same account, `sweepStage1` retires
+  stage-2 sessions silent for `SessionIdleTTL` (60 s), and `readdr` moves a
+  session's pending packets to its new address on a rebind.
+- **Two `TickSync` counters, deliberately.** The hangar's post-flood stream
+  (`postTag`, from `0x7a`) and the arena tick each write their own. Merging them
+  makes `isLaggingNow` read false but the client then applies one position
+  update and freezes; stopping the hangar stream does the same. Both reverted.
+- **The arena tick runs at 100 ms, and the channel is the lever.** The client
+  does not interpolate the player's vehicle: `filter.bodyMatrix` is exactly the
+  entity position at every sample (measured with a Frida probe on the filter's
+  per-frame update `sub_142F022A0` — the two agree to the last digit, driving or
+  parked), so the tank is drawn at whatever the last update said. Measured again
+  live with a pyconsole sampler on `vehicle.position`: 69 changes in 12.4 s of
+  driving, each a discrete jump, the position bit-identical in between. The
+  filter's only extrapolation (`sub_142EFF3D0`) is lag compensation — its blend
+  factor is `(distance_to_server - 30) * 0.0333`, so it stays 0 until the client
+  is 30 m behind, and it is gated by `filter.allowStrafeCompensation`, which
+  `Vehicle.startVisual` sets to `not isPlayerVehicle` (off for the player on
+  official too). `UPDATE_FREQUENCY_NOTIFICATION` only sets a stall timeout, not
+  a simulation step. The hangar's post-flood tick stream must keep running
+  alongside the arena tick — stopping it makes the client drop position updates
+  entirely. Full evidence: `../docs/PRIVATE_SERVER.md` "Why the client's filter
+  does not simulate".
+- **The aim point is a WORLD-axis offset, not a hull-frame one.**
+  `VehicleGunRotator.__trackPointOnServer` sends `shotPoint - stabilisedVehPos`,
+  so `aimWorldPoint` adds it unrotated. Rotating it by the hull yaw makes the
+  server's bearing disagree with the client's `getShotAngles` by the hull yaw,
+  and the turret desyncs the moment the tank turns. The turret step is the
+  shortest way round (`stepTurret`, wrapped difference).
+- **The turret and gun angles are simulated even though `gunAnglesPacked` is
+  never sent**: the NRL marker's `shot_velocity` is built from them. The pitch
+  is measured from the gun's pivot — `turretPositions/turret` plus the turret's
+  `gunPosition` — not the hull's origin. Negative pitch is up.
+- **The km/h digits are `VEHICLE_VIEW_STATE.SPEED`**, polled by
+  `_VehicleUpdater` from `Avatar.getOwnVehicleSpeeds()` →
+  `vehicle.speedInfo.value[0] * 3.6`. That updater only starts at the end of
+  `_setup`, and `_setup` runs `onVehicleControlling` first — where
+  `timers_panel.__updateSmokeTimer` reads
+  `vehicles.g_cache.equipments()[smokeInfo['equipmentID']].totalDuration`. The
+  zero `smokeInfo` has `equipmentID: 0`, which is an `Extinguisher` with no
+  `totalDuration`, so the throw aborted `_setup` and the digits stayed at 0.
+  **`smokeInfo` must be `None`** (`SMOKE_INFO` is `AllowNone`).
+- **A `PYTHON` property over 255 bytes needs the unsafe length**
+  (`[0xFF][u24 len][data]`), not a 1-byte header. `initialServerSettings` is 802
+  B, so `createBasePlayerApp` — the re-login path — failed and left the client
+  at the login screen. `entdef.writeString` now takes the type and switches on
+  `Python`.
+- **`Vehicle.physicsMode` (ALL_CLIENTS UINT8) is sent as 1.** It was never
+  sent before. No measured effect — the client has no Python reader for it.
+- **`UPDATE_FREQUENCY_NOTIFICATION` (0x02, FIXED 7) is sent once at arena
+  entry** with the real tick rate. It is the element that tells the client how
+  often updates arrive, and with it `isLaggingNow` reads false where it had been
+  true. The filter still does not integrate.
+- **The client's filter does not integrate, and `filter.input()` is not the
+  gate.** Feeding it every 50 ms clears `isLaggingNow` but `bodyMatrix` still
+  equals the entity position and `movementSignals` stays 0. `movementSignals` is
+  a Python-only property (its getter/setter are referenced only by the type
+  registration), so 0 is expected. `velocityErrorCompensation` 0.5,
+  `enableClientFilters` true, `ignoreInputs` false — all normal. A Frida probe
+  (`tools/frida-inject/filter_probe.js`) proved the engine *does* tick and feed
+  it; the blocker is **ground contact**: `numTrackContacts` is 0 for every
+  vehicle. `initVehiclePhysicsClient` builds the 40 damper springs but never
+  calls `configurePhysics`, which is what sets up the ground materials — and
+  calling it by hand fails because the client's `typeDesc.type.xphysics` has no
+  `detailed` key and its chassis entry has no `axleCount`, both of which the
+  vehicle XML carries. Client data, not the wire. See `docs/PRIVATE_SERVER.md`
+  "Why the client's filter does not simulate (open)".
+- **`Vehicle.avatarID` is `ALL_CLIENTS` with no `DetailLevel`**, so it rides
+  the creation run — the `updateEntity` that follows carries only the
+  `MY_VEHICLE` ones. It was never sent, and its value is the **Avatar's entity
+  id**, not the account id (the client compares it with
+  `BigWorld.player().id`). `ownVehicleAuxPhysicsData` goes out every tick, not
+  on change: the client builds the stabilised matrix the gun aims from out of
+  it.
+- **`Vehicle.dogTag` must carry a BACKGROUND and an ENGRAVING component**
+  (`(300, 9)` and `(66, 0)`, the reference's `DEFAULT_DOG_TAG`), on **every**
+  vehicle including the dummy enemy. `DogTagsController.__addDogTagMarker` runs
+  from `Avatar.onVehicleEnterWorld` inside `setClientReady` and does
+  `getComponentByType(BACKGROUND).componentDefinition`; with no components that
+  is `None` and the `AttributeError` aborts `setClientReady` — no `isOnArena`,
+  no period handler, an inert battle. With the tag sent, dog tags stay enabled
+  in the settings and `setClientReady` completes.
+- **A throw inside `Avatar.setClientReady` costs the whole battle** —
+  it sets `isOnArena`, registers `onPeriodChange` and calls
+  `invalidateVehiclesPosition()` after a per-vehicle loop. The one that
+  bit us was `dog_tags_ctrl` reading `vehicle.dogTag`; the server
+  disables dog tags (`dog_tags_config.enabled = false`).
+- Tools: `tools/gun_probe.py` (whole gun chain, via `pyconsole`),
+  `tools/dump_entitytypes.py` (id table), `tools/ida_entitytype_layout.py`
+  (re-derives the dumper's addresses from a new build).
+
 ## Replay — key provenance
 
 The 16 B stream key (`DE 72 BE A0 … AD BE EF`) is
@@ -1187,6 +1619,19 @@ speak back. Established Sep 20:
   AccountSyncData.pyc), 5c → receiveQueueInfo candidate. Anomaly on
   record: `tokens.onAccountBecomeNonPlayer()` inside
   `onBecomePlayer` (Account.pyc).
+  **RESOLVED (Nov-3, live):** 0x45/0x46 are the client's own element
+  table entries `RESOURCE_HEADER` / `RESOURCE_FRAGMENT` (both
+  Variable16), not payload-internal — the exe's element table puts
+  `ENTITY_METHOD` at 0x4E..0xA6 and `ENTITY_PROPERTY` at 0xA7..0xFE,
+  so 0x45/0x46 sit just below the method range. A `RES_STREAM` answer
+  is `[45][len][id][packed-u24 descLen][pickled (len, crc32)]` then
+  `[46][len][id][seq][last][zlib]`; the client DROPS a fragment whose
+  id has no header, silently. Sending the fragment alone is what
+  stalled the hangar on "Synchronisation du fichier personnel" —
+  `Account.onStreamComplete` never fired, so
+  `DossierCache.__isSynchronizing` stayed true and `DossierRequester`
+  parked with no traffic and no error. See `docs/PRIVATE_SERVER.md`
+  §"Resource streams".
 - Lobby parsing is UNDERWAY (not blocked): `SalvageChunk`/`PlainValue`
   (`login/lobby_state.go`, tested) convert chunk-1 prefix salvage
   into plain maps/slices/scalars — verified on the live hangar dump

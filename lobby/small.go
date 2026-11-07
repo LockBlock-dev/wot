@@ -36,6 +36,10 @@ type Small struct {
 // length byte.
 const SmallStatsType = 0x5b
 
+// SmallSessionDictType is the 0x1a subtype whose length field is a u16
+// rather than a u8 (the session dict's pickle is longer than 255 B).
+const SmallSessionDictType = 0x76
+
 // Encode renders the small with its family's framing.
 //
 // 0x46 is refused: its body is a compressed pickle whose declared length
@@ -49,6 +53,16 @@ func (s Small) Encode() ([]byte, error) {
 				return nil, fmt.Errorf("lobby: 1a/%02x body is %d B, want 8", s.Type, len(s.Body))
 			}
 			return append([]byte{0x1a, s.Type}, s.Body...), nil
+		}
+		if s.Type == SmallSessionDictType {
+			// 1a/76 is the one 0x1a small whose length is a u16: the
+			// session dict's pickle outgrew the u8 field.
+			if len(s.Body) > 0xFFFF {
+				return nil, fmt.Errorf("lobby: 1a/%02x body is %d B, beyond the u16 length", s.Type, len(s.Body))
+			}
+			out := []byte{0x1a, s.Type}
+			out = binary.LittleEndian.AppendUint16(out, uint16(len(s.Body)))
+			return append(out, s.Body...), nil
 		}
 		if len(s.Body) > 0xFF {
 			return nil, fmt.Errorf("lobby: 1a/%02x body is %d B, beyond the u8 length", s.Type, len(s.Body))
@@ -104,11 +118,22 @@ func ParseSmall(b []byte) (Small, int, error) {
 			}
 			return Small{Family: 0x1a, Type: b[1], Body: b[2:10]}, 10, nil
 		}
-		n := int(b[2])
-		if len(b) < 3+n {
-			return Small{}, 0, fmt.Errorf("lobby: truncated 1a/%02x body (%d < %d)", b[1], len(b)-3, n)
+		if b[1] == SmallSessionDictType {
+			// 1a/76 carries a u16 length.
+			if len(b) < 4 {
+				return Small{}, 0, fmt.Errorf("lobby: truncated 1a/%02x head", SmallSessionDictType)
+			}
+			n := int(binary.LittleEndian.Uint16(b[2:4]))
+			if len(b) < 4+n {
+				return Small{}, 0, fmt.Errorf("lobby: truncated 1a/%02x body (%d < %d)", b[1], len(b)-4, n)
+			}
+			return Small{Family: 0x1a, Type: b[1], Body: b[4 : 4+n]}, 4 + n, nil
 		}
-		return Small{Family: 0x1a, Type: b[1], Body: b[3 : 3+n]}, 3 + n, nil
+		body, n, err := readElementBody(b[2:], 1)
+		if err != nil {
+			return Small{}, 0, fmt.Errorf("lobby: 1a/%02x: %w", b[1], err)
+		}
+		return Small{Family: 0x1a, Type: b[1], Body: body}, 2 + n, nil
 
 	case 0x13:
 		if len(b) < 2 {
@@ -120,21 +145,21 @@ func ParseSmall(b []byte) (Small, int, error) {
 		if len(b) < 2 {
 			return Small{}, 0, fmt.Errorf("lobby: truncated 45 head")
 		}
-		n := int(b[1])
-		if len(b) < 2+n {
-			return Small{}, 0, fmt.Errorf("lobby: truncated 45 body")
+		body, n, err := readElementBody(b[1:], 1)
+		if err != nil {
+			return Small{}, 0, fmt.Errorf("lobby: 45: %w", err)
 		}
-		return Small{Family: 0x45, Body: b[2 : 2+n]}, 2 + n, nil
+		return Small{Family: 0x45, Body: body}, 1 + n, nil
 
 	case 0x46:
 		if len(b) < 7 {
 			return Small{}, 0, fmt.Errorf("lobby: truncated 46 head")
 		}
-		n := int(binary.LittleEndian.Uint16(b[1:3]))
-		if len(b) < 3+n {
-			return Small{}, 0, fmt.Errorf("lobby: truncated 46 body")
+		body, n, err := readElementBody(b[1:], 2)
+		if err != nil {
+			return Small{}, 0, fmt.Errorf("lobby: 46: %w", err)
 		}
-		return Small{Family: 0x46, Body: b[3 : 3+n]}, 3 + n, nil
+		return Small{Family: 0x46, Body: body}, 1 + n, nil
 
 	case 0xff:
 		if len(b) < 9 {
@@ -147,6 +172,46 @@ func ParseSmall(b []byte) (Small, int, error) {
 		return Small{Family: 0xff, Body: b[5 : 5+n]}, 5 + n, nil
 	}
 	return Small{}, 0, fmt.Errorf("%w %#02x", ErrUnknownSmall, b[0])
+}
+
+// readElementBody reads an element length field of `width` bytes and the
+// body that follows, returning the body and the bytes consumed (length
+// field plus body).
+//
+// All-ones is not "the largest that fits", it is the ESCAPE. The client's
+// own writer (InterfaceElement::compressLength) fills the field with ones,
+// replaces the body's FIRST FOUR BYTES with the full u32 length, and moves
+// those four displaced bytes to the END of the element; the reader reverses
+// it. A parser that reads all-ones as a plain length mis-slices the element
+// and, on the client, over-reads the bundle
+// (`MF_ASSERT_DEV pCurr_ + nBytes <= pEnd_`).
+func readElementBody(b []byte, width int) ([]byte, int, error) {
+	if len(b) < width {
+		return nil, 0, fmt.Errorf("truncated length field")
+	}
+	escape := uint64(1)<<(8*width) - 1
+	var n uint64
+	for i := 0; i < width; i++ {
+		n |= uint64(b[i]) << (8 * i)
+	}
+	if n != escape {
+		if uint64(len(b)) < uint64(width)+n {
+			return nil, 0, fmt.Errorf("truncated body (%d < %d)", len(b)-width, n)
+		}
+		return b[width : width+int(n)], width + int(n), nil
+	}
+	if len(b) < width+4 {
+		return nil, 0, fmt.Errorf("truncated oversized length")
+	}
+	total := int(binary.LittleEndian.Uint32(b[width : width+4]))
+	if total < 4 || len(b) < width+4+total {
+		return nil, 0, fmt.Errorf("truncated oversized body (%d < %d)", len(b)-width-4, total)
+	}
+	rest := b[width+4 : width+4+total]
+	body := make([]byte, 0, total)
+	body = append(body, rest[total-4:]...)
+	body = append(body, rest[:total-4]...)
+	return body, width + 4 + total, nil
 }
 
 // ParseSmalls walks a payload of back-to-back smalls.

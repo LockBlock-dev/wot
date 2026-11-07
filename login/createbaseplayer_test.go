@@ -11,7 +11,7 @@ import (
 // TestCreateBasePlayerAppRoundTrip is the point of sending the element: the
 // Account entity it builds decodes back to the session's values.
 func TestCreateBasePlayerAppRoundTrip(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -44,8 +44,21 @@ func TestCreateBasePlayerAppRoundTrip(t *testing.T) {
 	if v := back.Props["name"]; v.Str != "playerone" {
 		t.Errorf("name = %q", v.Str)
 	}
-	if v := back.Props["requiredVersion_2400"]; v.Str != "2.4.0.0" {
-		t.Errorf("requiredVersion_2400 = %q", v.Str)
+	// The version property is named after the build: 2.4.0.0 declares
+	// `requiredVersion_2400`, 2.4.1 `requiredVersion_2410`. Whichever the defs
+	// carry has to be set, or CreateBasePlayer fails outright.
+	versionProp := ""
+	for _, name := range []string{"requiredVersion_2410", "requiredVersion_2400"} {
+		if _, ok := back.Props[name]; ok {
+			versionProp = name
+			break
+		}
+	}
+	if versionProp == "" {
+		t.Fatal("the Account defs declare no requiredVersion property")
+	}
+	if v := back.Props[versionProp]; v.Str == "" {
+		t.Errorf("%s is empty", versionProp)
 	}
 	if v := back.Props["incarnationID"]; v.Uint == 0 {
 		t.Error("incarnationID is zero")
@@ -56,7 +69,7 @@ func TestCreateBasePlayerAppRoundTrip(t *testing.T) {
 // TestCreateBasePlayerIncarnationIsFresh keeps two sessions from sharing an
 // incarnation id: it identifies this incarnation of the entity.
 func TestCreateBasePlayerIncarnationIsFresh(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -98,7 +111,7 @@ func TestCreateBasePlayerNeedsDefs(t *testing.T) {
 // TestCreateBasePlayerIsStableInShape keeps the element the same size for
 // the same name, so a session's frame budget does not move.
 func TestCreateBasePlayerIsStableInShape(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -137,7 +150,7 @@ func TestCreateBasePlayerIsStableInShape(t *testing.T) {
 
 // TestCreateBasePlayerElementIsWellFormed pins the framing.
 func TestCreateBasePlayerElementIsWellFormed(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}

@@ -24,12 +24,12 @@ func VerifyBundle(stream []byte) error {
 		return fmt.Errorf("bulk: %w", err)
 	}
 	// The encoder must reproduce exactly the bytes the decoder claims to
-	// cover plus the verbatim tail. A stream that ends in non-pickle
-	// bytes (the flood's later chunks carry framed packets) has a tail,
-	// so comparing against len(stream) alone would be wrong.
-	if want := b.Decoded + len(b.Tail); len(out) != want {
-		return fmt.Errorf("bulk: re-encode is %d bytes, want %d (decoded %d + tail %d)",
-			len(out), want, b.Decoded, len(b.Tail))
+	// cover plus the verbatim prefix and tail. A stream that ends in
+	// non-pickle bytes (the flood's later chunks carry framed packets)
+	// has a tail, so comparing against len(stream) alone would be wrong.
+	if want := len(b.Prefix) + b.Decoded + len(b.Tail); len(out) != want {
+		return fmt.Errorf("bulk: re-encode is %d bytes, want %d (prefix %d + decoded %d + tail %d)",
+			len(out), want, len(b.Prefix), b.Decoded, len(b.Tail))
 	}
 	return nil
 }

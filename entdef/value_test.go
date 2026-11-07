@@ -2,6 +2,7 @@ package entdef
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -166,5 +167,38 @@ func TestValueVarLenHeader(t *testing.T) {
 	got, err := c.Read(bytes.NewReader(buf.Bytes()), &stringType{tag: "String"})
 	if err != nil || got.Str != "ab" {
 		t.Fatalf("round-trip = %q, %v", got.Str, err)
+	}
+}
+
+// A PYTHON property is `AllowUnsafeData`: once it outgrows the
+// variable-length header the engine writes `[0xFF][u24 length][data]`, not
+// `[len][data]`. The lobby's `initialServerSettings` is a pickled dict of
+// several hundred bytes and always takes that form — writing it with a 1-byte
+// header is what made `CreateBasePlayer` fail with "length 802 does not fit a
+// 1-byte header" and left a re-login stuck at the login screen.
+func TestPythonBlobUsesTheUnsafeLength(t *testing.T) {
+	dt := &stringType{"Python"}
+	blob := strings.Repeat("x", 802)
+	var buf bytes.Buffer
+	if err := (Codec{}).Write(&buf, dt, Value{Kind: VString, Str: blob}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := buf.Bytes()
+	if len(got) != 4+len(blob) {
+		t.Fatalf("%d B, want %d", len(got), 4+len(blob))
+	}
+	if got[0] != 0xFF {
+		t.Fatalf("first byte %#02x, want 0xFF (the unsafe marker)", got[0])
+	}
+	if n := int(got[1]) | int(got[2])<<8 | int(got[3])<<16; n != len(blob) {
+		t.Fatalf("u24 length %d, want %d", n, len(blob))
+	}
+	// A short one keeps the plain header.
+	var small bytes.Buffer
+	if err := (Codec{}).Write(&small, dt, Value{Kind: VString, Str: "abc"}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := small.Bytes(); len(got) != 4 || got[0] != 3 {
+		t.Fatalf("short blob = % x, want 03 61 62 63", got)
 	}
 }

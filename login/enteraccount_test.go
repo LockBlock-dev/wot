@@ -8,11 +8,12 @@ import (
 	"time"
 
 	"github.com/LockBlock-dev/wot/entdef"
+	"github.com/LockBlock-dev/wot/lobby"
 )
 
 func enterTestServer(t *testing.T) *BaseAppServer {
 	t.Helper()
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -34,23 +35,35 @@ func enterTestServer(t *testing.T) *BaseAppServer {
 	}
 }
 
-// TestEnterAccountSendsTheSequence pins the three messages the reference's
-// capture shows: the Account entity, SelectPlayerEntity, then showGUI.
+// TestEnterAccountSendsTheSequence pins the carrier-less path: the Account
+// entity, then ONE frame carrying `selectPlayerEntity + showGUI` in the
+// genuine framing `[1a][76][u16 elementLen][u8 stringLen][pickle]`. The
+// flood bundle normally creates the entity AND sends that same pair as the
+// session-dict frame, so the post-flood call passes false and sends
+// nothing.
 func TestEnterAccountSendsTheSequence(t *testing.T) {
 	s := enterTestServer(t)
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
 	st := &clientState{entityID: 0x1234, name: "playerone", blockKey: "0123456789abcdef"}
 
 	tr := &fakeTransport{}
-	if err := s.enterAccount(tr, addr, st); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
 		t.Fatalf("enterAccount: %v", err)
 	}
-	if len(tr.writes) != 3 {
-		t.Fatalf("%d packets, want 3 (CreateBasePlayer, SelectPlayerEntity, showGUI)", len(tr.writes))
+	if len(tr.writes) != 2 {
+		t.Fatalf("%d packets, want 2 (CreateBasePlayer, selectPlayerEntity + showGUI)", len(tr.writes))
 	}
 
 	// Decrypt each and check the element it carries.
-	want := []byte{elCreateBasePlayer, elSelectPlayerEntity, byte(entityMethodBase + 40)}
+	//
+	// The second packet opens with a `0x13` TickSync head, exactly as
+	// `serveBulk` frames the same `1a/76` small on a fresh login
+	// (`EncodeTickSync(0x40) + dict`) and as `answerApp` frames every other
+	// stage-2 datagram. Sent bare, the client refuses it: after a
+	// `leaveArena` it ACKs `CreateBasePlayer` and then never ACKs this one,
+	// logging `REASON_GENERAL_NETWORK` and dropping to
+	// `HANGAR LOADING STATE: DISCONNECTED`.
+	want := []byte{0x13, 0x13}
 	for i, pkt := range tr.writes {
 		clear, err := decryptBlowfish(st.blockKey, pkt[4:])
 		if err != nil {
@@ -64,10 +77,8 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 			t.Fatalf("packet %d element = %#02x, want %#02x", i, app[0], want[i])
 		}
 	}
-
-	// The first is a decodable Account entity with the capture's component
-	// count.
-	clear, err := decryptBlowfish(st.blockKey, tr.writes[0][4:])
+	// And the selectPlayerEntity must still follow the head.
+	clear, err := decryptBlowfish(st.blockKey, tr.writes[1][4:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +86,21 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(app) < 3 || app[2] != elSelectPlayerEntity {
+		t.Fatalf("second packet = % x, want a 0x13 head then %#02x", app, elSelectPlayerEntity)
+	}
+
+	// The first is a decodable Account entity with the capture's component
+	// count. Skip its two-byte `0x13` head.
+	clear, err = decryptBlowfish(st.blockKey, tr.writes[0][4:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err = frameApp(clear)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app = app[2:]
 	back, err := DecodeCreateBasePlayer(app, s.cfg.Dispatch)
 	if err != nil {
 		t.Fatalf("DecodeCreateBasePlayer: %v", err)
@@ -87,7 +113,12 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 		t.Errorf("component count = %d, want 19", got)
 	}
 
-	// SelectPlayerEntity is FIXED 0: one byte, no payload.
+	// The second frame is `selectPlayerEntity` (FIXED 0, one byte) followed
+	// by showGUI, whose STRING argument is a pickled dict: the client does
+	// `pickle.loads(ctx)` and reads databaseID out of it, so an empty
+	// string raises inside the handler. The method's
+	// VariableLengthHeaderSize is the ELEMENT length width; the string's
+	// own header is one byte.
 	clear, err = decryptBlowfish(st.blockKey, tr.writes[1][4:])
 	if err != nil {
 		t.Fatal(err)
@@ -96,21 +127,38 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(app) != 1 {
-		t.Errorf("SelectPlayerEntity is %d B, want 1", len(app))
+	// Skip the two-byte `0x13` tick head.
+	app = app[2:]
+	if len(app) < 4 || app[0] != elSelectPlayerEntity {
+		t.Fatalf("frame % x, want a leading selectPlayerEntity", app)
 	}
-
-	// showGUI is a client method call with a 2-byte string length header.
-	clear, err = decryptBlowfish(st.blockKey, tr.writes[2][4:])
+	if app[1] != byte(entityMethodBase+40) {
+		t.Fatalf("showGUI element %#02x, want %#02x", app[1], byte(entityMethodBase+40))
+	}
+	n := int(app[2]) | int(app[3])<<8
+	strLen := int(app[4])
+	if n != 1+strLen {
+		t.Fatalf("showGUI element length %d, string length %d (want 1+%d)", n, strLen, strLen)
+	}
+	if got, want := 5+strLen, len(app); got != want {
+		t.Fatalf("showGUI string ends at %d, element ends at %d", got, want)
+	}
+	stk, _, err := lobby.DecodePrefix(app[5 : 5+strLen])
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("showGUI arg pickle: %v", err)
 	}
-	app, err = frameApp(clear)
-	if err != nil {
-		t.Fatal(err)
+	d, ok := stk[len(stk)-1].(*lobby.PDict)
+	if !ok {
+		t.Fatalf("showGUI arg is %T, want *PDict", stk[len(stk)-1])
 	}
-	if n := int(app[1]) | int(app[2])<<8; n != 2 {
-		t.Errorf("showGUI payload = %d B, want 2 (a 2-byte empty string)", n)
+	found := false
+	for _, e := range d.Entries {
+		if k, isStr := e.Key.(string); isStr && k == "databaseID" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("showGUI arg has no databaseID: %v", d.Entries)
 	}
 }
 
@@ -122,11 +170,11 @@ func TestEnterAccountIsOnce(t *testing.T) {
 	st := &clientState{entityID: 1, name: "x", blockKey: "0123456789abcdef"}
 
 	tr := &fakeTransport{}
-	if err := s.enterAccount(tr, addr, st); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	first := len(tr.writes)
-	if err := s.enterAccount(tr, addr, st); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 6, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(tr.writes) != first {
@@ -139,8 +187,8 @@ func TestEnterAccountIsOffByDefault(t *testing.T) {
 	s := enterTestServer(t)
 	s.cfg.CreateBasePlayer = false
 	tr := &fakeTransport{}
-	if err := s.enterAccount(tr, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
-		&clientState{entityID: 1, blockKey: "0123456789abcdef"}); err != nil {
+	if _, err := s.enterAccount(tr, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+		&clientState{entityID: 1, blockKey: "0123456789abcdef"}, 3, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(tr.writes) != 0 {

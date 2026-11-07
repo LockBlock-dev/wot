@@ -18,7 +18,7 @@ func TestDefsAgreeWithPostDoCmd(t *testing.T) {
 		dump = "../../captures/proxy-20261014-1752.hex"
 		flow = "35493->"
 		key  = "/tmp/k1752.txt"
-		defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+		defs = "../../scripts-2.4.1/entity_defs"
 	)
 	if _, err := os.Stat(dump); err != nil {
 		t.Skipf("capture unavailable: %v", err)

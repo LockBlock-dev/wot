@@ -108,7 +108,7 @@ func (c Codec) Write(w io.Writer, dt DataType, v Value) error {
 	case *floatType:
 		return c.writeFloat(w, t, v)
 	case *stringType:
-		return c.writeString(w, v)
+		return c.writeString(w, t, v)
 	case *vectorType:
 		return c.writeVector(w, t, v)
 	case *mailboxType:
@@ -251,9 +251,26 @@ func (c Codec) readString(r io.Reader) (Value, error) {
 	return Value{Kind: VString, Str: string(buf)}, nil
 }
 
-func (c Codec) writeString(w io.Writer, v Value) error {
+func (c Codec) writeString(w io.Writer, t *stringType, v Value) error {
 	if v.Kind != VString {
 		return fmt.Errorf("entdef: string wants a string, got kind %d", v.Kind)
+	}
+	// A PYTHON property is `AllowUnsafeData`, and the engine writes those with
+	// the "unsafe" length form once they outgrow the variable-length header:
+	// `[0xFF][u24 length][data]` instead of `[len][data]`. The lobby's
+	// `initialServerSettings` is a pickled dict of several hundred bytes, so it
+	// always takes that form — `appendPacked` in `flood_build.go` is the same
+	// rule, and it is what the client's `PythonStreamElement` reads.
+	if t.tag == "Python" && len(v.Str) >= 0xFF {
+		if len(v.Str) > 0xFFFFFF {
+			return fmt.Errorf("entdef: python blob is %d B, beyond the u24 length", len(v.Str))
+		}
+		n := len(v.Str)
+		if _, err := w.Write([]byte{0xFF, byte(n), byte(n >> 8), byte(n >> 16)}); err != nil {
+			return err
+		}
+		_, err := io.WriteString(w, v.Str)
+		return err
 	}
 	if err := c.writeLen(w, len(v.Str)); err != nil {
 		return err
@@ -320,7 +337,7 @@ func (c Codec) writeMailbox(w io.Writer, v Value) error {
 	if _, err := w.Write(buf[:]); err != nil {
 		return err
 	}
-	return c.writeString(w, addr)
+	return c.writeString(w, &stringType{"String"}, addr)
 }
 
 // --- sequences ---
@@ -439,4 +456,80 @@ func (c Codec) writeLen(w io.Writer, n int) error {
 	}
 	_, err := w.Write(buf)
 	return err
+}
+
+// ZeroValue returns the default value for a datatype: the value the client
+// itself would use for a property the server never set.
+//
+// It exists so an entity can be built from the defs alone — CreateBasePlayer
+// and CreateCellPlayer write EVERY property in their domain, with no count
+// prefix and no "absent" marker, so a server that only cares about three of
+// the Avatar's fourteen base properties still has to write the other
+// eleven.
+func ZeroValue(dt DataType) Value {
+	switch t := dt.(type) {
+	case *intType:
+		if t.signed {
+			return Value{Kind: VInt}
+		}
+		return Value{Kind: VUint}
+	case *floatType:
+		return Value{Kind: VFloat}
+	case *stringType:
+		if t.tag == "Python" {
+			// A PYTHON property must carry a VALID pickle, never an empty
+			// blob: `PythonStreamElement::fromStreamToSink` treats a
+			// zero-length value as a stream error ("Not enough data on
+			// stream to read value") and the entity read fails. This is
+			// the protocol-2 pickle of an empty dict.
+			return Value{Kind: VString, Str: "\x80\x02}\x2e"}
+		}
+		return Value{Kind: VString}
+	case *mailboxType:
+		return Value{Kind: VDict, Dict: []DictField{
+			{Name: "id", Value: Value{Kind: VInt}},
+			{Name: "addr", Value: Value{Kind: VString}},
+		}}
+	case *vectorType:
+		seq := make([]Value, t.n)
+		for i := range seq {
+			seq[i] = Value{Kind: VFloat}
+		}
+		return Value{Kind: VSeq, Seq: seq}
+	case *seqType:
+		// A TUPLE has a fixed element count and the codec refuses a
+		// shorter run, so the zero value has to be that long. An ARRAY
+		// (size 0) is empty.
+		seq := make([]Value, t.size)
+		for i := range seq {
+			seq[i] = ZeroValue(t.elem)
+		}
+		return Value{Kind: VSeq, Seq: seq}
+	case *fixedDictType:
+		fields := make([]DictField, 0, len(t.fields))
+		for _, f := range t.fields {
+			fields = append(fields, DictField{Name: f.name, Value: ZeroValue(f.typ)})
+		}
+		return Value{Kind: VDict, Dict: fields}
+	}
+	return Value{}
+}
+
+// EncodeArray writes an ARRAY of the given element type: the element count in
+// the codec's variable-length header, then each element in order.
+//
+// It exists because an array type is not reachable from the alias table on
+// its own — a component property declared ARRAY<X> has no named type to look
+// up, only the element's.
+func EncodeArray(w io.Writer, elem DataType, items []Value) error {
+	c := NewCodec()
+	if err := c.writeLen(w, len(items)); err != nil {
+		return err
+	}
+	for _, it := range items {
+		if err := c.Write(w, elem, it); err != nil {
+			return err
+		}
+	}
+	return nil
 }

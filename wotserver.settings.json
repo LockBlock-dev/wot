@@ -1,0 +1,346 @@
+{
+  "ab_feature_test": {},
+  "achievements20_config": {
+    "requiredCountOfBattles": 0,
+    "isLayoutEnabled": false,
+    "isWTREnabled": false,
+    "isSummaryEnabled": false,
+    "isLogSettingLayoutEnabled": false,
+    "layout": {
+      "layoutLength": 0
+    },
+    "WTRStages": []
+  },
+  "additionalBonus_config": {
+    "applyCount": 0,
+    "bonusFactor": 1,
+    "enabled": false
+  },
+  "armor_flashlight_config": {
+    "enabled": false
+  },
+  "armor_inspector_config": {
+    "disabledVehicle": [],
+    "enabled": false,
+    "linkButtonURL": null
+  },
+  "battle_matters_config": {},
+  "battle_royale_config": {
+    "isEnabled": false,
+    "tournamentsWidget": {
+      "isWidgetEnabled": false,
+      "widgets": []
+    }
+  },
+  "blueprints_config": {
+    "allowBlueprintsConversion": false,
+    "isEnabled": false,
+    "levels": {},
+    "useBlueprintsForUnlock": false
+  },
+  "blueprints_convert_sale_config": {},
+  "collections_config": {},
+  "commendations_config": {
+    "isCommendationsEnabled": false,
+    "isLiveTagsEnabled": false
+  },
+  "comp7_config": {},
+  "comp7_light_config": {},
+  "comp7_ranks_config": {},
+  "crystal_rewards_config": {},
+  "dog_tags_config": {
+    "enabled": true
+  },
+  "easy_tank_equip_config": {},
+  "epic_config": {
+    "isEnabled": false,
+    "epicMetaGame": {
+      "metaLevel": {},
+      "randomReservesMode": false,
+      "randomReservesOpt": {
+        "boardingVehAmmo": {
+          "extraWeight": 0
+        }
+      },
+      "defaultSlots": {},
+      "maxCombatReserveLevel": 0
+    }
+  },
+  "event_battles_config": {},
+  "exchange_rates_config": {},
+  "file_server": {},
+  "fort_rush_battles_config": {
+    "baseProgressionToken": "",
+    "battle": {
+      "controllableZones": {
+        "autoSpotDelaySeconds": 2,
+        "maxHealthHealPercentage": 0.0,
+        "neutral2OwnedTime": 0,
+        "owned2NeutralTime": 0,
+        "progressResetFactor": 0.0
+      }
+    },
+    "battleEconomy": {
+      "creditsByPlace": {
+        "draw": "",
+        "loss": "",
+        "win": ""
+      },
+      "progressionPointsByPlace": {
+        "draw": "",
+        "loss": "",
+        "win": ""
+      }
+    },
+    "completedProgressionToken": "",
+    "dailyMissionsConfig": {
+      "dailyGroupsCount": 0,
+      "dailyMissionQuestPrefix": "none",
+      "dailyMissionTokenPostfix": "none",
+      "dailyMissionTokenPrefix": "none",
+      "dailyMissionTokenTtl": 1,
+      "dailyQuestMaxDays": 0,
+      "hardDailyMissionQuestPrefix": "none",
+      "tokenLimit": 1
+    },
+    "eligibleVehicleTiers": "",
+    "endDatetime": "2026-01-01T00:00:00",
+    "forbiddenVehClasses": "",
+    "isEnabled": false,
+    "isInfoPageEnabled": false,
+    "maxRewardsAmountPerStage": 1,
+    "modeSelectorCardColumn": 1,
+    "modeSelectorCardPriority": 40,
+    "progression": {
+      "stage": []
+    },
+    "progressionQuestPrefix": "none",
+    "squadRestrictions": {
+      "tags": {}
+    },
+    "startDatetime": "2026-01-01T00:00:00",
+    "technicalPause": false
+  },
+  "frontlineSettings": {},
+  "fun_random_config": {},
+  "hallOfFame": {},
+  "halloween_anomalies_config": {
+    "anomalies": {
+      "anomaly": []
+    },
+    "recipes": {
+      "recipe": []
+    },
+    "reduceFactor": 0.0
+  },
+  "halloween_bestiary_config": {
+    "enemies": {
+      "enemy": []
+    }
+  },
+  "halloween_gsw_config": {
+    "cards": {
+      "card": []
+    }
+  },
+  "halloween_loot_config": {
+    "loot": []
+  },
+  "ingame_tournament_config": {
+    "wci": {
+      "isEnabled": false,
+      "startTime": 0,
+      "endTime": 0,
+      "showmatches": [],
+      "shop": [],
+      "offerGiftsToken": "",
+      "tokenStoreOpeningTime": 0
+    },
+    "ols": {
+      "isEnabled": false,
+      "startTime": 0,
+      "endTime": 0,
+      "showmatches": [],
+      "shop": [],
+      "offerGiftsToken": "",
+      "tokenStoreOpeningTime": 0
+    }
+  },
+  "limited_ui_config": {},
+  "live_ops_events_config": {},
+  "lootBoxes_config": {},
+  "lootbox_system_config": {},
+  "mapbox_config": {},
+  "newbie_battle_hints_config": {
+    "enabled": false
+  },
+  "newbie_prebattle_hints_config": {
+    "enabled": false,
+    "hintDisplayCount": 1
+  },
+  "oit_availability_config": {
+    "high": false,
+    "low": false,
+    "medium": false,
+    "min": false,
+    "ultra": false
+  },
+  "pbh_config": {},
+  "periphery_routing_config": {},
+  "personal_reserves_config": {
+    "isReservesInBattleActivationEnabled": false,
+    "displayConversionNotification": false,
+    "supportedQueueTypes": {
+      "PERSONAL": [],
+      "CLAN": [],
+      "EVENT": []
+    }
+  },
+  "play_limits_config": {},
+  "player_satisfaction_config": {
+    "enabled": false,
+    "enabledInterfaces": {
+      "postbattle": false,
+      "spectatorMode": false
+    }
+  },
+  "pre_moderation_config": {},
+  "prebattle_hints_config": {
+    "battleTimerThreshold": 0,
+    "enabled": false
+  },
+  "prefab_effects_availability_config": {
+    "enabled": true,
+    "switchEnabled": false
+  },
+  "productsCatalog": {},
+  "progressive_reward_config": {},
+  "ranked_config": {},
+  "reactiveCommunicationConfig": {},
+  "referral_program_config": {},
+  "regional_settings": {
+    "starting_day_of_a_new_week": 0,
+    "starting_time_of_a_new_day": 0,
+    "starting_time_of_a_new_game_day": 3
+  },
+  "seniority_awards_config": {},
+  "shop": {
+    "hostUrl": "",
+    "isStorageEnabled": true
+  },
+  "spgRedesignFeatures": {
+    "markTargetAreaEnabled": false,
+    "stunEnabled": false
+  },
+  "steam_shade_config": {},
+  "story_mode_battle_mgr_quotums": {
+    "quotums": []
+  },
+  "story_mode_missions": {
+    "missions": [],
+    "onboarding": {}
+  },
+  "story_mode_settings": {
+    "afk": {
+      "onboarding": {
+        "arenaWaitPlayerTime": 1,
+        "maxPlayerInactiveTime": 1
+      },
+      "regular": {
+        "arenaWaitPlayerTime": 1,
+        "maxPlayerInactiveTime": 1
+      }
+    },
+    "enabled": false,
+    "entryPoint": {
+      "eventEndAt": "2026-01-01T00:00:00",
+      "eventStartAt": "2026-01-01T00:00:00"
+    },
+    "eventName": "none",
+    "hideGameLoadingTimeout": 1,
+    "joinToQueueFromLogin": false,
+    "modeSelectorCardColumn": 1,
+    "modeSelectorCardPriority": 0,
+    "newbieAdvertisingEnabled": false,
+    "newbieBannerEnabled": false,
+    "parallaxEnabled": false,
+    "waitTimeQueue": 1
+  },
+  "strongholdSettings": {},
+  "telecom_config": {
+    "bundles": {}
+  },
+  "tournament_config": {},
+  "umgConfig": {
+    "enableAllDaily": 0,
+    "enableAllWeekly": 0,
+    "enableDailyWeeklyUI": 0,
+    "enablePM3Banner": 0,
+    "slides": []
+  },
+  "umgEvents": {
+    "weights": []
+  },
+  "umgMissions": {
+    "weights": []
+  },
+  "unit_assembler_config": {
+    "configs": {}
+  },
+  "veh_playlists_config": {
+    "isVehPlaylistsEnabled": false
+  },
+  "vehicle_post_progression_config": {},
+  "voipDomain": "",
+  "voipUserDomain": "",
+  "w2gt_config": {},
+  "wallet": {},
+  "weekly_quests_config": {
+    "enabled": false,
+    "rerollTimeout": 1
+  },
+  "winback_config": {
+    "chainVersions": [],
+    "isEnabled": false,
+    "isModeEnabled": false,
+    "isProgressionEnabled": false,
+    "isWhatsNewEnabled": false,
+    "lastQuestEnabler": "",
+    "offerTokenPrefix": "",
+    "tokenQuestPrefix": "",
+    "winbackAccessToken": "",
+    "winbackBattlesCountToken": "",
+    "winbackModeAccessTokens": [],
+    "winbackPromoURL": "",
+    "winbackShowPromoToken": "",
+    "winbackStartingQuest": ""
+  },
+  "xmpp_alt_connections": [],
+  "xmpp_bosh_connections": [],
+  "xmpp_connections": [
+    [
+      "127.0.0.1",
+      5222
+    ]
+  ],
+  "xmpp_enabled": true,
+  "xmpp_host": "localhost",
+  "xmpp_muc_services": [
+    {
+      "enabled": true,
+      "format": "${userString}",
+      "hostname": "rooms.localhost",
+      "type": 2,
+      "userString": "user_room"
+    },
+    {
+      "enabled": true,
+      "format": "clan_${clanDBID}",
+      "hostname": "clans.localhost",
+      "type": 3,
+      "userString": "clan"
+    }
+  ],
+  "xmpp_port": 5222,
+  "xmpp_resource": "wot"
+}

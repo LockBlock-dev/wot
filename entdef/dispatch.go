@@ -94,6 +94,10 @@ type PropertyDef struct {
 	Name   string
 	Type   DataType
 	Length ElementLength
+	// DetailLevel is the property's <DetailLevel>, empty when it has none.
+	// The entity creation message carries the properties WITHOUT one; the
+	// ones with a level ride the update that follows.
+	DetailLevel string
 }
 
 // EntityDispatch is one entity's client-facing tables, with the exposed
@@ -117,6 +121,13 @@ type EntityDispatch struct {
 	// (DATA_BASE). CreateBasePlayer carries exactly these; the
 	// cell-hosted ones ride CreateCellPlayer instead.
 	BaseProps []PropertyDef
+	// CellProps is the subset that is cell-to-client (OWN_CLIENT or
+	// ALL_CLIENTS). CreateCellPlayer carries exactly these, in the same
+	// wire order — the client reads them with
+	// `EntityDescription::readStreamToDict(FROM_CELL_TO_CLIENT_DATA)`,
+	// which walks the description and takes every property in that
+	// domain, with no count prefix.
+	CellProps []PropertyDef
 }
 
 // MethodByID returns the method at an exposed id, or nil.
@@ -189,17 +200,40 @@ func NewDispatch(l *Loader, names []string) (*Dispatch, error) {
 			CellMethods:   methodTable(e.CellMethods, e.IfaceCellMethods),
 		}
 		for _, p := range e.CSPropsOrdered() {
-			def := PropertyDef{
-				Name:   p.Name,
-				Type:   p.Type,
-				Length: elementLength(p.StreamSize(), int(p.VarLen)),
-			}
-			ed.Properties = append(ed.Properties, def)
+			ed.Properties = append(ed.Properties, PropertyDef{
+				Name:        p.Name,
+				Type:        p.Type,
+				Length:      elementLength(p.StreamSize(), int(p.VarLen)),
+				DetailLevel: p.DetailLevel,
+			})
+		}
+		// BaseProps is the createBasePlayer payload, so it follows the
+		// WIRE order (interfaces first, then declaration), not the
+		// FullIndex order Properties uses for addressing.
+		for _, p := range e.WireProps() {
 			if p.Flags&flagBase != 0 {
-				ed.BaseProps = append(ed.BaseProps, def)
+				ed.BaseProps = append(ed.BaseProps, PropertyDef{
+					Name:   p.Name,
+					Type:   p.Type,
+					Length: elementLength(p.StreamSize(), int(p.VarLen)),
+				})
+			}
+			// Cell-to-client is pass 2 of EntityDescription::addToStream:
+			// cell data (no BASE flag) that is client-visible. A
+			// BASE_AND_CLIENT property carries OWN_CLIENT too, so the
+			// BASE exclusion is what keeps it out.
+			if p.Flags&flagBase == 0 && p.Flags&cellToClientMask != 0 {
+				ed.CellProps = append(ed.CellProps, PropertyDef{
+					Name:   p.Name,
+					Type:   p.Type,
+					Length: elementLength(p.StreamSize(), int(p.VarLen)),
+				})
 			}
 		}
-		ed.TypeID = len(d.names)
+		// Entity type ids are 1-based on the wire: 0 is the "no entity"
+		// sentinel, and entities.xml order (Account first) gives Account
+		// id 1, which is what createBasePlayer carries.
+		ed.TypeID = len(d.names) + 1
 		d.byName[e.Name] = ed
 		d.names = append(d.names, e.Name)
 	}
@@ -227,7 +261,13 @@ func (d *Dispatch) Entities() []string { return d.names }
 func methodTable(own, iface []Method) []MethodDef {
 	var out []MethodDef
 	seen := make(map[string]bool, len(own)+len(iface))
-	for _, list := range [][]Method{own, iface} {
+	// Interfaces first, then the entity's own methods: that is the order
+	// `EntityDescription::addToStream` walks, and the sort below is STABLE,
+	// so methods that compare equal keep this relative order. Getting it
+	// backwards shifts every tied method's exposed id — which is how
+	// `Account.update` ended up on the element the client reads as a
+	// one-byte-argument method.
+	for _, list := range [][]Method{iface, own} {
 		for _, m := range list {
 			if m.Flags&(expAllClients|expOwnClient) == 0 {
 				continue

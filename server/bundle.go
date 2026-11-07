@@ -29,6 +29,13 @@ type Bundle struct {
 	Stack []*lobby.FNode
 	// Raw is the reassembled bundle these documents came from.
 	Raw []byte
+	// Prefix is the wire bytes ahead of the first pickle document. The
+	// flood's bundle is a stream of ClientInterface elements, not a bare
+	// pickle: it opens with updateFrequencyNotification, a tickSync and
+	// the createBasePlayer header (entity id, type id, packed version,
+	// account name, counters) before the pickle starts. Those bytes are
+	// the client's, not ours to interpret, so they ride along verbatim.
+	Prefix []byte
 	// Tail is whatever follows the last document. The flood carries
 	// trailing bytes after the pickle; they are not ours to interpret,
 	// so they ride along verbatim.
@@ -54,45 +61,111 @@ type BundleDoc struct {
 	stopped bool
 }
 
-// DecodeBundle parses a reassembled lobby bundle: every pickle document
-// it carries, in order.
+// pickleStart finds where the bundle's first pickle document begins.
+//
+// The flood's bundle is a stream of ClientInterface elements; the pickle
+// rides inside the createBasePlayer element, after its header and the
+// packed version/account-name/counter block. A bundle authored in code
+// has no such prefix and starts at 0.
+//
+// The search is bounded to the element header region (the prefix is 47 B
+// on the 2.4.0 capture and 55 B on the 2.4.1 one) and a candidate only
+// wins if the document sequence it starts covers most of the stream, so a
+// stray PROTO byte inside the prefix cannot.
+func pickleStart(raw []byte) (int, error) {
+	const maxPrefix = 512
+	limit := len(raw)
+	if limit > maxPrefix {
+		limit = maxPrefix
+	}
+	bestOff, bestLen := -1, 0
+	var firstErr error
+	for off := 0; off < limit; off++ {
+		// A proto-2 document opens with PROTO 2; anything else at this
+		// offset is not a document start worth a full decode.
+		if off > 0 && !(raw[off] == 0x80 && off+1 < len(raw) && raw[off+1] == 0x02) {
+			continue
+		}
+		docs, n, err := decodeDocs(raw[off:])
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		// The real document is the biggest one that decodes: a stray
+		// PROTO byte inside the element header decodes a few bytes at
+		// most, while the settings pickle is the bulk of the stream.
+		if len(docs) > 0 && n > bestLen {
+			bestOff, bestLen = off, n
+		}
+	}
+	if bestOff >= 0 {
+		return bestOff, nil
+	}
+	if firstErr != nil {
+		return 0, fmt.Errorf("server: bundle decode: %w", firstErr)
+	}
+	return 0, fmt.Errorf("server: bundle decode: no pickle document in %d B", len(raw))
+}
+
+// decodeDocs decodes the run of pickle documents at the start of raw and
+// reports how many bytes they cover.
 //
 // A document ends at STOP, or where the next document's PROTO begins, or
 // at the first byte that is not pickle at all (the flood's later chunks
-// carry channel-framed packets). Whatever is left over is Tail.
-func DecodeBundle(raw []byte) (*Bundle, error) {
-	b := &Bundle{Raw: raw}
+// carry channel-framed packets). The run stops at the first document that
+// will not decode; the bytes past it are the caller's tail.
+func decodeDocs(raw []byte) ([]BundleDoc, int, error) {
+	var docs []BundleDoc
 	off := 0
 	for off < len(raw) {
 		stack, marks, ops, n, stopped, err := lobby.DecodeFaithfulStream(raw[off:])
 		if err != nil {
-			if len(b.Docs) == 0 {
-				return nil, fmt.Errorf("server: bundle decode: %w", err)
+			if len(docs) == 0 {
+				return nil, 0, err
 			}
-			// A later document that will not decode is not ours to
-			// interpret: keep it verbatim as tail.
 			break
 		}
 		if n <= 0 {
 			break
 		}
-		b.Docs = append(b.Docs, BundleDoc{Stack: stack, Marks: marks, ops: ops, stopped: stopped})
-		b.Stack = append(b.Stack, stack...)
+		docs = append(docs, BundleDoc{Stack: stack, Marks: marks, ops: ops, stopped: stopped})
 		off += n
 		// A STOP closes one document, not the stream: a bundle built in
 		// code writes each document with its own STOP. Keep going while
 		// the next bytes decode; the loop ends on a decode error (the
 		// capture's non-pickle tail) or at the end of the stream.
 	}
-	b.Decoded = off
-	b.Tail = raw[off:]
+	return docs, off, nil
+}
+
+// DecodeBundle parses a reassembled lobby bundle: every pickle document
+// it carries, in order.
+func DecodeBundle(raw []byte) (*Bundle, error) {
+	b := &Bundle{Raw: raw}
+	off, err := pickleStart(raw)
+	if err != nil {
+		return nil, err
+	}
+	b.Prefix = raw[:off]
+	docs, n, err := decodeDocs(raw[off:])
+	if err != nil {
+		return nil, fmt.Errorf("server: bundle decode: %w", err)
+	}
+	b.Docs = docs
+	for _, d := range docs {
+		b.Stack = append(b.Stack, d.Stack...)
+	}
+	b.Decoded = n
+	b.Tail = raw[off+n:]
 	return b, nil
 }
 
 // Encode re-serialises the bundle. Untouched nodes replay verbatim, so
 // an unmodified bundle encodes back to its input bytes.
 func (b *Bundle) Encode() ([]byte, error) {
-	var out []byte
+	out := append([]byte{}, b.Prefix...)
 	for i, d := range b.Docs {
 		enc, err := lobby.EncodeFaithfulOpsStop(d.Stack, d.Marks, d.ops, d.stopped)
 		if err != nil {

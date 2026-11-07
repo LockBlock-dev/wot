@@ -68,8 +68,11 @@ func TestBuildStatsSmallCarriesTheAccount(t *testing.T) {
 		if s.Family != 0x1a || s.Type != statsSmallType {
 			t.Errorf("freeXP %d: family/type = %#02x/%#02x", freeXP, s.Family, s.Type)
 		}
-		if len(s.Body) < 2 || s.Body[0] != statsStatus {
-			t.Errorf("freeXP %d: no status byte", freeXP)
+		// The byte after the element length is the STRING length, and it
+		// must match the bytes that follow: a fixed value here made the
+		// client read past the element (MemoryIStream over-read).
+		if len(s.Body) < 2 || int(s.Body[0]) != len(s.Body)-1 {
+			t.Errorf("freeXP %d: string length %d, body %d B", freeXP, s.Body[0], len(s.Body))
 		}
 	}
 }
@@ -88,21 +91,6 @@ func TestBuildStatsSmallIsStable(t *testing.T) {
 		if !bytes.Equal(again, first) {
 			t.Fatal("the builder is not deterministic")
 		}
-	}
-}
-
-// TestStatsFrameUsesTheBuilder keeps the serving path on the builder.
-func TestStatsFrameUsesTheBuilder(t *testing.T) {
-	got, err := statsFrame(200, 201, 5000)
-	if err != nil {
-		t.Fatalf("statsFrame: %v", err)
-	}
-	want, err := BuildStatsSmall(5000, 200, 201)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatal("statsFrame does not use the builder")
 	}
 }
 

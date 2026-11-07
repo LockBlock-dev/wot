@@ -79,6 +79,11 @@ const (
 	FDict
 	FGlobal // module.name reference
 	FReduce // callable(args)
+	// FRaw replays pre-built pickle opcodes verbatim. It exists for values
+	// the client only accepts as an instance of one of its own classes —
+	// the shop's `ItemsPrices` is one — which no canonical builder can
+	// produce.
+	FRaw
 )
 
 // FNode is one pickled value plus the encoding detail needed to reproduce
@@ -707,6 +712,10 @@ func (e *fencoder) emit(n *FNode) error {
 			e.out = append(e.out, opTuple)
 		}
 		e.putMemo(n)
+		return nil
+
+	case FRaw:
+		e.out = append(e.out, n.Raw...)
 		return nil
 
 	case FGlobal:

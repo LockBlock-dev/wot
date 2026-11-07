@@ -13,7 +13,7 @@ import (
 // the same call decodes to the same request and command ids, and the
 // method is named by the defs rather than by a hand-written table.
 func TestPostDoCmdFromDefs(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestPostDoCmdFromDefs(t *testing.T) {
 // every call the fallback recognises must decode identically from the
 // defs.
 func TestPostDoCmdDefsAndFallbackAgree(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestPostDoCmdDefsAndFallbackAgree(t *testing.T) {
 // TestPostDoCmdRejectsLengthMismatch keeps a defs/wire disagreement from
 // decoding garbage.
 func TestPostDoCmdRejectsLengthMismatch(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestPostDoCmdRejectsLengthMismatch(t *testing.T) {
 
 // TestPostDoCmdNamesFromDefs checks the log line names the method.
 func TestPostDoCmdNamesFromDefs(t *testing.T) {
-	const defs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+	const defs = "../../scripts-2.4.1/entity_defs"
 	if _, err := os.Stat(defs); err != nil {
 		t.Skipf("defs unavailable: %v", err)
 	}

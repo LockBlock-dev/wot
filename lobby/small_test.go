@@ -109,8 +109,13 @@ func TestSmallEncodeRefusesBadShapes(t *testing.T) {
 	if _, err := (Small{Family: 0x13, Body: []byte{1, 2}}).Encode(); err == nil {
 		t.Error("2-byte tick accepted")
 	}
-	if _, err := (Small{Family: 0x1a, Type: 0x76, Body: bytes.Repeat([]byte{0}, 256)}).Encode(); err == nil {
-		t.Error("256-byte 1a body accepted")
+	// 1a/76 is the one 0x1a small with a u16 length, so 256 B is fine
+	// there; every other 0x1a type is capped at the u8 field.
+	if _, err := (Small{Family: 0x1a, Type: 0x76, Body: bytes.Repeat([]byte{0}, 256)}).Encode(); err != nil {
+		t.Errorf("256-byte 1a/76 body refused: %v", err)
+	}
+	if _, err := (Small{Family: 0x1a, Type: 0x69, Body: bytes.Repeat([]byte{0}, 256)}).Encode(); err == nil {
+		t.Error("256-byte 1a/69 body accepted")
 	}
 	if _, err := (Small{Family: 0x46}).Encode(); err == nil {
 		t.Error("0x46 built from a payload")

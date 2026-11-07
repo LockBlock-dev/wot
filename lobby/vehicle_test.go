@@ -42,11 +42,16 @@ func TestParseIntDescr(t *testing.T) {
 		t.Fatalf("basic = (%d,%d,%d,%v)", it, na, id, err)
 	}
 	it, na, id, err = ParseIntDescr([]byte{0x23, 0x34, 0x01})
-	// lo4 reads 3 (vehicle+ext bit, exactly like the shipped
-	// parseIntCompactDescr); shipped vehicle paths compare ==1, so
-	// extended vehicle IDs never occur live (per-nation IDs < 255).
-	if err != nil || it != 3 || na != 2 || id != 0x134 {
+	// lo4 reads 3 = vehicle(1) | EXTENDED_VEHICLE_TYPE_ID_FLAG(2), and
+	// `getTypeOfCompactDescr` subtracts the flag back off for the simple
+	// item types — so the type is 1, not 3. 111 of the 1256 ownable
+	// vehicles have a type id above 255 and take this path.
+	if err != nil || it != 1 || na != 2 || id != 0x134 {
 		t.Fatalf("ext = (%d,%d,%x,%v)", it, na, id, err)
+	}
+	// A turret (type 3) with the ext flag reads back as 3, not 1.
+	if it, _, _, err := ParseIntDescr([]byte{0x45, 0x01, 0x00}); err != nil || it != 3 {
+		t.Fatalf("ext turret = (%d,%v), want 3", it, err)
 	}
 	if NationName(2) != "usa" || NationName(10) != "italy" || NationName(11) != "" {
 		t.Fatal("nation table mismatch")
@@ -112,5 +117,36 @@ func TestSectionFull(t *testing.T) {
 		if _, err := SectionCompactDescr(b2[:n], 2); err == nil {
 			t.Fatalf("truncation at %d must fail", n)
 		}
+	}
+}
+
+// TestVehicleGunKey pins the (turret, gun) pair the ammunition layout is
+// keyed by: the component block is six little-endian u16s after the type
+// head, and the client indexes `shellsLayout` by the third and fourth.
+func TestVehicleGunKey(t *testing.T) {
+	// A Panhard EBR 105's inventory descriptor, read out of the live client:
+	// `41 4A 9D 00 65 00 CD 00 22 00 82 00 63 00 00`. Its own
+	// `descriptor.chassis/turret/gun.compactDescr` are 40258 / 33347 / 25412,
+	// which decode to ids 157 / 130 / 99 — bytes [2..3], [10..11] and
+	// [12..13]. So the component block is
+	// `chassis, engine, fuelTank, radio, turret, gun`: turret and gun are the
+	// LAST two u16s.
+	//
+	// The key is the pair of COMPACT DESCRIPTORS, not the ids:
+	// `vehicle_equipment.__parseLayout` builds
+	// `shellsLayoutKey = (vehDescr.turret.compactDescr, vehDescr.gun.compactDescr)`.
+	// `makeIntCompactDescrByID` is `(id << 8) + itemType + (nation << 4)`,
+	// with `vehicleTurret` 3, `vehicleGun` 4 and this vehicle's nation 4
+	// (france), so 130 -> 33347 and 99 -> 25412.
+	cd := []byte{65, 74, 157, 0, 101, 0, 205, 0, 34, 0, 130, 0, 99, 0, 0}
+	turret, gun, ok := VehicleGunKey(cd)
+	if !ok {
+		t.Fatal("VehicleGunKey failed")
+	}
+	if turret != 33347 || gun != 25412 {
+		t.Fatalf("turret = %d, gun = %d, want 33347/25412 (the live client's own key)", turret, gun)
+	}
+	if _, _, ok := VehicleGunKey([]byte{1, 10}); ok {
+		t.Fatal("a truncated descriptor must not resolve")
 	}
 }

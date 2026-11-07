@@ -97,3 +97,8 @@ func EncodeDocument(nodes ...*FNode) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// NewRaw wraps pre-built pickle opcodes as a value. The encoder replays them
+// verbatim, so the caller owns their correctness — it exists for values the
+// client only accepts as an instance of one of its own classes.
+func NewRaw(b []byte) *FNode { return &FNode{Kind: FRaw, Raw: b} }

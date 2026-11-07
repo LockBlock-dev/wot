@@ -18,6 +18,58 @@ const (
 	CmdSetActiveVehSeason = 121 // CMD_SET_ACTIVE_VEH_SEASON
 	CmdSyncShop           = 300 // CMD_SYNC_SHOP
 	CmdReqServerStats     = 501 // CMD_REQ_SERVER_STATS
+	// CmdReqPlayerInfo is CMD_REQ_PLAYER_INFO: the profile's data request.
+	// `Account.requestPlayerInfo` sends it with doCmdInt3 and reads the
+	// answer's ext dict — `dossier` is the packed account dossier, and
+	// `DossierRequester` turns it into the achievements, medals and battle
+	// stats the profile and the achievements screen render.
+	CmdReqPlayerInfo = 503
+	// CmdReqPlayerClanInfo is CMD_REQ_PLAYER_CLAN_INFO: the client asks
+	// for a player's clan. The answer is `Account.onClanInfoReceived`
+	// (clanDBID, name, abbrev, motto, description), which is where
+	// `g_clanCache` gets the motto and description the profile shows —
+	// the clan name, tag, role and join date ride the account sync's
+	// `account.clanDBID` / `stats.clanInfo` instead.
+	CmdReqPlayerClanInfo = 506
+
+	// CmdEquipTman is CMD_EQUIP_TMAN: the crew assignment. The client's
+	// `account_helpers/Inventory.pyc equipTankman` sends it with
+	// doCmdIntArr as [vehInvID, slot, tmanInvID, groupID, groupSize], and
+	// `tmanInvID = -1` empties the slot.
+	CmdEquipTman = 105
+
+	// CmdSetAndFillLayouts is CMD_SET_AND_FILL_LAYOUTS: the ammo and
+	// consumables panels. `account_helpers/Inventory.pyc` sends it with
+	// doCmdIntArr as
+	// [shopRev, vehInvID, nShells, …shells, equipmentType, nEqs, …eqs],
+	// where the shells are flat `cd, count` pairs and the eqs are `cd`s.
+	// The answer's ext carries the purchases it made, `{shells: [(cd,
+	// price, count)], eqs: […]}`.
+	CmdSetAndFillLayouts = 108
+
+	// The economy flows. `account_helpers/Stats.pyc` sends these; the
+	// answers are the ordinary command response plus an unsolicited
+	// `Account.update(diff)` carrying the new balances.
+	CmdExchange   = 202 // CMD_EXCHANGE      doCmdInt4(shopRev, gold, credits, 0)
+	CmdFreeXPConv = 203 // CMD_FREE_XP_CONV doCmdIntArr([shopRev, xp, gold, ...vehCDs])
+	CmdPremium    = 204 // CMD_PREMIUM       doCmdInt3(shopRev, days, arenaUniqueID)
+	CmdBuySlot    = 205 // CMD_BUY_SLOT      doCmdInt3(shopRev, 0, 0)
+	CmdBuyBerths  = 206 // CMD_BUY_BERTHS    doCmdInt3(shopRev, packs, 0)
+
+	// The piggy bank's dev pair (`gui/game_control/wot_plus_controller.pyc`).
+	// The live server smashes the bank from a service-channel push; a
+	// private server has no such push, so the dev commands are the honest
+	// path to the same state.
+	CmdSetReservesPiggyBankDev = 10084 // doCmdInt2(credits, gold)
+	CmdSmashPiggyBankDev       = 10088 // doCmdInt(6)
+
+	// Squad invitations. The client sends CMD_INVITATION_SEND with
+	// doCmdIntArrStrArr(cmd, accountsToInvite, [comment]) and answers an
+	// invitation with doCmdInt3(cmd, invitationID, senderID, 0); the
+	// receiving side gets Account.processInvitations.
+	CmdInvitationAccept  = 10010
+	CmdInvitationDecline = 10011
+	CmdInvitationSend    = 10012
 	// CmdReqQueueInfo is CMD_REQ_QUEUE_INFO: the client asks for the
 	// matchmaker queue census and the server answers with the 1a/67
 	// small, {players: <int>, classes: <tuple>}. Server-wide, not

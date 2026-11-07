@@ -142,3 +142,77 @@ func TestDispatchCoversEveryEntity(t *testing.T) {
 		}
 	}
 }
+
+// TestAccountClientExposedIDs pins the two client-method ids the wire
+// depends on, both verified against the live client: the command answer
+// rides 0x5f and the session dict rides 0x76.
+//
+// They also pin the ORDER the table is built in. The sort is stable, so
+// methods that compare equal keep the order they were collected in, and
+// the engine collects an entity's INTERFACES before its own methods.
+// Collecting them the other way round leaves both of these ids unchanged
+// but shifts every tied method between them — which is how
+// `Account.update` ended up on an element the client reads as a
+// one-byte-argument method, leaving the whole pickle on the stream
+// ("CHEAT: Data still remains on stream").
+func TestAccountClientExposedIDs(t *testing.T) {
+	l := &Loader{Dir: testDefsDir}
+	d, err := NewDispatch(l, []string{"Account"})
+	if err != nil {
+		t.Fatalf("NewDispatch: %v", err)
+	}
+	e := d.Entity("Account")
+	if e == nil {
+		t.Fatal("no Account")
+	}
+	for _, want := range []struct {
+		id   int
+		name string
+	}{
+		{17, "onCmdResponseExt"},
+		{40, "showGUI"},
+	} {
+		if want.id >= len(e.ClientMethods) {
+			t.Fatalf("Account has %d client methods, want at least %d", len(e.ClientMethods), want.id+1)
+		}
+		if got := e.ClientMethods[want.id].Name; got != want.name {
+			t.Errorf("client[%d] = %q, want %q", want.id, got, want.name)
+		}
+	}
+	// `update` carries a pickled diff, so its element length is one byte
+	// wide (VariableLengthHeaderSize 1) — the width the encoder must use.
+	for i := range e.ClientMethods {
+		if e.ClientMethods[i].Name != "update" {
+			continue
+		}
+		if got := e.ClientMethods[i].Length.Var; got != 1 {
+			t.Errorf("update element length width = %d, want 1", got)
+		}
+		return
+	}
+	t.Fatal("no update in the Account client methods")
+}
+
+// TestZeroValuePythonIsAValidPickle pins the one zero value that is not
+// empty: a PYTHON property must carry a real pickle, because
+// `PythonStreamElement::fromStreamToSink` treats a zero-length blob as a
+// stream error ("Not enough data on stream to read value") and the whole
+// entity read fails. That is what killed the client on the battle Avatar's
+// `arenaExtraData`.
+func TestZeroValuePythonIsAValidPickle(t *testing.T) {
+	v := ZeroValue(&stringType{tag: "Python"})
+	if v.Kind != VString {
+		t.Fatalf("kind = %d, want VString", v.Kind)
+	}
+	if len(v.Str) == 0 {
+		t.Fatal("a PYTHON zero value must not be an empty blob")
+	}
+	// Protocol-2 pickle of an empty dict.
+	if v.Str != "\x80\x02}\x2e" {
+		t.Fatalf("python zero value = % x", v.Str)
+	}
+	// A plain STRING stays empty.
+	if got := ZeroValue(&stringType{tag: "String"}); got.Str != "" {
+		t.Fatalf("string zero value = %q, want empty", got.Str)
+	}
+}

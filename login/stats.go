@@ -6,7 +6,7 @@ import (
 	"github.com/LockBlock-dev/wot/lobby"
 )
 
-// The 1a/69 stats small is the account's economy on the wire:
+// The stats answer is the account's economy on the wire:
 //
 //	{stats: {freeXP: N}, prevRev: P, cache: {}, rev: R}
 //
@@ -14,10 +14,22 @@ import (
 // which tied the answer to one capture's exact pickle layout. It is built
 // here instead: the structure is known, and only the revisions come from
 // the carrier (they are the client's cache counters, not ours to invent).
+//
+// The element is NOT a "1a/69 small": 0x1A is `selectPlayerEntity` (the
+// exe's message-name table puts tickSync at 19 = 0x13 and
+// selectPlayerEntity at 26 = 0x1A), and the byte after it is a CLIENT
+// METHOD CALL — 0x69 = entityMethodBase(0x4E) + 27 = Account's
+// `onUnitBrowserResultsUpdate(STRING)`. Its framing is
+// `[elemID][u8 elementLen][u8 stringLen][string]` (the method's
+// VariableLengthHeaderSize is the ELEMENT length width; the string's own
+// header is one byte). The genuine element is `69 44 43 <67B>`: 0x44 =
+// 68 = 1 + 67, 0x43 = 67 = the pickle length.
+//
+// Writing a fixed "status" byte there instead made the client read a
+// 66-byte string out of 53 remaining bytes — a MemoryIStream over-read,
+// `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_`.
 const (
-	// statsStatus is the byte between the small's length and its pickle.
-	statsStatus = 0x42
-	// statsSmallType is the 1a subtype.
+	// statsSmallType is the client method id (0x4E + 27).
 	statsSmallType = 0x69
 )
 
@@ -32,7 +44,10 @@ func BuildStatsSmall(freeXP, prevRev, rev int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wotlogin: stats small: %w", err)
 	}
-	body := append([]byte{statsStatus}, pickle...)
+	if len(pickle) > 0xFF {
+		return nil, fmt.Errorf("wotlogin: stats pickle is %d B, beyond the u8 string length", len(pickle))
+	}
+	body := append([]byte{byte(len(pickle))}, pickle...)
 	small, err := lobby.Small{Family: 0x1a, Type: statsSmallType, Body: body}.Encode()
 	if err != nil {
 		return nil, fmt.Errorf("wotlogin: stats small: %w", err)
@@ -54,8 +69,8 @@ func ParseStatsSmall(small []byte) (freeXP, prevRev, rev int64, err error) {
 	if s.Family != 0x1a || s.Type != statsSmallType {
 		return 0, 0, 0, fmt.Errorf("wotlogin: not a 1a/%02x small", statsSmallType)
 	}
-	if len(s.Body) < 2 || s.Body[0] != statsStatus {
-		return 0, 0, 0, fmt.Errorf("wotlogin: stats small has no status byte")
+	if len(s.Body) < 2 || int(s.Body[0]) != len(s.Body)-1 {
+		return 0, 0, 0, fmt.Errorf("wotlogin: stats element string length %d, body %d B", s.Body[0], len(s.Body))
 	}
 	stack, _, err := lobby.DecodeFaithful(s.Body[1:])
 	if err != nil {

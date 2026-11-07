@@ -563,3 +563,12 @@ func BuildDataType(sec *Section) (DataType, error) {
 	}
 	return mb(sec)
 }
+
+// Alias returns a named type from alias.xml, or nil when it is not declared.
+//
+// The alias table is the only place a script dict such as VEHICLES_INFO is
+// defined: it is not a property of any entity, so it cannot be reached
+// through a dispatch table.
+func Alias(name string) DataType {
+	return aliases[name]
+}

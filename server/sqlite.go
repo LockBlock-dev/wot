@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS player_state (
 	data       TEXT    NOT NULL,
 	updated_at INTEGER NOT NULL
 );
-`
+` + socialSchema
 
 // OpenSQLite opens (creating if needed) the database at path and
 // applies the schema. Use ":memory:" for tests.

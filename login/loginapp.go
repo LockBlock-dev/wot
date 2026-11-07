@@ -532,27 +532,28 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		s.logf("%s: digest %x rejected for version %v", from, params.Digest, req.version)
 		return refusePacket(req.rid, statusBadDigest, textBadDigest)
 	}
+	// The account this login lands on. params.Username is the client's JSON
+	// identity document ({"login": …, "auth_realm": …, "auth_method": …});
+	// a token login leaves `login` empty and lands on the operator's token
+	// account instead. This name is what the Account entity carries and the
+	// hangar shows, so it must be a name — never the document.
+	name := userNameOf(params.Username)
+	if mapped := tokenLoginName(params.Username, s.cfg.TokenAccount); mapped != "" {
+		// A token login with no username: land it on the account the
+		// operator named, so a Steam client can test the server.
+		s.logf("%s: login rid=%d token login (no username) → account %q", from, req.rid, mapped)
+		name = mapped
+	}
 	var accountID int64
 	if s.cfg.VerifyCredentials != nil {
-		// params.Username is the client's JSON identity document
-		// ({"login": …, "auth_realm": …, "auth_method": …}); the hook
-		// gets the plain account name, not the blob.
-		name := userNameOf(params.Username)
-		mapped := tokenLoginName(params.Username, s.cfg.TokenAccount)
-		if mapped != "" {
-			// A token login with no username: land it on the account the
-			// operator named, so a Steam client can test the server.
-			s.logf("%s: login rid=%d token login (no username) → account %q", from, req.rid, mapped)
-			name = mapped
-		}
-		if mapped != "" && s.cfg.TokenLogin != nil {
+		if name != userNameOf(params.Username) && s.cfg.TokenLogin != nil {
 			// The token is the credential; there is no password to check.
-			id, err := s.cfg.TokenLogin(mapped)
+			id, err := s.cfg.TokenLogin(name)
 			if err != nil {
-				s.logf("%s: login rid=%d token account %q rejected", from, req.rid, mapped)
+				s.logf("%s: login rid=%d token account %q rejected", from, req.rid, name)
 				return refusePacket(req.rid, statusBadPassword, textBadPassword)
 			}
-			return s.loggedOn(from, listen, req.rid, req.version, params, id)
+			return s.loggedOn(from, listen, req.rid, req.version, params, id, name)
 		}
 		id, err := s.cfg.VerifyCredentials(name, params.Password)
 		if err != nil {
@@ -567,7 +568,7 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 		}
 		accountID = id
 	}
-	return s.loggedOn(from, listen, req.rid, req.version, params, accountID)
+	return s.loggedOn(from, listen, req.rid, req.version, params, accountID, name)
 }
 
 // issueChallenge mints the PoW state and answers status 66 (55 B for
@@ -655,9 +656,9 @@ func versionNames(versions []ClientVersion) string {
 // (genuine 216 B plaintext). Record endpoint mirrors the operator
 // choice; salt stays 0 (its semantics are unobserved — our reader
 // skips it). session_id/token2/account id are SYNTHESIZED shapes.
-func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, proto [4]byte, params LogOnParams, accountID int64) ([]byte, error) {
-	name := userNameOf(params.Username)
-	token2, err := randToken2(accountIDFor(accountID, name))
+func (s *LoginAppServer) loggedOn(from, listen *net.UDPAddr, rid uint32, proto [4]byte, params LogOnParams, accountID int64, accountName string) ([]byte, error) {
+	name := displayNameOf(accountName)
+	token2, err := randToken2(accountIDFor(accountID, accountName))
 	if err != nil {
 		return nil, fmt.Errorf("wotserver: token2 mint: %w", err)
 	}
@@ -816,14 +817,29 @@ func randSessionKey() (uint32, error) {
 // (config.go JSON: {"login": "name", ...}) for the servermsg mirror.
 // Non-JSON or wrong-shape input falls back to the raw string (probes,
 // hijacks). No account database: any name is accepted.
+//
+// A token2 login sends the identity document with an EMPTY `login` — the
+// credential is the token, not a name. Returning the raw blob in that case
+// is what put the whole document (session id and token2 included) into the
+// Account entity's `name`, which the hangar then renders in its top-left
+// corner. An empty `login` means "no name here", so say so and let the
+// caller fall back to the account the login lands on.
 func userNameOf(usernameJSON string) string {
 	var doc map[string]string
 	if err := json.Unmarshal([]byte(usernameJSON), &doc); err == nil {
-		if name, ok := doc["login"]; ok && name != "" {
-			return name
-		}
+		return doc["login"]
 	}
 	return usernameJSON
+}
+
+// displayNameOf turns an account name into the in-game name the client
+// shows: the local part of the login, since a WoT player name never
+// carries the `@domain` the login form requires.
+func displayNameOf(accountName string) string {
+	if i := strings.IndexByte(accountName, '@'); i > 0 {
+		return accountName[:i]
+	}
+	return accountName
 }
 
 // tokenLoginName returns the account a token login maps to, or "" when the

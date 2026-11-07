@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/LockBlock-dev/wot/login"
 )
 
 // ErrBadCredentials is returned by Authenticate. Its text is the wire
@@ -173,5 +175,76 @@ func (s *Server) State(ctx context.Context, accountID int64) (*PlayerState, erro
 		s.log().Info("player state provisioned", "account_id", accountID)
 		return st, nil
 	}
-	return st, err
+	if err != nil {
+		return nil, err
+	}
+	// A state written before a field existed decodes to its zero value,
+	// and zero is not a valid capacity: `stats.berths = 0` reads as "no
+	// free beds" and the barracks refuses every crew action. Fill the
+	// capacities in on read, so an old database keeps working.
+	if st.Berths <= 0 {
+		st.Berths = DefaultBerths
+	}
+	if st.PremiumExpiry <= 0 {
+		st.PremiumExpiry = MaxPremiumExpiry
+	}
+	return st, nil
 }
+
+// SeedGarage replaces an account's garage with the given vehicles and
+// raises its slot count to fit them, so the client's own capacity check
+// (`itemsCache.items.inventory.getFreeSlots(stats.vehicleSlots)`) never
+// reports a full garage.
+//
+// It is a REPLACE, not a merge: the point is a known, reproducible garage,
+// and merging would leave whatever a previous seed put there. The slot
+// count keeps a margin above the vehicle count so buying one more still
+// fits.
+func (s *Server) SeedGarage(ctx context.Context, accountID int64, vehicles []GarageVehicle) (*PlayerState, error) {
+	st, err := s.State(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	// The crew survives a re-seed: the assignment is the player's, not the
+	// seed's, and a restart must not empty every tank. It is carried over by
+	// compact descriptor rather than by index, because the generated list
+	// can gain or lose vehicles between builds.
+	crew := make(map[string][]int64, len(st.Garage))
+	shells := make(map[string][]int64, len(st.Garage))
+	eqs := make(map[string][]int64, len(st.Garage))
+	for _, v := range st.Garage {
+		if len(v.Crew) > 0 {
+			crew[string(v.CompactDescr)] = v.Crew
+		}
+		if len(v.Shells) > 0 {
+			shells[string(v.CompactDescr)] = v.Shells
+		}
+		if len(v.Eqs) > 0 {
+			eqs[string(v.CompactDescr)] = v.Eqs
+		}
+	}
+	for i := range vehicles {
+		key := string(vehicles[i].CompactDescr)
+		if kept, ok := crew[key]; ok {
+			// A list stored before the slot count was known can be short;
+			// the client rejects any length but the vehicle's own.
+			vehicles[i].Crew = login.PadCrew(kept, vehicles[i].CrewSize)
+		}
+		// The ammo and consumables layouts are the player's too.
+		vehicles[i].Shells = shells[key]
+		vehicles[i].Eqs = eqs[key]
+	}
+	st.Garage = vehicles
+	if want := int64(len(vehicles)) + GarageSlotMargin; st.Slots < want {
+		st.Slots = want
+	}
+	if err := s.Store.SaveState(ctx, accountID, st); err != nil {
+		return nil, err
+	}
+	s.log().Info("garage seeded", "account_id", accountID, "vehicles", len(vehicles), "slots", st.Slots)
+	return st, nil
+}
+
+// GarageSlotMargin is the headroom SeedGarage leaves above the vehicle
+// count, so the garage never reads as full.
+const GarageSlotMargin = 100

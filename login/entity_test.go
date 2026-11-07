@@ -7,7 +7,7 @@ import (
 	"github.com/LockBlock-dev/wot/entdef"
 )
 
-const entityTestDefs = "../../World_of_Tanks_EU/2.4.0.0/res/scripts/entity_defs"
+const entityTestDefs = "../../scripts-2.4.1/entity_defs"
 
 func entityTestDispatch(t *testing.T) *entdef.Dispatch {
 	t.Helper()
@@ -38,9 +38,15 @@ func TestCreateBasePlayerRoundTrip(t *testing.T) {
 
 	e := NewEntity(7, acct).
 		SetUint("incarnationID", 0x1122334455667788).
-		SetString("requiredVersion_2400", "2.4.0.0").
 		SetString("name", "playerone").
 		Set("initialServerSettings", entdef.Value{Kind: entdef.VString, Str: ""})
+	// The version property is named after the build the defs belong to.
+	for _, name := range []string{"requiredVersion_2410", "requiredVersion_2400"} {
+		if acct.PropertyByName(name) != nil {
+			e.SetString(name, "2.4.1.0")
+			break
+		}
+	}
 
 	elem, err := EncodeCreateBasePlayer(e)
 	if err != nil {
@@ -66,8 +72,12 @@ func TestCreateBasePlayerRoundTrip(t *testing.T) {
 	if v := back.Props["name"]; v.Str != "playerone" {
 		t.Errorf("name = %q", v.Str)
 	}
-	if v := back.Props["requiredVersion_2400"]; v.Str != "2.4.0.0" {
-		t.Errorf("requiredVersion_2400 = %q", v.Str)
+	verName := "requiredVersion_2410"
+	if acct.PropertyByName(verName) == nil {
+		verName = "requiredVersion_2400"
+	}
+	if v := back.Props[verName]; v.Str != "2.4.1.0" {
+		t.Errorf("%s = %q", verName, v.Str)
 	}
 	t.Logf("CreateBasePlayer: %d B for %s (%d base props)", len(elem), acct.Name, len(acct.BaseProps))
 }
@@ -103,11 +113,12 @@ func TestClientMethodCallFromDefs(t *testing.T) {
 	if want := byte(entityMethodBase + 3); elem[0] != want {
 		t.Errorf("element id = %#02x, want %#02x", elem[0], want)
 	}
-	if n := int(elem[1]) | int(elem[2])<<8; n != 1 {
-		t.Errorf("payload = %d B, want 1", n)
+	// Fixed-size method: no length field, the payload follows the id.
+	if len(elem) != 2 {
+		t.Fatalf("element = %d B, want 2 (id + 1-byte payload)", len(elem))
 	}
-	if elem[3] != 1 {
-		t.Errorf("arg = %d, want 1", elem[3])
+	if elem[1] != 1 {
+		t.Errorf("arg = %d, want 1", elem[1])
 	}
 
 	// A no-argument method encodes an empty payload.
@@ -118,8 +129,8 @@ func TestClientMethodCallFromDefs(t *testing.T) {
 	if want := byte(entityMethodBase + 0); elem[0] != want {
 		t.Errorf("element id = %#02x, want %#02x", elem[0], want)
 	}
-	if n := int(elem[1]) | int(elem[2])<<8; n != 0 {
-		t.Errorf("payload = %d B, want 0", n)
+	if len(elem) != 1 {
+		t.Errorf("element = %d B, want 1 (id only)", len(elem))
 	}
 
 	// An unknown method is an error, not a silent no-op.
@@ -208,5 +219,50 @@ func TestTickSyncElement(t *testing.T) {
 	got := EncodeTickSync(0x7a)
 	if len(got) != 2 || got[0] != elTickSync || got[1] != 0x7a {
 		t.Fatalf("EncodeTickSync = % x", got)
+	}
+}
+
+// TestClientMethodElementWidth pins the element-length width to the
+// method's VariableLengthHeaderSize. `update` declares 1, so its element is
+// `[id][u8 len][u8 strLen][pickle]`; writing a u16 there shifts every field
+// by one and the client dies on
+// `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_`.
+func TestClientMethodElementWidth(t *testing.T) {
+	d := entityTestDispatch(t)
+	acct := d.Entity("Account")
+	if acct == nil {
+		t.Fatal("no Account entity")
+	}
+	doc := []byte{0x80, 0x02, 0x7d, 0x2e} // an empty-ish pickle
+	el, err := EncodeClientMethodCall(NewEntity(0, acct), "update",
+		[]entdef.Value{{Kind: entdef.VString, Str: string(doc)}})
+	if err != nil {
+		t.Fatalf("EncodeClientMethodCall: %v", err)
+	}
+	if len(el) < 3 {
+		t.Fatalf("element is %d B", len(el))
+	}
+	wantID := -1
+	for i := range acct.ClientMethods {
+		if acct.ClientMethods[i].Name == "update" {
+			wantID = i
+			break
+		}
+	}
+	if wantID < 0 {
+		t.Fatal("no update in the Account client methods")
+	}
+	if el[0] != byte(entityMethodBase+wantID) {
+		t.Fatalf("element id %#02x, want %#02x (update)", el[0], byte(entityMethodBase+wantID))
+	}
+	// One-byte length: 1 (string header) + len(doc).
+	if got, want := int(el[1]), 1+len(doc); got != want {
+		t.Fatalf("element length %d, want %d (a u8 header, not a u16)", got, want)
+	}
+	if got, want := int(el[2]), len(doc); got != want {
+		t.Fatalf("string length %d, want %d", got, want)
+	}
+	if len(el) != 3+len(doc) {
+		t.Fatalf("element is %d B, want %d", len(el), 3+len(doc))
 	}
 }
