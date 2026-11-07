@@ -2728,11 +2728,11 @@ func (s *BaseAppServer) tickEpoch() uint32 {
 // nothing else either, so the tick rides the same stream; the unreliable form
 // is the fallback for a deep backlog (see `arenaTickReliableBacklog`).
 // leavePairDelay is how long after a leave's login reply the
-// `selectPlayerEntity + showGUI` pair goes out. The client's battle teardown
-// closes its BaseApp proxy channel, and the pair's handler drops a packet from
-// a source that is not one of its channels; the teardown lands about 0.9 s
-// after the reply, so the pair waits past it.
-const leavePairDelay = 1200 * time.Millisecond
+// `selectPlayerEntity + showGUI` pair goes out. It must clear the client's
+// LoginReplyFilter (about half a second after the reply) and beat the battle
+// teardown, which lands about 0.8 s after it: measured, the client's NRL hub
+// is destroyed 821 ms after the Account is created.
+const leavePairDelay = 600 * time.Millisecond
 
 // leaveReplyDelay is how long after a leave's enableEntities the Account is
 // created. The client's battle space teardown (its NRL hub destruction) lands
