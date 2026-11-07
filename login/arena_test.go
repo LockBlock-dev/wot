@@ -572,3 +572,41 @@ func TestEntryShellSettingsDoNotPreSelectTheNextShell(t *testing.T) {
 		t.Fatalf("current/next = %d/%d, want 111/111 (next must not be pre-selected)", cur, next)
 	}
 }
+
+// TestLeaveArenaResetIsReliable pins the leave reset's stream. It must be
+// RELIABLE: an unreliable one shares the unreliable counter with the arena
+// ticks, so the client's packet receiver drops it as out-of-order
+// (`Dropping out-of-order unreliable packet seq=…`) and never processes the
+// reset — no `enableEntities`, no Account re-entry, the lobby sync calls are
+// dropped as "no entity between reset and re-entry", and the unacked 10 Hz
+// ticks overflow the client's channel until it disconnects.
+func TestLeaveArenaResetIsReliable(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	st := &clientState{
+		accountID: 2, name: "admin", blockKey: "0123456789abcdef", entityID: 0x1234,
+		stage2Addr: addr, postSeq: 100, postCumul: 3, tick: 1000,
+		arena: &ArenaHandoff{ArenaID: 9},
+	}
+	tr := &fakeTransport{}
+	if err := s.answerLeaveArena(tr, addr, st); err != nil {
+		t.Fatalf("answerLeaveArena: %v", err)
+	}
+	if len(tr.writes) != 1 {
+		t.Fatalf("%d packets, want 1 (the reset)", len(tr.writes))
+	}
+	pkt := tr.writes[0]
+	// [4-byte prefix][blowfish(flags u16 LE + app + footers)]
+	clear, err := DecryptChannel(st.blockKey, pkt)
+	if err != nil {
+		t.Fatalf("DecryptChannel: %v", err)
+	}
+	flags := binary.LittleEndian.Uint16(clear[0:2])
+	if flags&0x0010 == 0 {
+		t.Fatalf("reset flags = %#06x, want the RELIABLE bit (0x0010)", flags)
+	}
+	app := findAppInPacket(t, pkt, st.blockKey)
+	if app == nil || !bytes.Contains(app, []byte{elResetEntities, 0}) {
+		t.Fatalf("reset app = % x, want resetEntities(false)", app)
+	}
+}

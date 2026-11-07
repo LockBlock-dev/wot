@@ -1837,7 +1837,15 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	s.resend.forget(st.resendKey)
 	resetApp := answerApp([]byte{elResetEntities, 0})
 	s.logf("stage2 %s: leaveArena reset app % x", from, resetApp)
-	if err := s.mintPostUnreliable(conn, from, st, resetApp); err != nil {
+	// RELIABLE, like the arena-entry reset. An unreliable one is dropped by
+	// the client's packet receiver as out-of-order (`Dropping out-of-order
+	// unreliable packet seq=…`) because it shares the unreliable counter with
+	// the arena ticks, and then the client never processes the reset: it
+	// never sends `enableEntities`, our Account re-entry never happens, the
+	// lobby sync calls are dropped as "no entity between reset and
+	// re-entry", the 10 Hz ticks pile up unacked and the client's channel
+	// overflows ("Disconnecting since channel … has overflowed").
+	if err := s.mintPost(conn, from, st, resetApp); err != nil {
 		return err
 	}
 	// Drop the slot as well as the session's view of it. The reset makes the
