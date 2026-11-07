@@ -157,12 +157,12 @@ func TestAimWorldPointSurvivesTheHullTurning(t *testing.T) {
 // its height there drives out into nothing and ends up underground.
 func TestSettleReportsMissingGround(t *testing.T) {
 	h := hull{Position: [3]float32{100, 50, 100}}
-	if h.settle(nil) {
+	if h.settle(nil, 0) {
 		t.Fatal("settle(nil) reported ground")
 	}
 	// A terrain that has no height anywhere is the off-map case.
 	empty := &Terrain{}
-	if h.settle(empty) {
+	if h.settle(empty, 0) {
 		t.Fatal("settle reported ground off the map")
 	}
 	if h.Position[1] != 50 {
@@ -302,4 +302,64 @@ func TestHullGripHoldsTheTurn(t *testing.T) {
 func lateralSpeed(h *hull) float32 {
 	yaw := h.Direction[2]
 	return h.Velocity[0]*cos32(yaw) - h.Velocity[1]*sin32(yaw)
+}
+
+// TestHullJumpsOffACliff drives the hull off a cliff: the ground drops faster
+// than the tracks can follow, so it goes airborne and gravity brings it down
+// onto the lower ground instead of snapping to it.
+func TestHullJumpsOffACliff(t *testing.T) {
+	const n = 34
+	hm := &HeightMap{Width: n, Height: n, Heights: make([]float32, n*n)}
+	// A 10 m cliff across the chunk: flat at 0 until the z=17 row, then 10 m
+	// lower.
+	for pz := 17; pz < n; pz++ {
+		for px := 0; px < n; px++ {
+			hm.Heights[pz*n+px] = -10
+		}
+	}
+	tm := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
+	h := hull{Position: [3]float32{10, 0, 10}, Velocity: [2]float32{0, 20}, Flags: moveForward, Limits: motionLimits{SpeedForward: 25}}
+	if !h.settle(tm, 0.1) {
+		t.Fatal("no ground at spawn")
+	}
+	if h.Airborne {
+		t.Fatal("airborne on flat ground")
+	}
+	// Drive to the cliff.
+	for i := 0; i < 40 && !h.Airborne; i++ {
+		h.step(0.1)
+		if !h.settle(tm, 0.1) {
+			t.Fatalf("off the map at tick %d", i)
+		}
+	}
+	if !h.Airborne {
+		t.Fatal("the hull never went airborne off the cliff")
+	}
+	y0 := h.Position[1]
+	// Falling: the height drops and the vertical speed is negative.
+	for i := 0; i < 5; i++ {
+		h.step(0.1)
+		if !h.settle(tm, 0.1) {
+			t.Fatalf("off the map while falling at tick %d", i)
+		}
+	}
+	if h.Position[1] >= y0 {
+		t.Fatalf("height %v did not fall from %v", h.Position[1], y0)
+	}
+	if h.VerticalVelocity >= 0 {
+		t.Fatalf("vertical velocity %v, want falling", h.VerticalVelocity)
+	}
+	// It lands on the lower ground.
+	for i := 0; i < 40 && h.Airborne; i++ {
+		h.step(0.1)
+		if !h.settle(tm, 0.1) {
+			t.Fatalf("off the map while landing at tick %d", i)
+		}
+	}
+	if h.Airborne {
+		t.Fatal("the hull never landed")
+	}
+	if h.Position[1] > -5 {
+		t.Fatalf("landed at %v, want the lower ground", h.Position[1])
+	}
 }

@@ -63,6 +63,14 @@ const (
 	// has full steering authority; below it the bite falls with the speed, so
 	// the drift settles instead of spinning as the hull slows.
 	handbrakeFullSteerSpeed float32 = 15.0
+	// gravity is the engine's, m/s².
+	gravity float32 = 9.81
+	// hullMaxDropPerMetre is the steepest drop the tracks can follow, as a
+	// slope (tan of the angle): 1.0 is 45°. Ground that falls away faster is
+	// a cliff, and the hull goes airborne instead of snapping down.
+	hullMaxDropPerMetre float32 = 1.0
+	// hullLandingEpsilon is how close to the ground counts as landed.
+	hullLandingEpsilon float32 = 0.05
 )
 
 // Where the hull is sampled to tilt it with the ground: half its length and
@@ -107,6 +115,13 @@ type hull struct {
 	Speed float32
 	// YawRate is in rad/s.
 	YawRate float32
+	// VerticalVelocity is the hull's vertical speed in m/s, negative falling.
+	// Gravity owns it while the hull is airborne.
+	VerticalVelocity float32
+	// Airborne is true while the hull is off the ground: the terrain fell
+	// away faster than the tracks could follow, and the height is the
+	// trajectory's until it lands.
+	Airborne bool
 	// Flags is the latest `vehicle_moveWith` byte.
 	Flags  uint8
 	Limits motionLimits
@@ -138,6 +153,16 @@ func (h *hull) targetSpeed() float32 {
 func (h *hull) step(dt float32) bool {
 	if dt <= 0 {
 		return false
+	}
+	// Airborne: no tracks on the ground, so gravity owns the height, the hull
+	// keeps its horizontal velocity and it cannot steer.
+	if h.Airborne {
+		h.VerticalVelocity -= gravity * dt
+		h.Position[1] += h.VerticalVelocity * dt
+		h.Position[0] += h.Velocity[0] * dt
+		h.Position[2] += h.Velocity[1] * dt
+		h.YawRate = 0
+		return true
 	}
 	yaw := h.Direction[2]
 	// The hull frame: +Z at yaw 0, +X to the right.
@@ -213,26 +238,55 @@ func (h *hull) step(dt float32) bool {
 // its slope. It reports whether the ground was found — off the map there is
 // none, and the caller has to refuse the move rather than let the tank drive
 // out over the edge and fall.
-func (h *hull) settle(tr *Terrain) bool {
+//
+// The vertical axis is not a snap: when the ground falls away faster than the
+// tracks can follow (a cliff), the hull goes airborne and gravity owns its
+// height until it lands on the ground below. dt is the tick the move took, so
+// the drop the tracks could follow is their horizontal step times the steepest
+// slope.
+func (h *hull) settle(tr *Terrain, dt float32) bool {
 	if tr == nil {
 		return false
 	}
 	height := func(dx, dz float32) (float32, bool) {
 		return tr.HeightAt(h.Position[0]+dx, h.Position[2]+dz)
 	}
-	yaw := h.Direction[2]
-	fx, fz := sin32(yaw)*hullHalfLength, cos32(yaw)*hullHalfLength
-	rx, rz := cos32(yaw)*hullHalfWidth, -sin32(yaw)*hullHalfWidth
-
 	center, ok := height(0, 0)
 	if !ok {
 		return false
 	}
+	if h.Airborne {
+		if h.Position[1] <= center+hullLandingEpsilon && h.VerticalVelocity <= 0 {
+			h.Position[1] = center
+			h.VerticalVelocity = 0
+			h.Airborne = false
+		} else {
+			// Still in the air: pitch with the trajectory, keep the roll.
+			if speed := float32(math.Hypot(float64(h.Velocity[0]), float64(h.Velocity[1]))); speed > 0.1 {
+				h.Direction[1] = atan32(-h.VerticalVelocity / speed)
+			}
+			return true
+		}
+	}
+	// On the ground (or just landed): follow the terrain, unless it falls
+	// away faster than the tracks can — a cliff — in which case the hull goes
+	// airborne instead of snapping down.
+	drop := h.Position[1] - center
+	move := float32(math.Hypot(float64(h.Velocity[0]), float64(h.Velocity[1]))) * dt
+	if drop > move*hullMaxDropPerMetre+hullLandingEpsilon {
+		h.Airborne = true
+		h.VerticalVelocity = 0
+		return true
+	}
+	h.Position[1] = center
+	h.VerticalVelocity = 0
+	yaw := h.Direction[2]
+	fx, fz := sin32(yaw)*hullHalfLength, cos32(yaw)*hullHalfLength
+	rx, rz := cos32(yaw)*hullHalfWidth, -sin32(yaw)*hullHalfWidth
 	front, ok1 := height(fx, fz)
 	back, ok2 := height(-fx, -fz)
 	right, ok3 := height(rx, rz)
 	left, ok4 := height(-rx, -rz)
-	h.Position[1] = center
 	if ok1 && ok2 {
 		// Pitched positively nose down.
 		h.Direction[1] = -atan32((front - back) / (2 * hullHalfLength))

@@ -1177,6 +1177,11 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   vector and the tank slides (the drift); it still brakes, and a stationary
   hull cannot pivot. Ignoring the bit leaves the tank driving straight through
   the handbrake.
+- **The hull is airborne off a cliff.** `hull.settle` follows the terrain
+  while the drop is within the horizontal step times a 45° slope; a faster
+  drop is a cliff, so the hull goes airborne, gravity (`9.81`) owns its height
+  and it lands on the ground below. Airborne it keeps its horizontal velocity
+  and cannot steer.
 - **Shooting the dummy is server-side.** `Avatar.vehicle_shoot()` has no
   arguments; `login/damage.go` resolves the shell from the gun marker against
   the dummy's hull box (TOG II: 76.2/50.8/25.4 mm), rolls penetration ±25% and
