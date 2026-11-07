@@ -780,6 +780,10 @@ func arenaHandoff(a *server.Arena, p *server.ArenaPlayer) *login.ArenaHandoff {
 		Player: login.ArenaPlayerDoc{
 			AccountID: p.AccountID,
 			Name:      p.Name,
+			// The player's tank has its own hit points too: the health bar is
+			// scaled to `publicInfo.maxHealth`, and the fallback made every
+			// tank 1000.
+			MaxHealth: lobby.MaxHealthOf(p.VehicleCompDescr),
 			// The wire team is 1 or 2, not 0 or 1: the client's
 			// `avatar_getter.getPlayerTeam()` treats 0 as "not found" and
 			// `ArenaDataProvider.__tryToGetRequiredData` then falls back to
@@ -838,6 +842,7 @@ func arenaHandoff(a *server.Arena, p *server.ArenaPlayer) *login.ArenaHandoff {
 			Name:             other.Name,
 			Team:             other.Team + 1,
 			VehicleCompDescr: other.VehicleCompDescr,
+			MaxHealth:        lobby.MaxHealthOf(other.VehicleCompDescr),
 		})
 	}
 	return h

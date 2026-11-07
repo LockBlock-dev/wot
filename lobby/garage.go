@@ -7,6 +7,28 @@ import (
 	"sort"
 )
 
+// MaxHealthOf returns the hit points of the vehicle a compact descriptor
+// names, or 0 when the type is not in the generated table.
+//
+// The descriptor carries the stock modules, so the match is on the type head
+// (nation + type id), not on the whole byte string.
+func MaxHealthOf(compDescr []byte) int {
+	if len(compDescr) < 3 {
+		return 0
+	}
+	_, nation, id, err := ParseIntDescr(compDescr)
+	if err != nil {
+		return 0
+	}
+	for i := range AllOwnableVehicles {
+		v := &AllOwnableVehicles[i]
+		if v.Nation == nation && v.TypeID == id {
+			return v.MaxHealth
+		}
+	}
+	return 0
+}
+
 // OwnableVehicle is one vehicle the client's item_defs declares as ownable:
 // the nation index and typeID its compact descriptor carries, the item_defs
 // block name for logs, and the descriptor itself.
@@ -29,6 +51,11 @@ type OwnableVehicle struct {
 	Class uint8
 	// Level is the vehicle's tier (1..11), from the list entry's <level>.
 	Level uint8
+	// MaxHealth is the vehicle's hit points: the hull's `<maxHealth>` in its
+	// item defs, which is the number the client's `typeDescriptor` reports
+	// and the one the health bar is scaled to. Not the turret's or a
+	// module's.
+	MaxHealth int
 	// CrewSize is how many crew slots the vehicle has, the number of
 	// children of its `<crew>` section. The client's `VehicleDescrCrew`
 	// requires a vehicle's crew list to be exactly this long — any other

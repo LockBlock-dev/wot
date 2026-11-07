@@ -435,3 +435,35 @@ func TestEquipmentExcludesBattleAbilities(t *testing.T) {
 		}
 	}
 }
+
+// TestVehicleMaxHealthIsTheHulls pins the hit points: the vehicle's HP is the
+// hull section's own `<maxHealth>`, not a module's (the ammo bay and the
+// turret carry their own, nested). The TOG II is 1248 and the Panhard EBR 105
+// 1200, which is what the client's `typeDescriptor` reports for both.
+func TestVehicleMaxHealthIsTheHulls(t *testing.T) {
+	for _, want := range []struct {
+		name string
+		hp   int
+	}{
+		{"GB63_TOG_II", 1248},
+		{"F108_Panhard_EBR_105", 1200},
+	} {
+		found := false
+		for i := range AllOwnableVehicles {
+			v := &AllOwnableVehicles[i]
+			if v.Name != want.name {
+				continue
+			}
+			found = true
+			if v.MaxHealth != want.hp {
+				t.Errorf("%s MaxHealth = %d, want %d", want.name, v.MaxHealth, want.hp)
+			}
+			if got := MaxHealthOf(v.CompDescr); got != want.hp {
+				t.Errorf("%s MaxHealthOf = %d, want %d", want.name, got, want.hp)
+			}
+		}
+		if !found {
+			t.Errorf("%s not in the table", want.name)
+		}
+	}
+}

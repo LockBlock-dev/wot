@@ -71,6 +71,9 @@ func BotRoster(count, allies int, playerTank []byte) []ArenaPlayerDoc {
 			Team:             team,
 			VehicleCompDescr: pick.CompDescr,
 			CrewSize:         int(pick.CrewSize),
+			// The tank's own hit points, so the health bar is scaled to the
+			// real maximum instead of the 1000 fallback.
+			MaxHealth: pick.MaxHealth,
 		})
 	}
 	return bots

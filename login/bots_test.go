@@ -32,6 +32,11 @@ func TestBotRosterFillsBothTeams(t *testing.T) {
 		if b.CrewSize <= 0 {
 			t.Fatalf("%s has no crew", b.Name)
 		}
+		// The tank's own hit points, not the 1000 fallback: the health bar is
+		// scaled to `publicInfo.maxHealth`.
+		if b.MaxHealth <= 0 {
+			t.Fatalf("%s has no hit points", b.Name)
+		}
 	}
 	if allies != 14 || enemies != 15 {
 		t.Fatalf("allies %d enemies %d, want 14 and 15", allies, enemies)

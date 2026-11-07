@@ -86,6 +86,10 @@ type vehicle struct {
 	// other length, and it is reached from the hangar's parameter panel,
 	// not just from a battle.
 	CrewSize uint8
+	// MaxHealth is the hull's `<maxHealth>`: the vehicle's hit points, the
+	// number the client's `typeDescriptor` reports and the health bar is
+	// scaled to.
+	MaxHealth int
 }
 
 // classTags maps a list entry's class tag to the client's own class index
@@ -175,6 +179,12 @@ func main() {
 				failed++
 				continue
 			}
+			maxHealth, err := vehicleMaxHealth(filepath.Join(dir, sec.Name+".xml"))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "wotgarage: skip %s/%s: health: %v\n", nation, sec.Name, err)
+				failed++
+				continue
+			}
 			all = append(all, vehicle{
 				Nation:    uint8(idx),
 				TypeID:    uint16(typeID),
@@ -185,6 +195,7 @@ func main() {
 				Class:     class,
 				Level:     uint8(level),
 				CrewSize:  crewSize,
+				MaxHealth: maxHealth,
 			})
 		}
 	}
@@ -205,8 +216,8 @@ func main() {
 	b.WriteString("// which are real types but not ownable. Ordered by nation then typeID.\n")
 	b.WriteString("var AllOwnableVehicles = []OwnableVehicle{\n")
 	for _, v := range all {
-		fmt.Fprintf(&b, "\t{Nation: %d, TypeID: %d, Name: %q, Price: %d, GoldPrice: %t, Class: %d, Level: %d, CrewSize: %d, CompDescr: []byte{%s}},\n",
-			v.Nation, v.TypeID, v.Name, v.Price, v.GoldPrice, v.Class, v.Level, v.CrewSize, byteList(v.CompDescr))
+		fmt.Fprintf(&b, "\t{Nation: %d, TypeID: %d, Name: %q, Price: %d, GoldPrice: %t, Class: %d, Level: %d, CrewSize: %d, MaxHealth: %d, CompDescr: []byte{%s}},\n",
+			v.Nation, v.TypeID, v.Name, v.Price, v.GoldPrice, v.Class, v.Level, v.CrewSize, v.MaxHealth, byteList(v.CompDescr))
 	}
 	b.WriteString("}\n")
 
@@ -516,6 +527,32 @@ func vehicleCrewSize(path string) (uint8, error) {
 		return 0, fmt.Errorf("%d crew slots", len(crew.Children))
 	}
 	return uint8(len(crew.Children)), nil
+}
+
+// vehicleMaxHealth reads the vehicle's hit points: the hull section's own
+// `<maxHealth>`, not a module's (the ammo bay and the turret carry their own,
+// nested, and the vehicle's is the direct child).
+func vehicleMaxHealth(path string) (int, error) {
+	f, err := readPacked(path)
+	if err != nil {
+		return 0, err
+	}
+	hull := f.Root.Child("hull")
+	if hull == nil {
+		return 0, fmt.Errorf("no <hull> section")
+	}
+	sec := hull.Child("maxHealth")
+	if sec == nil {
+		return 0, fmt.Errorf("no hull/maxHealth")
+	}
+	n, err := sectionInt(sec)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("hull/maxHealth = %d", n)
+	}
+	return int(n), nil
 }
 
 // sectionInt reads a numeric section that the packed form may carry either
