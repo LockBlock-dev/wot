@@ -1721,7 +1721,7 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 		if av := s.cfg.Dispatch.Entity("Avatar"); av != nil {
 			if m := av.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
 				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=%q", elemID, len(body), m.Name)
-				if m.Name == "leaveArena" {
+				if m.Name == "leaveArena" || m.Name == "leaveArenaByAccount" {
 					args, err := m.ReadArgs(bytes.NewReader(body))
 					if err == nil {
 						return postCall{Method: m, Args: args, Elem: elemID, Body: body}, true
@@ -2861,7 +2861,7 @@ func (s *BaseAppServer) decodeBaseCall(elemID byte, body []byte) (postCall, bool
 		if av := s.cfg.Dispatch.Entity("Avatar"); av != nil {
 			if m := av.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
 				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=%q", elemID, len(body), m.Name)
-				if m.Name == "leaveArena" {
+				if m.Name == "leaveArena" || m.Name == "leaveArenaByAccount" {
 					args, err := m.ReadArgs(bytes.NewReader(body))
 					if err == nil {
 						return postCall{Method: m, Args: args, Elem: elemID, Body: body}, true
@@ -3064,7 +3064,7 @@ func (s *BaseAppServer) answerPostCall(conn Transport, from *net.UDPAddr, st *cl
 		switch call.Method.Name {
 		case "requestToken":
 			return s.answerRequestToken(conn, from, st, call)
-		case "leaveArena":
+		case "leaveArena", "leaveArenaByAccount":
 			return s.answerLeaveArena(conn, from, st)
 		case "trackRelativePointWithGun", "vehicle_trackWorldPointWithGun",
 			"stopTrackingWithGun", "vehicle_stopTrackingWithGun":

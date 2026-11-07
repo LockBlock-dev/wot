@@ -1141,7 +1141,8 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `TypeError: unsupported operand type(s) for -: 'NoneType' and 'int'` ~3×/s and
   the hangar locks up (measured: applying an ammo loadout left the client unable
   to exit). `TestSettingsDocumentLoads` now requires the key.
-- **Leaving a battle used to kick you to the login screen.** `leaveArena` →
+- **Leaving a battle used to kick you to the login screen.** `leaveArena` /
+  `leaveArenaByAccount` (the client's actual leave) →
   `resetEntities` → `enableEntities` → `enterAccount(withCreate=true)` sends
   `CreateBasePlayer` and the `1a/76` session dict. Both need a `0x13` head
   (`answerApp` prepends `EncodeTickSync(0)`, `serveBulk` uses
