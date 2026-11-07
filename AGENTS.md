@@ -1166,7 +1166,12 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   disconnects. The LEAVE reset goes UNRELIABLE: the `LoginReplyFilter`
   passes only the first copy, so a retransmission disconnects. The
   arena-ENTRY reset and the re-entered `CreateBasePlayer` stay reliable —
-  the entry needs the reset to arrive before `enableEntities`.
+  the entry needs the reset to arrive before `enableEntities`. The filter
+  also stays armed until the client speaks again and only passes packets
+  with the login-reply flag at that offset — a 28 B tick has no such byte —
+  so `clientState.postHold` stops the 10 Hz login-phase ticks from the login
+  reply until the client's next datagram (`noteReliable` clears it);
+  `TestLoginReplyHoldsTheTicksUntilTheClientSpeaks` pins both halves.
 - **Siege mode (X) works.** The client sends
   `Avatar.vehicle_changeSetting(VEHICLE_SETTING.SIEGE_MODE_ENABLED=3, enable)` —
   cell index 12, `UINT8` code + `INT32` value, fixed 5 bytes. The reply is
