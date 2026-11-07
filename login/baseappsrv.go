@@ -1389,63 +1389,34 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 	}
 
 	if withCreate {
-		app, err := s.createBasePlayerApp(st)
+		// The Account entity and the session dict go out in ONE reliable
+		// packet, the way the real server's login reply does. The client's
+		// `LoginReplyFilter` passes only the packet carrying the login-reply
+		// flag; the `CreateBasePlayer` packet has it, but a second packet
+		// (the `1a/76` pair) is dropped as "unexpected ... on external
+		// interface" and the hangar never loads. The `0x13` heads alone do
+		// not save it — measured after a `leaveArena`, the client created the
+		// Account, then dropped the `showGUI` and went to
+		// `HANGAR LOADING STATE: DISCONNECTED`.
+		create, err := s.createBasePlayerApp(st)
 		if err != nil {
 			return seq, fmt.Errorf("CreateBasePlayer: %w", err)
 		}
-		// The `0x13` tick head, for the same reason the `1a/76` below needs
-		// one: every stage-2 datagram this server mints goes through
-		// `answerApp`, which prepends `EncodeTickSync(0)`, and `serveBulk`
-		// frames its own with `EncodeTickSync(0x40)`. A bare element sequence
-		// is refused — measured after a `leaveArena`, the client ACKs the
-		// first datagram and then never ACKs the next, logging
-		// `REASON_GENERAL_NETWORK` six times and dropping to
-		// `HANGAR LOADING STATE: DISCONNECTED`.
-		app = append(EncodeTickSync(0), app...)
-		s.checkWire(app)
-		if err := s.sendReliable(conn, from, st, app, seq, cumul); err != nil {
-			return seq, err
-		}
-		s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, Account, %d components) % x",
-			from, len(app), st.entityID, s.cfg.AccountComponents, app[:min(len(app), 24)])
-		seq++
-	}
-
-	// selectPlayerEntity + showGUI, in ONE packet and in the genuine
-	// framing: `[1a][76][u16 elementLen][u8 stringLen][pickle]`.
-	//
-	// 0x1A is `selectPlayerEntity` (FIXED 0) and 0x76 is the Account
-	// client method showGUI (entityMethodBase 0x4E + 40), whose STRING
-	// argument is the pickled session dict. The method's
-	// VariableLengthHeaderSize is the ELEMENT length width; the string's
-	// own header is one byte. `BuildSessionDict` already emits exactly
-	// that pair, so the carrier-less path reuses it rather than
-	// hand-rolling a second, differently-framed showGUI call.
-	//
-	// The normal path does NOT send this: `serveBulk` already put the
-	// same pair on the wire as the session-dict frame, and the genuine
-	// server sends it once.
-	if withCreate {
+		app := append(EncodeTickSync(0), create...)
 		pair, err := BuildSessionDict(int64(accountIDFor(st.accountID, st.name)), st.admittedAt, time.Now())
 		if err != nil {
 			return seq, err
 		}
-		// The `0x13` tick head is NOT optional here. `serveBulk` sends the
-		// same `1a/76` small on a fresh login as
-		// `EncodeTickSync(0x40) + dict`, and every other stage-2 datagram
-		// this server mints goes through `answerApp`, which prepends
-		// `EncodeTickSync(0)`. Sent bare, the client refuses the datagram:
-		// measured after a `leaveArena`, it ACKs `CreateBasePlayer` and then
-		// never ACKs this one, resending 295-303 forever while the client
-		// logs `REASON_GENERAL_NETWORK` six times and drops to
-		// `HANGAR LOADING STATE: DISCONNECTED`.
-		pair = append(EncodeTickSync(0x40), pair...)
-		s.checkWire(pair)
-		if err := s.sendReliable(conn, from, st, pair, seq, cumul); err != nil {
+		// `serveBulk` frames the same `1a/76` small as
+		// `EncodeTickSync(0x40) + dict`; keep that head inside the packet.
+		app = append(app, EncodeTickSync(0x40)...)
+		app = append(app, pair...)
+		s.checkWire(app)
+		if err := s.sendReliable(conn, from, st, app, seq, cumul); err != nil {
 			return seq, err
 		}
-		s.logf("stage2 %s: selectPlayerEntity + showGUI %dB (entity %d, seq %d) % x",
-			from, len(pair), st.entityID, seq, pair)
+		s.logf("stage2 %s: CreateBasePlayer + showGUI %dB (entity %d, Account, %d components, seq %d) % x",
+			from, len(app), st.entityID, s.cfg.AccountComponents, seq, app[:min(len(app), 24)])
 		seq++
 	}
 	return seq, nil

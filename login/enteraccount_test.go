@@ -35,12 +35,13 @@ func enterTestServer(t *testing.T) *BaseAppServer {
 	}
 }
 
-// TestEnterAccountSendsTheSequence pins the carrier-less path: the Account
-// entity, then ONE frame carrying `selectPlayerEntity + showGUI` in the
+// TestEnterAccountSendsTheSequence pins the carrier-less path: ONE packet
+// carrying the Account entity and then `selectPlayerEntity + showGUI` in the
 // genuine framing `[1a][76][u16 elementLen][u8 stringLen][pickle]`. The
-// flood bundle normally creates the entity AND sends that same pair as the
-// session-dict frame, so the post-flood call passes false and sends
-// nothing.
+// client's `LoginReplyFilter` only passes the login-reply packet, so the two
+// must not be split. The flood bundle normally creates the entity AND sends
+// that same pair as the session-dict frame, so the post-flood call passes
+// false and sends nothing.
 func TestEnterAccountSendsTheSequence(t *testing.T) {
 	s := enterTestServer(t)
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
@@ -50,35 +51,15 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
 		t.Fatalf("enterAccount: %v", err)
 	}
-	if len(tr.writes) != 2 {
-		t.Fatalf("%d packets, want 2 (CreateBasePlayer, selectPlayerEntity + showGUI)", len(tr.writes))
+	if len(tr.writes) != 1 {
+		t.Fatalf("%d packets, want 1 (the login reply: CreateBasePlayer + showGUI)", len(tr.writes))
 	}
 
-	// Decrypt each and check the element it carries.
-	//
-	// The second packet opens with a `0x13` TickSync head, exactly as
-	// `serveBulk` frames the same `1a/76` small on a fresh login
-	// (`EncodeTickSync(0x40) + dict`) and as `answerApp` frames every other
-	// stage-2 datagram. Sent bare, the client refuses it: after a
-	// `leaveArena` it ACKs `CreateBasePlayer` and then never ACKs this one,
-	// logging `REASON_GENERAL_NETWORK` and dropping to
-	// `HANGAR LOADING STATE: DISCONNECTED`.
-	want := []byte{0x13, 0x13}
-	for i, pkt := range tr.writes {
-		clear, err := decryptBlowfish(st.blockKey, pkt[4:])
-		if err != nil {
-			t.Fatalf("packet %d: %v", i, err)
-		}
-		app, err := frameApp(clear)
-		if err != nil {
-			t.Fatalf("packet %d: %v", i, err)
-		}
-		if len(app) == 0 || app[0] != want[i] {
-			t.Fatalf("packet %d element = %#02x, want %#02x", i, app[0], want[i])
-		}
-	}
-	// And the selectPlayerEntity must still follow the head.
-	clear, err := decryptBlowfish(st.blockKey, tr.writes[1][4:])
+	// The whole login reply is ONE packet: the client's `LoginReplyFilter`
+	// passes only the packet carrying the login-reply flag, so a second
+	// packet (the `1a/76` pair) is dropped as "unexpected ... on external
+	// interface" and the hangar never loads.
+	clear, err := decryptBlowfish(st.blockKey, tr.writes[0][4:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,64 +67,36 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(app) < 3 || app[2] != elSelectPlayerEntity {
-		t.Fatalf("second packet = % x, want a 0x13 head then %#02x", app, elSelectPlayerEntity)
+	if len(app) < 2 || app[0] != 0x13 || app[1] != 0x00 {
+		t.Fatalf("app = % x, want a 0x13 0x00 head", app)
 	}
 
-	// The first is a decodable Account entity with the capture's component
-	// count. Skip its two-byte `0x13` head.
-	clear, err = decryptBlowfish(st.blockKey, tr.writes[0][4:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	app, err = frameApp(clear)
-	if err != nil {
-		t.Fatal(err)
-	}
-	app = app[2:]
-	back, err := DecodeCreateBasePlayer(app, s.cfg.Dispatch)
+	// The Account entity follows the head.
+	back, err := DecodeCreateBasePlayer(app[2:], s.cfg.Dispatch)
 	if err != nil {
 		t.Fatalf("DecodeCreateBasePlayer: %v", err)
 	}
 	if back.ID != 0x1234 || back.Props["name"].Str != "playerone" {
 		t.Errorf("entity = %+v", back)
 	}
-	// The component count is the last byte of the element.
-	if got := app[len(app)-1]; got != 19 {
-		t.Errorf("component count = %d, want 19", got)
-	}
 
-	// The second frame is `selectPlayerEntity` (FIXED 0, one byte) followed
-	// by showGUI, whose STRING argument is a pickled dict: the client does
-	// `pickle.loads(ctx)` and reads databaseID out of it, so an empty
-	// string raises inside the handler. The method's
-	// VariableLengthHeaderSize is the ELEMENT length width; the string's
-	// own header is one byte.
-	clear, err = decryptBlowfish(st.blockKey, tr.writes[1][4:])
-	if err != nil {
-		t.Fatal(err)
+	// The `1a/76` pair follows in the same packet, with the `0x13 0x40`
+	// head `serveBulk` uses for the same small.
+	marker := []byte{0x13, 0x40, elSelectPlayerEntity, byte(entityMethodBase + 40)}
+	at := bytes.Index(app, marker)
+	if at < 0 {
+		t.Fatalf("app = % x, want % x after the CreateBasePlayer", app, marker)
 	}
-	app, err = frameApp(clear)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Skip the two-byte `0x13` tick head.
-	app = app[2:]
-	if len(app) < 4 || app[0] != elSelectPlayerEntity {
-		t.Fatalf("frame % x, want a leading selectPlayerEntity", app)
-	}
-	if app[1] != byte(entityMethodBase+40) {
-		t.Fatalf("showGUI element %#02x, want %#02x", app[1], byte(entityMethodBase+40))
-	}
-	n := int(app[2]) | int(app[3])<<8
-	strLen := int(app[4])
+	// [1a][76][u16 elementLen][u8 stringLen][pickle]
+	n := int(app[at+4]) | int(app[at+5])<<8
+	strLen := int(app[at+6])
 	if n != 1+strLen {
-		t.Fatalf("showGUI element length %d, string length %d (want 1+%d)", n, strLen, strLen)
+		t.Fatalf("showGUI element length %d, string length %d", n, strLen)
 	}
-	if got, want := 5+strLen, len(app); got != want {
-		t.Fatalf("showGUI string ends at %d, element ends at %d", got, want)
+	if got, want := at+7+strLen, len(app); got != want {
+		t.Fatalf("showGUI string ends at %d, packet ends at %d", got, want)
 	}
-	stk, _, err := lobby.DecodePrefix(app[5 : 5+strLen])
+	stk, _, err := lobby.DecodePrefix(app[at+7 : at+7+strLen])
 	if err != nil {
 		t.Fatalf("showGUI arg pickle: %v", err)
 	}

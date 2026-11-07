@@ -1137,13 +1137,15 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   to exit). `TestSettingsDocumentLoads` now requires the key.
 - **Leaving a battle used to kick you to the login screen.** `leaveArena` →
   `resetEntities` → `enableEntities` → `enterAccount(withCreate=true)` sends
-  `CreateBasePlayer` then the `1a/76` session dict, and the dict was going out
-  **bare**. Every other stage-2 datagram carries a `0x13` head (`answerApp`
-  prepends `EncodeTickSync(0)`, `serveBulk` uses `EncodeTickSync(0x40)` for the
-  same small on a fresh login). Without it the client ACKs `CreateBasePlayer`
-  and never ACKs the dict, the server resends that seq forever, and the client
-  logs `REASON_GENERAL_NETWORK` ×6 then `HANGAR LOADING STATE: DISCONNECTED`.
-  Fixed by prepending the head; `TestEnterAccountSendsTheSequence` pins it.
+  `CreateBasePlayer` and the `1a/76` session dict. Both need a `0x13` head
+  (`answerApp` prepends `EncodeTickSync(0)`, `serveBulk` uses
+  `EncodeTickSync(0x40)` for the same small on a fresh login), but they must
+  also ride **one** reliable packet: the client's `LoginReplyFilter`
+  (`sub_142D32190`) passes only the packet whose byte at offset 146 is `0xFF`,
+  and drops a separate `1a/76` packet as "Dropping unexpected packet on
+  external interface". The client then logs `REASON_GENERAL_NETWORK` ×6 and
+  `HANGAR LOADING STATE: DISCONNECTED`. Fixed by concatenating the two into
+  one packet; `TestEnterAccountSendsTheSequence` pins it.
 - **Siege mode (X) works.** The client sends
   `Avatar.vehicle_changeSetting(VEHICLE_SETTING.SIEGE_MODE_ENABLED=3, enable)` —
   cell index 12, `UINT8` code + `INT32` value, fixed 5 bytes. The reply is
