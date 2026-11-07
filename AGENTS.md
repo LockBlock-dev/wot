@@ -1250,6 +1250,21 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `AttributeError: 'NoneType' object has no attribute 'components'` on every
   entry. The entry creates one `TeamInfo` (VehicleID+3) with `teamID` = the
   player's team; the client defaults the static components' properties.
+- **A STANDALONE property element is framed by the property's own declared
+  length, not by `updateEntity`'s u16.** `EntityDispatch.Properties[i].Length`
+  is the client's element length: a fixed-size value (`health`, INT16) is
+  `[id][value]` with NO length field, and a variable one (`damageStickers`,
+  an ARRAY alias) is `[id][u8 len][value]` — ARRAY/STRING aliases are
+  `VariableLengthHeaderSize` 1, NOT 2. `EncodePropertyUpdate` used to write a
+  u16 header for everything, which shifted every following element by one
+  byte: the client dropped the bundle as REASON_CORRUPTED_PACKET (it read
+  `b5 <health> 52` as a channel key — "Unexpected key!") and on the next
+  pierced hit asserted `pCurr_ + nBytes <= pEnd_` and crashed. A bounce or an
+  HE splash sends no sticker, so only a PIERCED hit crashed.
+- **A gun with no `turretYawLimits` turns all the way round.** The XML simply
+  omits the section for those (the TOG II among them); returning an error
+  threw away the WHOLE gun spec, so the vehicle had no shell, no reload and
+  `answerShoot` returned before sending anything.
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the
