@@ -38,9 +38,10 @@ func TestResolveShotHitsTheDummyFront(t *testing.T) {
 		t.Fatalf("flags = %#x, want %#x", res.Flags, hitFlagsPierced)
 	}
 	// The front face is at +Z, so the hit point is there and the outward
-	// normal points at the shooter.
-	if math.Abs(float64(res.Point[2]-5)) > 0.01 {
-		t.Fatalf("hit z = %v, want 5 (the front face)", res.Point[2])
+	// normal points at the shooter. The face is the hull collision box's max
+	// z, not a round number: 4.2737 from `Hull.havok`'s `HKBodyFlagsData`.
+	if math.Abs(float64(res.Point[2]-dummyHullBounds[1][2])) > 0.01 {
+		t.Fatalf("hit z = %v, want %v (the front face)", res.Point[2], dummyHullBounds[1][2])
 	}
 	if res.Normal[2] != 1 {
 		t.Fatalf("normal = %v, want +Z", res.Normal)
@@ -135,16 +136,22 @@ func TestResolveShotHEExplodes(t *testing.T) {
 // and hit effect in the low bytes, the quantized enter/exit points above.
 func TestEncodeHitSegment(t *testing.T) {
 	bounds := dummyBounds()
-	// A point on the front face, travelling -Z.
-	seg := encodeHitSegment(bounds, [3]float32{0, 0, 5}, [3]float32{0, 0, -1}, 1, hitEffectPierced)
+	// The box's own centre, travelling -Z: the segment crosses the whole box,
+	// so it enters at the front face and leaves at the rear.
+	centre := [3]float32{
+		(bounds[0][0] + bounds[1][0]) / 2,
+		(bounds[0][1] + bounds[1][1]) / 2,
+		(bounds[0][2] + bounds[1][2]) / 2,
+	}
+	seg := encodeHitSegment(bounds, centre, [3]float32{0, 0, -1}, 1, hitEffectPierced)
 	if got := uint8(seg); got != hitEffectPierced {
 		t.Fatalf("context = %d, want %d", got, hitEffectPierced)
 	}
 	if got := uint8(seg >> 8); got != 1 {
 		t.Fatalf("part = %d, want 1 (hull)", got)
 	}
-	// The segment enters at the front (z = 5 → 255) and leaves at the rear
-	// (z = -5 → 0); x and y are the box's middle (about 128).
+	// The segment enters at the front (z = max → 255) and leaves at the rear
+	// (z = min → 0); x and y are the box's middle (about 128).
 	ax, ay, az := uint8(seg>>16), uint8(seg>>24), uint8(seg>>32)
 	bx, by, bz := uint8(seg>>40), uint8(seg>>48), uint8(seg>>56)
 	if az != 255 || bz != 0 {
@@ -640,7 +647,10 @@ func TestKillPacketsSurviveTheClientReader(t *testing.T) {
 	marker := gunMarkerFor(hull, 0, 0, spec, 1)
 	dir := [3]float32{marker.Velocity[0], marker.Velocity[1], marker.Velocity[2]}
 	l := float32(math.Sqrt(float64(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2])))
-	dummyPos := [3]float32{marker.Position[0] + dir[0]/l*12, marker.Position[1] + dir[1]/l*12, marker.Position[2] + dir[2]/l*12}
+	// The dummy's ORIGIN is on the ground, not at the gun: its hull box sits
+	// `hullPosition` above it, so placing the origin at the muzzle lifts the
+	// box over the shell.
+	dummyPos := [3]float32{marker.Position[0] + dir[0]/l*12, hull.Position[1], marker.Position[2] + dir[2]/l*12}
 
 	// The arena's vehicle list, so the kill has a `vehiclesInfo` to update.
 	infoType := entdef.Alias("VEHICLES_INFO")
@@ -774,5 +784,56 @@ func TestNrlNestedPathBits(t *testing.T) {
 	}
 	if path[len(path)-1] != 0 {
 		t.Fatalf("value byte = %#02x, want 0 (isAlive false)", path[len(path)-1])
+	}
+}
+
+// TestStickerDecodesWhereTheShellHit decodes the shell-hole segment exactly as
+// the client's `DamageFromShotDecoder.decodeSegment` does and checks it runs
+// through the hit point in the hull part's frame.
+//
+// This is the regression test for shell holes landing off the aim point: the
+// segment's fractions are quantized over the hull's OWN collision bounds
+// (`Hull.havok`'s `HKBodyFlagsData`) in the HULL PART's frame, and the client
+// maps them back through the same box. Encoding over a centred guess put every
+// hole a few tenths of a metre off, and over the wrong frame worse.
+func TestStickerDecodesWhereTheShellHit(t *testing.T) {
+	box := dummyBox([3]float32{0, 0, 0}, 0)
+	sh := shellSpec{Name: "test", Damage: 300, Pen: 400, Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2, Speed: 800}
+	// From 20 m in front, aimed at the upper front plate.
+	res := resolveShot(sh, [3]float32{0, 1.6, 20}, [3]float32{0, 0, -1}, box)
+	if !res.Hit {
+		t.Fatal("shot missed the dummy")
+	}
+	seg := encodeHitSegment(dummyBounds(), res.Local, res.LocalDir, 1, res.Effect)
+	// The client's decode.
+	min, max := dummyBounds()[0], dummyBounds()[1]
+	delta := [3]float32{(max[0] - min[0]) / 255, (max[1] - min[1]) / 255, (max[2] - min[2]) / 255}
+	start := [3]float32{
+		min[0] + delta[0]*float32(seg>>16&255),
+		min[1] + delta[1]*float32(seg>>24&255),
+		min[2] + delta[2]*float32(seg>>32&255),
+	}
+	end := [3]float32{
+		min[0] + delta[0]*float32(seg>>40&255),
+		min[1] + delta[1]*float32(seg>>48&255),
+		min[2] + delta[2]*float32(seg>>56&255),
+	}
+	// The hit point must lie on the decoded segment, within the quantization
+	// step (one 8-bit cell of the box).
+	segDir := [3]float32{end[0] - start[0], end[1] - start[1], end[2] - start[2]}
+	segLen2 := segDir[0]*segDir[0] + segDir[1]*segDir[1] + segDir[2]*segDir[2]
+	if segLen2 == 0 {
+		t.Fatal("decoded segment has no length")
+	}
+	toPoint := [3]float32{res.Local[0] - start[0], res.Local[1] - start[1], res.Local[2] - start[2]}
+	u := (toPoint[0]*segDir[0] + toPoint[1]*segDir[1] + toPoint[2]*segDir[2]) / segLen2
+	closest := [3]float32{start[0] + segDir[0]*u, start[1] + segDir[1]*u, start[2] + segDir[2]*u}
+	dist := math.Sqrt(float64(
+		(closest[0]-res.Local[0])*(closest[0]-res.Local[0]) +
+			(closest[1]-res.Local[1])*(closest[1]-res.Local[1]) +
+			(closest[2]-res.Local[2])*(closest[2]-res.Local[2])))
+	step := math.Sqrt(float64(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]))
+	if dist > step {
+		t.Fatalf("decoded segment is %.3f m from the hit point (step %.3f)", dist, step)
 	}
 }

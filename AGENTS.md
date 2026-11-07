@@ -1205,7 +1205,13 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   the own vehicle, and the shell hole is the `Vehicle.damageStickers`
   `ALL_CLIENTS` property (one `VEHICLE_HIT_POINT` per pierced hit, the
   segment context the `damage_stickers.xml` index of the shell's
-  `targetStickers/armorPierced`). The shell's `<effects>` is a packed BLOB:
+  `targetStickers/armorPierced`). The segment's fractions are quantized over
+  the hull's OWN collision bounds in the HULL PART's frame — the client's
+  `getBoundingBox(1)` is `Hull.havok`'s `HKBodyFlagsData`
+  `minBounds_`/`maxBounds_` (TOG II: `(-1.5622,-0.8706,-5.2344)..(1.5622,
+  0.7324,4.2737)`), and the part frame sits `<hullPosition>` above the
+  vehicle origin (`0 1.3553 0`). A centred guess put every hole a few
+  tenths of a metre off the aim point. The shell's `<effects>` is a packed BLOB:
   read it with `StrVal`, not `AsString`, or the sticker lookup silently
   fails. A kill also re-sends the arena's
   `AvatarVehiclesInfo.vehicles` with the victim's `isAlive` false + a

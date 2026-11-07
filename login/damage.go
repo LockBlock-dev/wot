@@ -21,14 +21,28 @@ import (
 // `showDamageFromShot` / `onHealthChanged` / `showShotResults`, with the
 // method ids and argument types from the shipped 2.4.1 defs.
 
-// The dummy's hull box, in metres, and its armour in millimetres. The TOG II
-// is a long, tall heavy; its defs give 76.2 mm on the front and sides, 50.8 on
-// the rear and 25.4 on the roof.
-const (
-	dummyHalfLength float32 = 5.0
-	dummyHalfWidth  float32 = 1.7
-	dummyHeight     float32 = 2.8
+// The dummy's hull collision box, in metres, and its armour in millimetres.
+// The TOG II is a long, tall heavy; its defs give 76.2 mm on the front and
+// sides, 50.8 on the rear and 25.4 on the roof.
+//
+// The box is NOT a guess: it is the client's own `getBoundingBox(1)` for the
+// hull, which is what `DamageFromShotDecoder.decodeSegment` maps a hit point's
+// quantized fractions back through. It is the `HKBodyFlagsData` of
+// `vehicles/british/GB63_TOG_II/collision_client/Hull.havok`
+// (`minBounds_`/`maxBounds_`), in the HULL PART's frame — the model's own
+// origin, which sits `hullPosition` above the vehicle origin
+// (`GB63_TOG_II.xml` `<chassis><hullPosition>0 1.3553 0`). Encoding over a
+// centred guess instead put every shell hole a few tenths of a metre off.
+var dummyHullBounds = [2][3]float32{
+	{-1.5622, -0.8706, -5.2344},
+	{1.5622, 0.7324, 4.2737},
+}
 
+// dummyHullPosition is the hull part's origin in the vehicle frame, from the
+// chassis's `hullPosition`.
+const dummyHullPositionY float32 = 1.3553
+
+const (
 	dummyArmorFront float32 = 76.2
 	dummyArmorSide  float32 = 76.2
 	dummyArmorRear  float32 = 50.8
@@ -55,10 +69,15 @@ const (
 const damageSpread = 0.25
 
 // hitBox is an oriented box: the hull's collision volume for the trace.
+//
+// Center/Half are the trace volume in the vehicle frame; Origin is the HULL
+// PART's origin in the world, which is the frame the hit point's segment is
+// encoded in (the client decodes it against the part's own bounding box).
 type hitBox struct {
 	Center [3]float32
 	Half   [3]float32
 	Yaw    float32
+	Origin [3]float32
 }
 
 // intersect traces the ray origin+dir*t through the box. It returns the
@@ -189,12 +208,13 @@ func resolveShot(sh shellSpec, origin, dir [3]float32, box hitBox) shotResult {
 			}
 		}
 	}
-	// The hit point and direction in the hull's frame, which is what the
-	// client's hit-point segment is encoded over.
+	// The hit point and direction in the HULL PART's frame, which is what the
+	// client's hit-point segment is encoded over: the part's own origin, not
+	// the trace box's centre.
 	c, s := cos32(box.Yaw), sin32(box.Yaw)
-	lx := point[0] - box.Center[0]
-	lz := point[2] - box.Center[2]
-	res.Local = [3]float32{lx*c - lz*s, point[1] - box.Center[1], lx*s + lz*c}
+	lx := point[0] - box.Origin[0]
+	lz := point[2] - box.Origin[2]
+	res.Local = [3]float32{lx*c - lz*s, point[1] - box.Origin[1], lx*s + lz*c}
 	res.LocalDir = [3]float32{dir[0]*c - dir[2]*s, dir[1], dir[0]*s + dir[2]*c}
 	return res
 }
@@ -217,20 +237,26 @@ func dummyArmorForFace(face int, localNormal [3]float32) float32 {
 
 // dummyBox is the dummy's hull box at its spawn, in world space.
 func dummyBox(pos [3]float32, yaw float32) hitBox {
+	min, max := dummyHullBounds[0], dummyHullBounds[1]
 	return hitBox{
-		Center: [3]float32{pos[0], pos[1] + dummyHeight/2, pos[2]},
-		Half:   [3]float32{dummyHalfWidth, dummyHeight / 2, dummyHalfLength},
-		Yaw:    yaw,
+		// The trace volume in the vehicle frame: the part frame's box lifted by
+		// the hull's own offset.
+		Center: [3]float32{
+			pos[0] + (min[0]+max[0])/2,
+			pos[1] + dummyHullPositionY + (min[1]+max[1])/2,
+			pos[2] + (min[2]+max[2])/2,
+		},
+		Half: [3]float32{(max[0] - min[0]) / 2, (max[1] - min[1]) / 2, (max[2] - min[2]) / 2},
+		Yaw:  yaw,
+		// The hull part's origin: the frame the hit point is encoded in.
+		Origin: [3]float32{pos[0], pos[1] + dummyHullPositionY, pos[2]},
 	}
 }
 
-// dummyBounds is the hull box in its own frame, the bounds the hit-point
-// segment is quantized over.
+// dummyBounds is the hull box in the HULL PART's frame, the bounds the
+// hit-point segment is quantized over.
 func dummyBounds() [2][3]float32 {
-	return [2][3]float32{
-		{-dummyHalfWidth, -dummyHeight / 2, -dummyHalfLength},
-		{dummyHalfWidth, dummyHeight / 2, dummyHalfLength},
-	}
+	return dummyHullBounds
 }
 
 // encodeHitSegment packs a hit point's segment the way `VehicleHit
