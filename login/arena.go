@@ -732,6 +732,12 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	}
 	vehicles := []entdef.Value{vehicleInfoValue(infoType, h.Player, vehicle.ID, 1, ownX, ownZ)}
 
+	// A new battle starts with no targets: the previous battle's are gone with
+	// its entities.
+	s.mu.Lock()
+	st.targets = nil
+	s.mu.Unlock()
+
 	// The synthetic opponent, if the battle has one: its own Vehicle entity
 	// first, so the client has something to draw, then its list entry. It is
 	// the damage target, so its position and health are kept on the session.
@@ -742,15 +748,19 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 			s.logf("stage2 %s: arena %d: no dummy Vehicle (%v)", from, h.ArenaID, err)
 		} else {
 			seq = nextSeqAfter(seq, 4)
-			s.mu.Lock()
-			st.dummy = dv
-			st.dummyID = dummyID
-			st.dummyPos = enemy
-			st.dummyYaw = 0
+			health := 0
 			if hv, ok := dv.Props["health"]; ok {
-				st.dummyHealth = int(hv.Int)
+				health = int(hv.Int)
 			}
-			st.dummyMaxHealth = st.dummyHealth
+			s.mu.Lock()
+			st.targets = append(st.targets, &botTarget{
+				entity:    dv,
+				id:        dummyID,
+				pos:       enemy,
+				health:    health,
+				maxHealth: health,
+				infoIndex: 1,
+			})
 			s.mu.Unlock()
 			vehicles = append(vehicles, infoValue)
 			s.logf("stage2 %s: dummy Vehicle %d created (team %d)", from, dummyID, h.Dummy.Team)
@@ -796,11 +806,6 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	}
 	s.mu.Lock()
 	st.infoPlayer = 0
-	if h.Dummy != nil {
-		st.infoDummy = 1
-	} else {
-		st.infoDummy = -1
-	}
 	s.mu.Unlock()
 	iprops, err := EntityPropertyRunLevel(info, false)
 	if err != nil {
@@ -1911,7 +1916,7 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	st.resetSent = false
 	st.vehicle = nil
 	st.avatar = nil
-	st.dummy = nil
+	st.targets = nil
 	st.stage2Key = 0
 	st.stage2Addr = nil
 	st.flooded = false
@@ -1986,10 +1991,27 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 	}
 	created := 0
 	for _, b := range batch {
-		if _, _, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.index, seq, cumul); err != nil {
+		e, _, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.index, seq, cumul)
+		if err != nil {
 			s.logf("arena %d: bot %s: %v", h.ArenaID, b.doc.Name, err)
 			continue
 		}
+		health := 0
+		if hv, ok := e.Props["health"]; ok {
+			health = int(hv.Int)
+		}
+		// A bot is a target like the dummy: its own entity, spawn, health and
+		// module state, so the player's shells can hit it.
+		s.mu.Lock()
+		st.targets = append(st.targets, &botTarget{
+			entity:    e,
+			id:        b.id,
+			pos:       b.pos,
+			health:    health,
+			maxHealth: health,
+			infoIndex: b.index,
+		})
+		s.mu.Unlock()
 		seq = nextSeqAfter(seq, 4)
 		created++
 	}

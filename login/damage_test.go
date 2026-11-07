@@ -473,11 +473,10 @@ func TestKillUpdatesVehiclesInfo(t *testing.T) {
 	st := &clientState{
 		infoComp:     nrlComponent{TypeID: AvatarVehiclesInfoNrlID, Node: 1, FirstChild: 2, Props: 1},
 		infoVehicles: []entdef.Value{player, dummy},
-		infoDummy:    1,
 		infoPlayer:   0,
 	}
 	s := &BaseAppServer{}
-	el := s.killVehiclesInfo(st, 101, 100)
+	el := s.killVehiclesInfo(st, 1, 100)
 	if len(el) == 0 {
 		t.Fatal("no vehiclesInfo update")
 	}
@@ -497,7 +496,7 @@ func TestKillUpdatesVehiclesInfo(t *testing.T) {
 		t.Fatalf("shooter frags = %v (ok=%v), want 1", frags, ok)
 	}
 	// A second kill counts again.
-	s.killVehiclesInfo(st, 101, 100)
+	s.killVehiclesInfo(st, 1, 100)
 	if st.infoKills != 2 {
 		t.Fatalf("kills = %d, want 2", st.infoKills)
 	}
@@ -580,8 +579,8 @@ func TestShotPacketsSurviveTheClientReader(t *testing.T) {
 
 	st := &clientState{
 		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
-		entityID: avatar.ID, avatar: avatar, vehicle: vehicle, dummy: dummy,
-		dummyID: dummy.ID, dummyPos: dummyPos, dummyHealth: 1248, dummyMaxHealth: 1248,
+		entityID: avatar.ID, avatar: avatar, vehicle: vehicle,
+		targets: []*botTarget{{entity: dummy, id: dummy.ID, pos: dummyPos, health: 1248, maxHealth: 1248, infoIndex: 1}},
 		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
 		ownVehicle: nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
 		postSeq:    100, postCumul: 3, tick: 1000,
@@ -663,12 +662,12 @@ func TestKillPacketsSurviveTheClientReader(t *testing.T) {
 	}
 	st := &clientState{
 		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
-		entityID: avatar.ID, avatar: avatar, vehicle: vehicle, dummy: dummy,
-		dummyID: dummy.ID, dummyPos: dummyPos, dummyHealth: 10, dummyMaxHealth: 10,
+		entityID: avatar.ID, avatar: avatar, vehicle: vehicle,
+		targets: []*botTarget{{entity: dummy, id: dummy.ID, pos: dummyPos, health: 10, maxHealth: 10, infoIndex: 1}},
 		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
 		ownVehicle:   nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
 		infoComp:     nrlComponent{TypeID: AvatarVehiclesInfoNrlID, Node: 40, FirstChild: 41, Props: 1},
-		infoVehicles: vehicles, infoPlayer: 0, infoDummy: 1,
+		infoVehicles: vehicles, infoPlayer: 0,
 		postSeq: 100, postCumul: 3, tick: 1000,
 	}
 	tr := &fakeTransport{}
@@ -676,8 +675,8 @@ func TestKillPacketsSurviveTheClientReader(t *testing.T) {
 	if err := s.answerShoot(tr, addr, st); err != nil {
 		t.Fatalf("answerShoot: %v", err)
 	}
-	if st.dummyHealth != 0 {
-		t.Fatalf("dummy health = %d, want 0 (the shot must kill it)", st.dummyHealth)
+	if st.targets[0].health != 0 {
+		t.Fatalf("dummy health = %d, want 0 (the shot must kill it)", st.targets[0].health)
 	}
 	if st.infoKills != 1 {
 		t.Fatalf("kills = %d, want 1", st.infoKills)
@@ -992,5 +991,86 @@ func TestResolveShotHitsTheGun(t *testing.T) {
 	}
 	if res.Flags&0x100 == 0 {
 		t.Fatalf("flags = %#x, want DEVICE_PIERCED_BY_PROJECTILE (0x100)", res.Flags)
+	}
+}
+
+// TestShotsHitWhicheverBotIsInThePath pins the multi-target trace: every
+// synthetic tank is a target, so a shell resolves against the one in its path
+// and the others keep their health and their shell holes.
+func TestShotsHitWhicheverBotIsInThePath(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	d := s.cfg.Dispatch
+	vehType := d.Entity("Vehicle")
+	avatarType := d.Entity("Avatar")
+	if vehType == nil || avatarType == nil {
+		t.Fatal("defs have no Vehicle/Avatar")
+	}
+	const ebrCompDescr = "\x41\x4a\x9d\x00\x65\x00\xcd\x00\x22\x00\x82\x00\x63\x00\x00"
+	spec, ok := vehicleGunSpeeds([]byte(ebrCompDescr))
+	if !ok {
+		t.Fatal("no gun spec for the EBR 105")
+	}
+	vehicle := NewEntity(100003, vehType)
+	avatar := NewEntity(100001, avatarType)
+	near := NewEntity(100004, vehType)
+	far := NewEntity(100005, vehType)
+	for _, e := range []*Entity{vehicle, near, far} {
+		for _, p := range vehType.CellProps {
+			e.Set(p.Name, entdef.ZeroValue(p.Type))
+		}
+	}
+	for _, p := range avatarType.CellProps {
+		avatar.Set(p.Name, entdef.ZeroValue(p.Type))
+	}
+	shell := spec.Dispersion.ShellCD
+	ammo := entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{{Kind: entdef.VDict, Dict: []entdef.DictField{
+		{Name: "compactDescr", Value: entdef.Value{Kind: entdef.VInt, Int: int64(shell)}},
+		{Name: "quantity", Value: entdef.Value{Kind: entdef.VUint, Uint: 30}},
+		{Name: "quantityInClip", Value: entdef.Value{Kind: entdef.VUint, Uint: 1}},
+	}}}}
+	hull := hull{Position: [3]float32{0, 0, 0}, Direction: [3]float32{0, 0, 0}, Limits: spec.Limits}
+	marker := gunMarkerFor(hull, 0, 0, spec, 1)
+	dir := [3]float32{marker.Velocity[0], marker.Velocity[1], marker.Velocity[2]}
+	l := float32(math.Sqrt(float64(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2])))
+	// The far tank sits BEHIND the near one: the shell must stop at the near.
+	at := func(m float32) [3]float32 {
+		return [3]float32{marker.Position[0] + dir[0]/l*m, hull.Position[1], marker.Position[2] + dir[2]/l*m}
+	}
+	st := &clientState{
+		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
+		entityID: avatar.ID, avatar: avatar, vehicle: vehicle,
+		targets: []*botTarget{
+			{entity: near, id: near.ID, pos: at(12), health: 1000, maxHealth: 1000, infoIndex: 1},
+			{entity: far, id: far.ID, pos: at(30), health: 1000, maxHealth: 1000, infoIndex: 2},
+		},
+		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
+		ownVehicle: nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
+		postSeq:    100, postCumul: 3, tick: 1000,
+	}
+	tr := &fakeTransport{}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	if err := s.answerShoot(tr, addr, st); err != nil {
+		t.Fatalf("answerShoot: %v", err)
+	}
+	if st.targets[0].health >= 1000 {
+		t.Fatalf("the near tank took no damage (health %d)", st.targets[0].health)
+	}
+	if st.targets[1].health != 1000 {
+		t.Fatalf("the far tank took damage through the near one (health %d)", st.targets[1].health)
+	}
+	// And the module state is per target: the near tank took a module hit, the
+	// far one's state was never even created.
+	damaged := false
+	for i := range st.targets[0].modules {
+		if st.targets[0].modules[i].HP < dummyModules[i].MaxHP {
+			damaged = true
+			break
+		}
+	}
+	if !damaged {
+		t.Fatal("the near tank took no module damage")
+	}
+	if st.targets[1].modules != nil {
+		t.Fatal("the far tank's module state was touched")
 	}
 }

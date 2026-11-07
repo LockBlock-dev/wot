@@ -107,6 +107,25 @@ const (
 // The share a shell's penetration and damage vary, either way.
 const damageSpread = 0.25
 
+// botTarget is one synthetic tank the player's shells can hit: its entity,
+// where it stands, and its own damage state. The dummy and every bot in the
+// battle is one, and the shell resolves against whichever is in its path.
+type botTarget struct {
+	entity    *Entity
+	id        uint32
+	pos       [3]float32
+	yaw       float32
+	health    int
+	maxHealth int
+	// stickers is the accumulated `damageStickers` (the shell holes); every
+	// pierced hit re-sends the whole list.
+	stickers []entdef.Value
+	// infoIndex is this tank's row in the arena's `vehiclesInfo` list.
+	infoIndex int
+	// modules is its module and crew state, nil until the first module hit.
+	modules []moduleState
+}
+
 // hitBox is an oriented box: the hull's collision volume for the trace.
 //
 // Center/Half are the trace volume in the vehicle frame; Origin is the HULL
@@ -126,6 +145,9 @@ type hitBox struct {
 	// Device marks a module part (the gun): a penetrating hit damages the
 	// module and does no hull damage.
 	Device bool
+	// Target is the index into the session's targets of the tank this box
+	// belongs to, so a hit names which one the shell met.
+	Target int
 }
 
 // intersect traces the ray origin+dir*t through the box. It returns the
@@ -220,6 +242,9 @@ type shotResult struct {
 	Damage      int
 	Effect      uint8
 	Flags       uint32
+	// Target is the index into the session's targets of the tank the shell
+	// hit, copied from the box.
+	Target int
 }
 
 // resolveShot traces one shell against every part of the dummy and rolls its
@@ -273,6 +298,7 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 	}
 	res := shotResult{
 		Hit:      true,
+		Target:   box.Target,
 		Point:    point,
 		Normal:   normal,
 		Distance: t,
@@ -603,11 +629,14 @@ func sign32(v float32) float32 {
 }
 
 // applyShot resolves the shot the client just fired against the synthetic
-// opponent and streams the damage back. A miss sends nothing: the client has
+// tanks and streams the damage back. A miss sends nothing: the client has
 // already drawn its own shot.
+//
+// Every synthetic tank is a `botTarget`, so the shell hits whichever one is in
+// its path — the dummy is just the first of them.
 func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64) {
 	s.mu.Lock()
-	if st.dummy == nil || st.avatar == nil || st.vehicle == nil || st.dummyHealth <= 0 {
+	if len(st.targets) == 0 || st.avatar == nil || st.vehicle == nil {
 		s.mu.Unlock()
 		return
 	}
@@ -615,12 +644,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	yaw, pitch := st.gunYaw, st.gunPitch
 	aimWorld := st.aimWorld
 	spec := st.gunSpec
-	dummy := st.dummy
-	dummyID := st.dummyID
-	dummyPos := st.dummyPos
-	dummyYaw := st.dummyYaw
-	oldHealth := st.dummyHealth
-	maxHealth := st.dummyMaxHealth
+	targets := append([]*botTarget(nil), st.targets...)
 	vehicle := st.vehicle
 	attacker := vehicle.ID
 	avatar := st.avatar
@@ -646,13 +670,13 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	s.mu.Lock()
 	terrain := st.terrain
 	s.mu.Unlock()
-	landing := flyShell(sh, marker.Position, v, terrain, dummyBoxes(dummyPos, dummyYaw))
+	landing := flyShell(sh, marker.Position, v, terrain, targetBoxes(targets))
 	// The aim and the muzzle are the two numbers that decide whether a shot at
 	// a top surface lands or sails over: the elevation is measured from the
 	// gun pivot above the CHASSIS origin, and the pitch is clamped to the
 	// gun's own limits.
-	s.logf("arena %d: shot %s aim=%v gunYaw=%.3f gunPitch=%.3f muzzle=%v dummy=%v",
-		arenaID, sh.Name, aimWorld, yaw, pitch, marker.Position, dummyPos)
+	s.logf("arena %d: shot %s aim=%v gunYaw=%.3f gunPitch=%.3f muzzle=%v",
+		arenaID, sh.Name, aimWorld, yaw, pitch, marker.Position)
 	if landing.Kind != landingVehicle {
 		// A miss: the client drew its own shot, so only the end and, for the
 		// ground, the explosion go out. `explodeProjectile`'s shot id is
@@ -686,6 +710,17 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		return
 	}
 	res := landing.Hit
+	if res.Target < 0 || res.Target >= len(targets) {
+		return
+	}
+	t := targets[res.Target]
+	s.mu.Lock()
+	oldHealth := t.health
+	maxHealth := t.maxHealth
+	s.mu.Unlock()
+	if oldHealth <= 0 {
+		return // a wreck takes no more shells
+	}
 	// The module or crewman behind the armour: a penetrating hit damages one,
 	// and the client is told which one (`onExtraHitted`) and, for a wrecked
 	// track, to break its visual (`startOrUpdateExtraFromOutside`).
@@ -694,7 +729,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if res.Pierced {
 		// The shell's own damage, not the HP damage: a device hit (the gun)
 		// deals no HP damage but still wrecks the device.
-		moduleEls, fire = s.damageModule(st, dummy, arenaID, res, int(sh.Damage), attacker)
+		moduleEls, fire = s.damageModule(t, arenaID, res, int(sh.Damage), attacker)
 	}
 	if maxHealth <= 0 {
 		maxHealth = 1000
@@ -708,7 +743,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		newHealth = 0
 	}
 	// A tank whose crew is all dead is dead, whatever its hit points.
-	if newHealth > 0 && s.allCrewDead(st) {
+	if newHealth > 0 && s.allCrewDead(t) {
 		newHealth = 0
 	}
 	damageFactor := 0
@@ -726,28 +761,28 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	point := hitPointValue(segment, hitParams(sh, res.Effect))
 
 	// Two packets, one per selected entity: the client's selection applies to
-	// the elements that follow it in the same bundle, so the dummy's methods
+	// the elements that follow it in the same bundle, so the victim's methods
 	// and the Avatar's must not share a packet.
-	var dummyApp, avatarApp []byte
-	if el, err := EncodeSelectEntity(dummyID); err == nil {
-		dummyApp = append(dummyApp, el...)
+	var victimApp, avatarApp []byte
+	if el, err := EncodeSelectEntity(t.id); err == nil {
+		victimApp = append(victimApp, el...)
 	}
 	// The module/crew calls are Vehicle client methods, so they ride behind
-	// the dummy's selection.
-	dummyApp = append(dummyApp, moduleEls...)
-	// A fire is a dynamic component on the dummy: attaching it is what starts
+	// the victim's selection.
+	victimApp = append(victimApp, moduleEls...)
+	// A fire is a dynamic component on the victim: attaching it is what starts
 	// the flame effect, and its burn runs on its own timer.
 	var fireNode uint16
 	if fire != nil {
-		if el, node, err := s.startFireElement(st, dummyID, fire.Extra, fire.Attacker); err == nil {
-			dummyApp = append(dummyApp, el...)
+		if el, node, err := s.startFireElement(st, t.id, fire.Extra, fire.Attacker); err == nil {
+			victimApp = append(victimApp, el...)
 			fireNode = node
 		} else {
 			s.logf("arena %d: fire start: %v", arenaID, err)
 		}
 	}
-	if el, err := showDamageFromShotElement(dummy, attacker, point, sh.EffectsIndex, damage, uint8(damageFactor), sh.Speed); err == nil {
-		dummyApp = append(dummyApp, el...)
+	if el, err := showDamageFromShotElement(t.entity, attacker, point, sh.EffectsIndex, damage, uint8(damageFactor), sh.Speed); err == nil {
+		victimApp = append(victimApp, el...)
 	}
 	// The shell hole. `showDamageFromShot` only plays the impact effect; the
 	// persistent hole is the vehicle's `damageStickers` (an ALL_CLIENTS
@@ -766,34 +801,34 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		s.logf("arena %d: sticker %d on part %d (local %v, dir %v, bounds %v..%v)",
 			arenaID, sh.PiercedSticker, res.Part, res.Local, res.LocalDir, res.Bounds[0], res.Bounds[1])
 		s.mu.Lock()
-		st.dummyStickers = append(st.dummyStickers, sticker)
-		stickers := append([]entdef.Value(nil), st.dummyStickers...)
+		t.stickers = append(t.stickers, sticker)
+		stickers := append([]entdef.Value(nil), t.stickers...)
 		s.mu.Unlock()
-		dummy.Set("damageStickers", entdef.Value{Kind: entdef.VSeq, Seq: stickers})
-		if el, err := EncodePropertyUpdate(dummy, "damageStickers"); err == nil {
+		t.entity.Set("damageStickers", entdef.Value{Kind: entdef.VSeq, Seq: stickers})
+		if el, err := EncodePropertyUpdate(t.entity, "damageStickers"); err == nil {
 			s.logf("arena %d: damageStickers update %dB: % x", arenaID, len(el), el)
-			dummyApp = append(dummyApp, el...)
+			victimApp = append(victimApp, el...)
 		} else {
 			s.logf("arena %d: damageStickers update failed: %v", arenaID, err)
 		}
 	}
 	if damage > 0 {
-		dummy.SetInt("health", int64(newHealth))
+		t.entity.SetInt("health", int64(newHealth))
 		// A bare property is `[id][value]`, with NO length:
 		// `EncodePropertyUpdate`'s `[id][u16 len][value]` is the
 		// `updateEntity` run's form, and sending it standalone makes the
 		// client read the length as the health and the value's low byte as
 		// the next element id (health 926 = 0x039E → element `0x9E` =
 		// exposed method 80, out of range on the 11-method Vehicle).
-		dummyApp = append(dummyApp, EncodeBareU16(elVehicleHealth, uint16(newHealth))...)
-		if el, err := onHealthChangedElement(dummy, newHealth, oldHealth, attacker); err == nil {
-			dummyApp = append(dummyApp, el...)
+		victimApp = append(victimApp, EncodeBareU16(elVehicleHealth, uint16(newHealth))...)
+		if el, err := onHealthChangedElement(t.entity, newHealth, oldHealth, attacker); err == nil {
+			victimApp = append(victimApp, el...)
 		}
 	}
 	// A kill also goes into the arena's `vehiclesInfo`.
 	if newHealth == 0 && damage > 0 {
-		if el := s.killVehiclesInfo(st, dummyID, attacker); len(el) > 0 {
-			dummyApp = append(dummyApp, el...)
+		if el := s.killVehiclesInfo(st, t.infoIndex, attacker); len(el) > 0 {
+			victimApp = append(victimApp, el...)
 		}
 	}
 	// The shooter's own gun: its muzzle flash and smoke. `showShooting` is a
@@ -813,7 +848,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if el, err := stopTracerElement(avatar, shotID, res.Point); err == nil {
 		avatarApp = append(avatarApp, el...)
 	}
-	if el, err := showShotResultsElement(avatar, dummyID, flags); err == nil {
+	if el, err := showShotResultsElement(avatar, t.id, flags); err == nil {
 		avatarApp = append(avatarApp, el...)
 	}
 	// The damage log and the personal efficiency panel. Neither is fed by the
@@ -824,10 +859,10 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	var events []battleEvent
 	if damage > 0 {
 		details := packDamage(uint64(damage), 0 /* ATTACK_REASON.SHOT */, uint64(battleLogShellType(sh.Kind)), -1)
-		events = append(events, battleEvent{eventType: battleEventDamage, targetID: dummyID, details: details, count: uint16(damage)})
+		events = append(events, battleEvent{eventType: battleEventDamage, targetID: t.id, details: details, count: uint16(damage)})
 	}
 	if newHealth == 0 && damage > 0 {
-		events = append(events, battleEvent{eventType: battleEventKill, targetID: dummyID, details: packDamage(uint64(damage), 0, uint64(battleLogShellType(sh.Kind)), -1), count: 1})
+		events = append(events, battleEvent{eventType: battleEventKill, targetID: t.id, details: packDamage(uint64(damage), 0, uint64(battleLogShellType(sh.Kind)), -1), count: 1})
 	}
 	if len(events) > 0 {
 		if el, err := onBattleEventsElement(avatar, events); err == nil {
@@ -835,7 +870,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		}
 	}
 	s.mu.Lock()
-	st.dummyHealth = newHealth
+	t.health = newHealth
 	st.damageDealt += uint32(damage)
 	damageDealt := st.damageDealt
 	comp := st.ownVehicle
@@ -845,7 +880,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	}
 
 	st.sendMu.Lock()
-	for _, app := range [][]byte{dummyApp, avatarApp} {
+	for _, app := range [][]byte{victimApp, avatarApp} {
 		if len(app) == 0 {
 			continue
 		}
@@ -857,10 +892,26 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	}
 	st.sendMu.Unlock()
 	if fireNode != 0 {
-		go s.burnFire(conn, from, st, arenaID, dummy, dummyID, fire.Attacker, fireNode)
+		go s.burnFire(conn, from, st, arenaID, t, fire.Attacker, fireNode)
 	}
-	s.logf("arena %d: shot %s hit dummy %d part %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
-		arenaID, sh.Name, dummyID, res.Part, damage, oldHealth, newHealth, res.Pierced, res.Armor)
+	s.logf("arena %d: shot %s hit bot %d part %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
+		arenaID, sh.Name, t.id, res.Part, damage, oldHealth, newHealth, res.Pierced, res.Armor)
+}
+
+// targetBoxes is every synthetic tank's hit boxes, tagged with the index of the
+// target they belong to. A wreck is left out: a dead tank is not a target.
+func targetBoxes(targets []*botTarget) []hitBox {
+	var out []hitBox
+	for i, t := range targets {
+		if t == nil || t.health <= 0 {
+			continue
+		}
+		for _, b := range dummyBoxes(t.pos, t.yaw) {
+			b.Target = i
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // killVehiclesInfo marks the victim dead in the arena's `vehiclesInfo` and
@@ -879,7 +930,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 // `__generation` bump that flushes the buffer into
 // `ClientArena.updateVehicleInfo` plus the per-field setters
 // (`setVehInfo_isAlive` → `updateVehicleIsAlive` → `onVehicleKilled`).
-func (s *BaseAppServer) killVehiclesInfo(st *clientState, dummyID, attacker uint32) []byte {
+func (s *BaseAppServer) killVehiclesInfo(st *clientState, infoIndex int, attacker uint32) []byte {
 	infoType := entdef.Alias("VEHICLES_INFO")
 	if infoType == nil {
 		return nil
@@ -898,20 +949,24 @@ func (s *BaseAppServer) killVehiclesInfo(st *clientState, dummyID, attacker uint
 		return nil
 	}
 	s.mu.Lock()
-	if st.infoComp.TypeID == 0 || st.infoDummy < 0 || st.infoDummy >= len(st.infoVehicles) {
+	if st.infoComp.TypeID == 0 || infoIndex < 0 || infoIndex >= len(st.infoVehicles) {
 		s.mu.Unlock()
 		return nil
 	}
-	victim := st.infoVehicles[st.infoDummy]
+	victim := st.infoVehicles[infoIndex]
+	victimID := uint32(0)
+	if idv, ok := victim.Get("vehicleID"); ok {
+		victimID = uint32(idv.Int)
+	}
 	victim = dictSet(victim, "isAlive", entdef.Value{Kind: entdef.VUint})
 	victim = dictSet(victim, "deathInfo", entdef.Value{Kind: entdef.VDict, Dict: []entdef.DictField{
-		{Name: "victimID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(dummyID)}},
+		{Name: "victimID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(victimID)}},
 		{Name: "killerID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(attacker)}},
 		{Name: "reasonID", Value: entdef.Value{Kind: entdef.VInt}},
 		{Name: "equipmentID", Value: entdef.Value{Kind: entdef.VInt}},
 		{Name: "numVehiclesAffected", Value: entdef.Value{Kind: entdef.VInt}},
 	}})
-	st.infoVehicles[st.infoDummy] = victim
+	st.infoVehicles[infoIndex] = victim
 	playerIdx := -1
 	if st.infoPlayer >= 0 && st.infoPlayer < len(st.infoVehicles) {
 		st.infoKills++
@@ -923,7 +978,7 @@ func (s *BaseAppServer) killVehiclesInfo(st *clientState, dummyID, attacker uint
 	}
 	comp := st.infoComp
 	nVehicles := len(st.infoVehicles)
-	dummyIdx := st.infoDummy
+	dummyIdx := infoIndex
 	st.infoGen++
 	gen := st.infoGen
 	s.mu.Unlock()

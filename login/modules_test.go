@@ -48,18 +48,18 @@ func TestModuleTablesCoverEveryPart(t *testing.T) {
 func TestModuleDamageDestroysAndReports(t *testing.T) {
 	s := tokenTestServer(t, nil)
 	dummy := NewEntity(100004, s.cfg.Dispatch.Entity("Vehicle"))
-	st := &clientState{}
+	tgt := &botTarget{entity: dummy, id: dummy.ID}
 	// A gun hit is deterministic: the gun is the only module behind the barrel.
 	res := shotResult{
 		Hit: true, Pierced: true, Part: 3, Face: 2,
 		LocalNormal: [3]float32{0, 0, 1},
 		Point:       [3]float32{0, 2.5, 3},
 	}
-	el, _ := s.damageModule(st, dummy, 1, res, 200, 1)
+	el, _ := s.damageModule(tgt, 1, res, 200, 1)
 	if len(el) == 0 {
 		t.Fatal("no client call for a module hit")
 	}
-	m, ok := moduleStateByName(st, "gunHealth")
+	m, ok := moduleStateByName(tgt, "gunHealth")
 	if !ok || m.Destroyed {
 		t.Fatalf("gun state = %+v, want damaged but alive", m)
 	}
@@ -67,25 +67,25 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		t.Fatalf("gun HP = %v, want it reduced", m.HP)
 	}
 	// A second hit wrecks it and no further damage is taken.
-	el, _ = s.damageModule(st, dummy, 1, res, 200, 1)
-	if m, _ = moduleStateByName(st, "gunHealth"); !m.Destroyed {
+	el, _ = s.damageModule(tgt, 1, res, 200, 1)
+	if m, _ = moduleStateByName(tgt, "gunHealth"); !m.Destroyed {
 		t.Fatalf("gun state = %+v, want destroyed", m)
 	}
-	if el, _ = s.damageModule(st, dummy, 1, res, 200, 1); len(el) != 0 {
+	if el, _ = s.damageModule(tgt, 1, res, 200, 1); len(el) != 0 {
 		t.Fatal("a wrecked module took another hit")
 	}
 	// The track's destruction is the one with a visual: the extra start.
-	st2 := &clientState{}
+	t2 := &botTarget{entity: dummy, id: dummy.ID}
 	trackRes := shotResult{
 		Hit: true, Pierced: true, Part: 1, Face: 0,
 		LocalNormal: [3]float32{1, 0, 0},
 		Local:       [3]float32{1.5, dummyParts[0].Bounds[0][1] + 0.1, 0},
 		Point:       [3]float32{1.5, 0.6, 0},
 	}
-	if el, _ := s.damageModule(st2, dummy, 1, trackRes, 400, 1); len(el) == 0 {
+	if el, _ := s.damageModule(t2, 1, trackRes, 400, 1); len(el) == 0 {
 		t.Fatal("no track hit call")
 	}
-	if m, _ := moduleStateByName(st2, "rightTrack0Health"); !m.Destroyed {
+	if m, _ := moduleStateByName(t2, "rightTrack0Health"); !m.Destroyed {
 		t.Fatalf("track state = %+v, want destroyed by a 400-damage hit", m)
 	}
 }
@@ -94,20 +94,20 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 // crewman does.
 func TestAllCrewDeadKillsTheTank(t *testing.T) {
 	s := tokenTestServer(t, nil)
-	st := &clientState{}
-	if s.allCrewDead(st) {
-		t.Fatal("a fresh session reported a dead crew")
+	tgt := &botTarget{}
+	if s.allCrewDead(tgt) {
+		t.Fatal("a fresh target reported a dead crew")
 	}
-	st.modules = make([]moduleState, len(dummyModules))
+	tgt.modules = make([]moduleState, len(dummyModules))
 	for i := range dummyModules {
-		st.modules[i].HP = dummyModules[i].MaxHP
+		tgt.modules[i].HP = dummyModules[i].MaxHP
 	}
 	for i := range dummyModules {
 		if dummyModules[i].Crew {
-			st.modules[i].Destroyed = true
+			tgt.modules[i].Destroyed = true
 		}
 	}
-	if !s.allCrewDead(st) {
+	if !s.allCrewDead(tgt) {
 		t.Fatal("all crewmen dead but the tank is not")
 	}
 }
@@ -121,8 +121,8 @@ func TestModuleCallsSurviveTheClientReader(t *testing.T) {
 	for _, p := range d.Entity("Vehicle").CellProps {
 		dummy.Set(p.Name, entdef.ZeroValue(p.Type))
 	}
-	st := &clientState{}
-	el, _ := s.damageModule(st, dummy, 1, shotResult{
+	tgt := &botTarget{entity: dummy, id: dummy.ID}
+	el, _ := s.damageModule(tgt, 1, shotResult{
 		Hit: true, Pierced: true, Part: 3, Face: 2,
 		LocalNormal: [3]float32{0, 0, 1},
 		Point:       [3]float32{0, 2.5, 3},

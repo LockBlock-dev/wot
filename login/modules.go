@@ -205,7 +205,8 @@ var fireChance = map[string]float64{
 // module is DESTROYED (a broken track, the only extra whose client side has a
 // visual) — plus a fire when the wreck is a flammable one and the roll says
 // so.
-func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uint64, res shotResult, damage int, attacker uint32) ([]byte, *fireStart) {
+func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResult, damage int, attacker uint32) ([]byte, *fireStart) {
+	dummy := t.entity
 	name := pickModule(res.Part, res.Face, res.LocalNormal, res.Local[1])
 	if name == "" {
 		return nil, nil
@@ -214,16 +215,17 @@ func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uin
 	if idx < 0 {
 		return nil, nil
 	}
-	s.mu.Lock()
-	if st.modules == nil {
-		st.modules = make([]moduleState, len(dummyModules))
+	// The module state is the TARGET's, not the session's: every synthetic
+	// tank has its own tracks, engine and crew, so a shot at one cannot wreck
+	// another.
+	if t.modules == nil {
+		t.modules = make([]moduleState, len(dummyModules))
 		for i := range dummyModules {
-			st.modules[i].HP = dummyModules[i].MaxHP
+			t.modules[i].HP = dummyModules[i].MaxHP
 		}
 	}
-	m := &st.modules[idx]
+	m := &t.modules[idx]
 	if m.Destroyed {
-		s.mu.Unlock()
 		return nil, nil // a wrecked module takes no more hits
 	}
 	amount := float32(damage) * moduleDamageShare
@@ -237,7 +239,6 @@ func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uin
 		m.Destroyed = true
 	}
 	hp := m.HP
-	s.mu.Unlock()
 	s.logf("arena %d: %s hit for %.0f (%.0f/%.0f left, destroyed=%v)",
 		arenaID, name, amount, hp, dummyModules[idx].MaxHP, destroyed)
 
@@ -275,10 +276,8 @@ func (s *BaseAppServer) damageModule(st *clientState, dummy *Entity, arenaID uin
 
 // allCrewDead reports whether every crewman of the dummy is dead, which kills
 // the tank: the crew is what keeps it fighting.
-func (s *BaseAppServer) allCrewDead(st *clientState) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if st.modules == nil {
+func (s *BaseAppServer) allCrewDead(t *botTarget) bool {
+	if t.modules == nil {
 		return false
 	}
 	any := false
@@ -287,7 +286,7 @@ func (s *BaseAppServer) allCrewDead(st *clientState) bool {
 			continue
 		}
 		any = true
-		if !st.modules[i].Destroyed {
+		if !t.modules[i].Destroyed {
 			return false
 		}
 	}
@@ -295,12 +294,12 @@ func (s *BaseAppServer) allCrewDead(st *clientState) bool {
 }
 
 // moduleStateByName is a test and log helper.
-func moduleStateByName(st *clientState, name string) (moduleState, bool) {
+func moduleStateByName(t *botTarget, name string) (moduleState, bool) {
 	idx := moduleIndex(name)
-	if idx < 0 || st.modules == nil || idx >= len(st.modules) {
+	if idx < 0 || t.modules == nil || idx >= len(t.modules) {
 		return moduleState{}, false
 	}
-	return st.modules[idx], true
+	return t.modules[idx], true
 }
 
 // pickModuleForTest exposes the roll's table choice without the random pick.

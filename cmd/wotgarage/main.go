@@ -55,8 +55,19 @@ var nations = []string{
 }
 
 // excludedTags are the tags that mark a vehicle as not ownable.
+//
+// The mode tags matter as much as `maps_training`: `battle_royale` and
+// `event_battles` vehicles are the mode's own tanks (the display names "Ours"
+// and "Harbinger" are G04_PzVI_Tiger_I_SHXXI_B and GB107_Cavalier_SH), and
+// they carry placeholder modules (id 0x2710) and a price of 1 — seeded into
+// the garage they appear as tanks the player can pick and then cannot be
+// played. `unobservable` and `bot_hunter` are the same family.
 var excludedTags = map[string]bool{
 	"maps_training": true,
+	"battle_royale": true,
+	"event_battles": true,
+	"unobservable":  true,
+	"bot_hunter":    true,
 }
 
 // componentFiles maps a component kind to its table file under

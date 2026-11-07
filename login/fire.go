@@ -81,15 +81,16 @@ func (s *BaseAppServer) startFireElement(st *clientState, dummyID uint32, extraI
 // reason, then puts the fire out (unlinks the component).
 //
 // It stops when the battle does, like the reload's completion timer.
-func (s *BaseAppServer) burnFire(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, dummy *Entity, dummyID uint32, attacker uint32, fireNode uint16) {
+func (s *BaseAppServer) burnFire(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, t *botTarget, attacker uint32, fireNode uint16) {
+	dummy := t.entity
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	deadline := time.Now().Add(fireDuration)
 	for now := range tick.C {
 		s.mu.Lock()
 		live := st.arena != nil && st.arena.ArenaID == arenaID
-		health := st.dummyHealth
-		maxHealth := st.dummyMaxHealth
+		health := t.health
+		maxHealth := t.maxHealth
 		s.mu.Unlock()
 		if !live {
 			return
@@ -103,7 +104,7 @@ func (s *BaseAppServer) burnFire(conn Transport, from *net.UDPAddr, st *clientSt
 			newHealth = 0
 		}
 		s.mu.Lock()
-		st.dummyHealth = newHealth
+		t.health = newHealth
 		s.mu.Unlock()
 		dummy.SetInt("health", int64(newHealth))
 		var app []byte
@@ -112,7 +113,7 @@ func (s *BaseAppServer) burnFire(conn Transport, from *net.UDPAddr, st *clientSt
 			app = append(app, el...)
 		}
 		if newHealth == 0 {
-			if el := s.killVehiclesInfo(st, dummyID, attacker); len(el) > 0 {
+			if el := s.killVehiclesInfo(st, t.infoIndex, attacker); len(el) > 0 {
 				app = append(app, el...)
 			}
 		}

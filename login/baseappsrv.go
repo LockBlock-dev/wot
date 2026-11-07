@@ -355,27 +355,20 @@ type clientState struct {
 	// Avatar so the battle app has something to attach the camera and the
 	// player panel to.
 	vehicle *Entity
-	// dummy is the synthetic opponent's Vehicle entity, when the battle has
-	// one, and the server's copy of its spawn and health. The client only
-	// learns the health from the updates `applyShot` sends.
-	dummy          *Entity
-	dummyID        uint32
-	dummyPos       [3]float32
-	dummyYaw       float32
-	dummyHealth    int
-	dummyMaxHealth int
+	// targets are the synthetic tanks the player's shells can hit: the dummy
+	// first, then the bots. Each carries its own entity, spawn, health,
+	// shell-hole list and module state, so a shot resolves against whichever
+	// one is in its path.
+	targets []*botTarget
 	// pendingBots are the synthetic vehicles still to create. The arena entry
 	// queues them and `sweepStage2` creates a few per sweep: a 30-tank battle
 	// is 116 reliable packets, and one burst overflows the client's channel
 	// window before the battle starts.
 	pendingBots []pendingBot
-	// dummyStickers is the dummy's accumulated `damageStickers` (the shell
-	// holes); every pierced hit re-sends the whole list.
-	dummyStickers []entdef.Value
 	// infoComp is the arena's `AvatarVehiclesInfo` component and infoVehicles
 	// its `vehicles` array: the team panel, the kill message and the kill
-	// column all read it. infoDummy/infoPlayer are the victim's and the
-	// shooter's indexes in that array; infoKills is the shooter's `stFrags`.
+	// column all read it. infoPlayer is the shooter's index in that array and
+	// infoKills its `stFrags`; a victim's index lives on its `botTarget`.
 	infoComp     nrlComponent
 	infoVehicles []entdef.Value
 	// infoGen is the `vehiclesInfo` `__generation` counter. The client's
@@ -419,7 +412,6 @@ type clientState struct {
 	// the ticks also wait out postHoldWindow from here, whatever the client
 	// sends in the meantime.
 	postHoldAt time.Time
-	infoDummy  int
 	infoPlayer int
 	infoKills  int
 	// shotID numbers the tracers this session fires.
