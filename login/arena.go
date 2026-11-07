@@ -693,7 +693,7 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// `trackTurret`. The terrain is what the hull rests on, so it is resolved
 	// once for the battle rather than per tick.
 	if haveSpec {
-		go s.trackTurret(conn, from, st, h.ArenaID, spec, TerrainFor(h.Map), ArenaDefFor(h.Map))
+		go s.trackTurret(conn, from, st, h.ArenaID, spec, TerrainFor(h.Map), ArenaDefFor(h.Map), StaticsFor(h.Map))
 	}
 	s.logf("stage2 %s: Vehicle %d created (createEntityDetailed %dB, selectEntity, updateEntity %dB, enterAoI)",
 		from, vehicle.ID, len(create), len(update))

@@ -2743,7 +2743,7 @@ func stepTurret(cur, target, step float64) float64 {
 // about 18 degrees at a real turret speed. A server that echoes the aim point's
 // bearing is therefore always a whole swing ahead, and the client jumps to it.
 // Stepping the server's yaw at the same rate keeps the two within one tick.
-func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, spec gunSpec, terrain *Terrain, arenaDef *ArenaDef) {
+func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, spec gunSpec, terrain *Terrain, arenaDef *ArenaDef, statics *staticScene) {
 	// `SERVER_TICK_LENGTH` is 0.1 in the client's own `common/constants.pyc`
 	// and the reference ticks at 100 ms, but the client draws the tank at
 	// whatever the last position update said (see `arenaTickPeriod`), so the
@@ -2852,6 +2852,10 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 			ground = terrain.GroundAt(st.hull.Position[0], st.hull.Position[2])
 		}
 		moved := st.hull.step(float32(dt), ground)
+		// The static models: buildings and rocks push the hull out.
+		if statics != nil {
+			st.hull.pushOut(statics, hullCollisionBounds)
+		}
 		// Keep it inside the map's bounds, with the edge's friction.
 		if arenaDef != nil {
 			st.hull.keepWithin(arenaDef.MinX, arenaDef.MinZ, arenaDef.MaxX, arenaDef.MaxZ)

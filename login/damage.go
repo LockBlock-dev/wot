@@ -245,15 +245,39 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 	if cos < 0.1 {
 		cos = 0.1
 	}
+	// The shell's penetration falls off with the distance it flew, and
+	// varies either way by its own randomization: a normal distribution,
+	// clamped to ±1 and scaled by `PenRandomization`.
+	pen := sh.penAt(float64(t)) * (1 + clampF64(normalRandom()*0.5, -1, 1)*sh.PenRandomization)
+	// Normalization: an AP shell turns toward the armour's normal as it hits,
+	// more so when its caliber is over twice the armour (overmatch).
+	if sh.NormalizationAngle > 0 && cos < 1 {
+		norm := sh.NormalizationAngle
+		if armor > 0 && sh.Caliber > float64(armor)*2 {
+			norm *= 1.4 * sh.Caliber / (float64(armor) * 2)
+		}
+		angle := math.Acos(float64(cos)) - norm
+		if angle < 0 {
+			cos = 1
+		} else {
+			cos = float32(math.Cos(math.Min(angle, maxHitAngle)))
+		}
+	}
 	effective := armor / cos
-	pen := float32(sh.Pen) * (1 + (rand.Float32()*2-1)*damageSpread)
+	// Ricochets: past the shell's own angle, unless it is an AP or APCR round
+	// meeting armour thinner than a third of its caliber.
+	ricochet := false
+	if sh.HasRicochetAngle && float64(cos) < sh.RicochetAngleCos {
+		thin := (sh.Kind == "ARMOR_PIERCING" || sh.Kind == "ARMOR_PIERCING_CR") && float64(armor)*3 < sh.Caliber
+		ricochet = !thin
+	}
 	res := shotResult{
 		Hit:      true,
 		Point:    point,
 		Normal:   normal,
 		Distance: t,
 		Armor:    effective,
-		Pierced:  pen > effective,
+		Pierced:  !ricochet && pen > float64(effective),
 	}
 	if box.Device {
 		// A module hit: the shell damages the device and the hull takes
@@ -270,7 +294,7 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 		}
 		res.Damage = 0
 	} else if res.Pierced {
-		res.Damage = int(math.Round(sh.Damage * (1 + (rand.Float64()*2-1)*damageSpread)))
+		res.Damage = int(math.Round(sh.damageAt(float64(t)) * (1 + (rand.Float64()*2-1)*damageSpread)))
 		res.Effect = hitEffectPierced
 		res.Flags = hitFlagsPierced
 	} else {
@@ -279,7 +303,7 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 		// An HE shell that does not pierce explodes on the armour: half its
 		// damage at the armour, less what the armour absorbs.
 		if sh.KindIndex == 1 {
-			if dmg := 0.5*sh.Damage - 1.3*float64(effective); dmg > 0 {
+			if dmg := 0.5*sh.damageAt(float64(t)) - 1.3*float64(effective); dmg > 0 {
 				res.Damage = int(math.Round(dmg * (1 + (rand.Float64()*2-1)*damageSpread)))
 				res.Flags |= hitFlagExploded
 			}
@@ -298,6 +322,28 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 	res.Face = face
 	res.LocalNormal = localNormal
 	return res
+}
+
+// maxHitAngle is the steepest impact the normalization may turn a shell to,
+// in radians: the reference's `MAX_HIT_ANGLE`.
+const maxHitAngle = 1.5
+
+// normalRandom is a standard normal sample (Box-Muller).
+func normalRandom() float64 {
+	u := math.Max(rand.Float64(), math.SmallestNonzeroFloat64)
+	v := rand.Float64()
+	return math.Sqrt(-2*math.Log(u)) * math.Cos(2*math.Pi*v)
+}
+
+// clampF64 clamps v to [lo, hi].
+func clampF64(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // armorForFace is the nominal armour of the face the shell met.

@@ -1230,6 +1230,28 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
   HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
   put every hole a few tenths of a metre off the aim point.
+- **The tank collides with the map's static models.** `login/havok.go` ports
+  the Havok tagfile decoder, `login/collision.go` the `hknpCompressedMeshShape`
+  triangles and the `HKBodyFlagsData` bounds, and `login/statics.go` the
+  `space.bin` (`BWST` strings, `BSMI` placed models, `BSMO` models) and the
+  static scene: the triangles indexed in an 8 m grid, then `pushOut` against
+  the walls within 50° of vertical, from `stepHeight` (0.8 m) up, deepest
+  overlap first, `wallPasses` (4) at most, with `wallFriction` (0.25). Karelia
+  loads 956 938 triangles in 0.25 s, cached per space (`StaticsFor`).
+- **The shells carry the defs' own armour figures.** `shellSpec` now has the
+  gun's `piercingPower` pair (`PenNear`/`PenFar`), the shell's
+  `damage/armor` pair, `piercingPowerRandomization` (0.25 by default),
+  `normalizationAngle` (AP kinds), `ricochetAngle` (AP/APCR/HEAT),
+  `piercingPowerLossFactorByDistance` (the HEAT jet loss) and the
+  `caliber²/5555` explosion radius; `penAt`/`damageAt` interpolate from 100 m
+  to 500 m, and `rollShot` applies the penetration randomization, the
+  normalization (1.4× when the caliber is over twice the armour) and the
+  ricochet rule (AP/APCR never off armour thinner than a third of their
+  caliber).
+- **`drive_replay`** is a harness, not a server feature: `login/drivereplay.go`
+  parses the reference's captured-drive format and replays it through the hull
+  in windows, each starting from the real state (the speed and yaw rate
+  inferred from the captured positions), reporting the drift.
 - **The hull drives on the real physics.** `login/drive.go` now ports the
   reference's model: the engine's power over the vehicle's weight gives the
   drive (`POWER_FACTOR`, capped at `MAX_ACCELERATION`), the ground's rolling

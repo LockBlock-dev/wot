@@ -80,6 +80,31 @@ type shellSpec struct {
 	// none.
 	PiercedSticker    uint8
 	HasPiercedSticker bool
+	// PenNear and PenFar are the armour it pierces within 100 m and beyond
+	// 500 m, in millimetres; DamageNear and DamageFar the same for its damage.
+	// The gun's `piercingPower` and the shell's `damage/armor` carry both.
+	PenNear, PenFar       float64
+	DamageNear, DamageFar float64
+	// PenRandomization is how much its penetration varies either way, as a
+	// share of it (`piercingPowerRandomization`, 0.25 by default).
+	PenRandomization float64
+	// NormalizationAngle is how far it turns toward an armour's normal as it
+	// hits it, in radians: AP kinds only.
+	NormalizationAngle float64
+	// RicochetAngleCos is the cosine of the angle from an armour's normal past
+	// which it ricochets off it: none for the kinds that never do.
+	RicochetAngleCos float64
+	HasRicochetAngle bool
+	// JetPenLoss is the share of its penetration a HEAT jet loses per metre
+	// once through a screen.
+	JetPenLoss float64
+	// ExplosionRadius is how far an HE shell's explosion damages, in metres:
+	// the legacy mechanics' `caliber² / 5555`.
+	ExplosionRadius float64
+	// PrefabEffectsIndex is its prefab effects' index in
+	// `common/prefab_effects/shot_effects.xml`.
+	PrefabEffectsIndex    uint8
+	HasPrefabEffectsIndex bool
 }
 
 // dispersionSpec is the client's own dispersion model, read from the defs the
@@ -864,13 +889,16 @@ func defaultShell(gs *entdef.Section) (shellSpec, error) {
 		gravity, _ := floatChild(sh, "gravity")
 		maxDist, _ := floatChild(sh, "maxDistance")
 		// `piercingPower` is two values, at 100 m and at 500 m.
-		pen := 0.0
+		pen, penFar := 0.0, 0.0
 		if pp := sh.Child("piercingPower"); pp != nil {
-			if lo, _, perr := parsePair(pp.AsString()); perr == nil {
-				pen = lo
+			if lo, hi, perr := parsePair(pp.AsString()); perr == nil {
+				pen, penFar = lo, hi
 			}
 		}
-		best = shellSpec{Name: sh.Name, Pen: pen, Speed: v, Gravity: gravity, MaxDistance: maxDist}
+		best = shellSpec{
+			Name: sh.Name, Pen: pen, PenNear: pen, PenFar: penFar,
+			Speed: v, Gravity: gravity, MaxDistance: maxDist,
+		}
 		bestPortion = portion
 	}
 	if bestPortion < 0 {
@@ -926,7 +954,64 @@ func shellDataIn(pkg, nation, name string) (shellSpec, error) {
 		EffectsIndex: shotEffectsIndex(pkg, effects),
 	}
 	shell.PiercedSticker, shell.HasPiercedSticker = piercedStickerIndex(pkg, effects)
+	// The kind's own parameters, as `_readShell` reads them: AP kinds
+	// normalize toward the armour's normal, AP/APCR/HEAT ricochet past an
+	// angle, and every shell's explosion radius is `caliber² / 5555`.
+	shell.DamageNear, shell.DamageFar = damage, damage
+	if d := sh.Child("damage"); d != nil {
+		if lo, hi, derr := parsePair(d.Child("armor").AsString()); derr == nil {
+			shell.DamageNear, shell.DamageFar = lo, hi
+		}
+	}
+	if v, verr := floatChild(sh, "piercingPowerRandomization"); verr == nil {
+		shell.PenRandomization = v
+	} else {
+		shell.PenRandomization = 0.25
+	}
+	if strings.HasPrefix(kind, "ARMOR_PIERCING") {
+		if v, verr := floatChild(sh, "normalizationAngle"); verr == nil {
+			shell.NormalizationAngle = v * math.Pi / 180
+		}
+	}
+	switch kind {
+	case "ARMOR_PIERCING", "ARMOR_PIERCING_CR", "HOLLOW_CHARGE":
+		if v, verr := floatChild(sh, "ricochetAngle"); verr == nil {
+			shell.RicochetAngleCos = math.Cos(v * math.Pi / 180)
+			shell.HasRicochetAngle = true
+		}
+	}
+	if v, verr := floatChild(sh, "piercingPowerLossFactorByDistance"); verr == nil {
+		shell.JetPenLoss = 10 * v
+	}
+	shell.ExplosionRadius = caliber * caliber / 5555
+	shell.PrefabEffectsIndex, shell.HasPrefabEffectsIndex = prefabEffectsIndex(pkg, kind, sh)
 	return shell, nil
+}
+
+// prefabEffectsIndex reads a shell's `prefabEffects`, else its kind's default
+// in `common/vehicle.xml`, as the client's item loader does.
+func prefabEffectsIndex(pkg, kind string, sh *entdef.Section) (uint8, bool) {
+	name := ""
+	if p := sh.Child("prefabEffects"); p != nil {
+		name = strings.TrimSpace(p.StrVal())
+	}
+	if name == "" {
+		return 0, false
+	}
+	raw, err := readFromZip(pkg, "scripts/item_defs/vehicles/common/prefab_effects/shot_effects.xml")
+	if err != nil {
+		return 0, false
+	}
+	f, err := entdef.ParseFile(raw)
+	if err != nil || f.Root == nil {
+		return 0, false
+	}
+	for i, c := range f.Root.Children {
+		if c.Name == name {
+			return uint8(i), true
+		}
+	}
+	return 0, false
 }
 
 // piercedStickerIndex is the shell's `armorPierced` damage sticker: the
@@ -1114,4 +1199,37 @@ func shellIDIn(pkg, nation, shell string) (int64, error) {
 		return 0, fmt.Errorf("vehiclespec: %s/%s: %w", name, shell, err)
 	}
 	return int64(id), nil
+}
+
+// INTERPOLATION_DISTANCES are where a shell's near and far figures apply, in
+// metres: its penetration and damage fall off linearly between them.
+var interpolationDistances = [2]float64{100, 500}
+
+// penAt is the shell's penetration after flying this far. A spec without the
+// defs' near/far pair (a synthetic one) falls back to its single figure.
+func (s shellSpec) penAt(distance float64) float64 {
+	if s.PenNear == 0 && s.PenFar == 0 {
+		return s.Pen
+	}
+	return interpolateByDistance(s.PenNear, s.PenFar, distance)
+}
+
+// damageAt is the shell's damage after flying this far, with the same
+// fallback.
+func (s shellSpec) damageAt(distance float64) float64 {
+	if s.DamageNear == 0 && s.DamageFar == 0 {
+		return s.Damage
+	}
+	return interpolateByDistance(s.DamageNear, s.DamageFar, distance)
+}
+
+// interpolateByDistance is the reference's `interpolate_by_distance`: linear
+// from the near distance to the far one, clamped at both ends.
+func interpolateByDistance(near, far, distance float64) float64 {
+	first, last := interpolationDistances[0], interpolationDistances[1]
+	t := (math.Max(distance, first) - first) / (last - first)
+	if v := near + (far-near)*t; v > 0 {
+		return v
+	}
+	return 0
 }
