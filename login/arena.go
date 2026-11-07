@@ -804,6 +804,8 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// differs from the client's copy only by the fired shell.
 	s.mu.Lock()
 	st.ammoList = overrides["vehicleAmmoList"]
+	st.loadedShell = st.gunSpec.Dispersion.ShellCD
+	st.nextShell = st.loadedShell
 	s.mu.Unlock()
 
 	// WOT_ARENA_PROBE=5 sweeps a range of NRL component ids onto the vehicle.
@@ -1216,15 +1218,17 @@ func ownVehicleOverrides(vehicleID uint32, compDescr []byte, savedShells []int64
 			overrides["vehicleAmmoList"] = entdef.Value{Kind: entdef.VSeq, Seq: seq}
 		}
 		if t := entdef.Alias("VEHICLE_SETTINGS"); t != nil {
-			overrides["vehicleSettings"] = entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{{
-				Kind: entdef.VDict,
-				Dict: []entdef.DictField{
-					{Name: "vehicleID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(vehicleID)}},
-					// `VEHICLE_SETTING.CURRENT_SHELLS` is 0.
-					{Name: "code", Value: entdef.Value{Kind: entdef.VUint}},
-					{Name: "value", Value: entdef.Value{Kind: entdef.VInt, Int: int64(disp.ShellCD)}},
-				},
-			}}}
+			// `CURRENT_SHELLS` (0) is the loaded shell and `NEXT_SHELLS` (1)
+			// the one the client will load: the reference sends both, and
+			// the ammo panel's next-shell slot reads the second.
+			nextShell := disp.ShellCD
+			for _, e := range entries {
+				if e.cd != int64(disp.ShellCD) {
+					nextShell = int32(e.cd)
+					break
+				}
+			}
+			overrides["vehicleSettings"] = vehicleSettingsValue(vehicleID, disp.ShellCD, nextShell)
 		}
 	}
 	if t := entdef.Alias("VEHICLE_GUN_RELOAD_TIME"); t != nil {

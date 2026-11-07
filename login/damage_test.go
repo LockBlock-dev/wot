@@ -323,3 +323,38 @@ func TestTakeAmmoDecrementsTheFiredShell(t *testing.T) {
 		t.Fatal("takeAmmo succeeded with no shells left")
 	}
 }
+
+// TestShellSettingTracksTheLoadedShell pins the `vehicle_changeSetting`
+// shell codes: CURRENT_SHELLS moves the shell a shot consumes, NEXT_SHELLS
+// the one the panel shows next, and the settings value carries both.
+func TestShellSettingTracksTheLoadedShell(t *testing.T) {
+	st := &clientState{loadedShell: 100, nextShell: 200}
+	applyShellSetting(st, settingCurrentShell, 300)
+	if st.loadedShell != 300 {
+		t.Fatalf("loaded = %d, want 300", st.loadedShell)
+	}
+	applyShellSetting(st, settingNextShell, 400)
+	if st.nextShell != 400 {
+		t.Fatalf("next = %d, want 400", st.nextShell)
+	}
+	if st.loadedShell != 300 {
+		t.Fatalf("loaded changed to %d by NEXT_SHELLS", st.loadedShell)
+	}
+
+	v := vehicleSettingsValue(7, st.loadedShell, st.nextShell)
+	if v.Kind != entdef.VSeq || len(v.Seq) != 2 {
+		t.Fatalf("settings = %+v, want two entries", v)
+	}
+	if code, _ := v.Seq[0].Get("code"); code.Uint != 0 {
+		t.Fatalf("entry 0 code = %d, want 0 (CURRENT_SHELLS)", code.Uint)
+	}
+	if val, _ := v.Seq[0].Get("value"); val.Int != 300 {
+		t.Fatalf("entry 0 value = %d, want 300", val.Int)
+	}
+	if code, _ := v.Seq[1].Get("code"); code.Uint != 1 {
+		t.Fatalf("entry 1 code = %d, want 1 (NEXT_SHELLS)", code.Uint)
+	}
+	if val, _ := v.Seq[1].Get("value"); val.Int != 400 {
+		t.Fatalf("entry 1 value = %d, want 400", val.Int)
+	}
+}

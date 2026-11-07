@@ -1182,7 +1182,9 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   the value's low byte as the next element id (0x9E → exposed method 80 out
   of range on the 11-method Vehicle, then a crash). Each shot also re-sends
   `OwnVehicle.vehicleAmmoList` with the fired shell's `quantity` decremented;
-  the list is the garage's saved layout, kept per session.
+  the list is the garage's saved layout, kept per session. The loaded shell
+  follows `vehicle_changeSetting` codes 0/1 (`CURRENT_SHELLS`/`NEXT_SHELLS`),
+  which re-send `vehicleSettings`.
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the

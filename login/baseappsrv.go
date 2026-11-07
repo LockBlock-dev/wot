@@ -367,6 +367,11 @@ type clientState struct {
 	// re-sends it: the client's ammo panel reads the count from this
 	// property and nothing else updates it.
 	ammoList entdef.Value
+	// loadedShell and nextShell are `VEHICLE_SETTING.CURRENT_SHELLS` (0)
+	// and `NEXT_SHELLS` (1): the shell a shot consumes and the one the
+	// client will load next. `vehicle_changeSetting` moves them.
+	loadedShell int32
+	nextShell   int32
 	// gunYaw is the turret angle this server reports, and gunTarget the one
 	// the client is aiming at. `trackTurret` walks one toward the other.
 	gunYaw    float64
@@ -1918,6 +1923,75 @@ func ownVehiclePropIndex(name string) int {
 	return -1
 }
 
+// The two shell settings the client sends through `vehicle_changeSetting`.
+const (
+	settingCurrentShell uint8 = 0
+	settingNextShell    uint8 = 1
+)
+
+// vehicleSettingsValue is `OwnVehicle.vehicleSettings`: the loaded shell
+// (`CURRENT_SHELLS`, 0) and the next one (`NEXT_SHELLS`, 1). The reference
+// sends both, and the ammo panel's next-shell slot reads the second.
+func vehicleSettingsValue(vehicleID uint32, loaded, next int32) entdef.Value {
+	setting := func(code uint8, value int32) entdef.Value {
+		return entdef.Value{Kind: entdef.VDict, Dict: []entdef.DictField{
+			{Name: "vehicleID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(vehicleID)}},
+			{Name: "code", Value: entdef.Value{Kind: entdef.VUint, Uint: uint64(code)}},
+			{Name: "value", Value: entdef.Value{Kind: entdef.VInt, Int: int64(value)}},
+		}}
+	}
+	return entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{setting(settingCurrentShell, loaded), setting(settingNextShell, next)}}
+}
+
+// applyShellSetting updates the session's loaded/next shell.
+func applyShellSetting(st *clientState, code uint8, value int32) {
+	switch code {
+	case settingCurrentShell:
+		st.loadedShell = value
+	case settingNextShell:
+		st.nextShell = value
+	}
+}
+
+// answerShellSetting handles `CURRENT_SHELLS` and `NEXT_SHELLS`: it moves the
+// session's shell and sends the updated `vehicleSettings`, so the next
+// `vehicle_shoot` consumes the shell the client shows as loaded.
+func (s *BaseAppServer) answerShellSetting(conn Transport, from *net.UDPAddr, st *clientState, code uint8, value int32) error {
+	s.mu.Lock()
+	applyShellSetting(st, code, value)
+	comp := st.ownVehicle
+	loaded, next := st.loadedShell, st.nextShell
+	vehicle := st.vehicle
+	s.mu.Unlock()
+	if comp.TypeID == 0 || vehicle == nil {
+		return nil
+	}
+	dt := entdef.Alias("VEHICLE_SETTINGS")
+	if dt == nil {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := entdef.NewCodec().Write(&buf, dt, vehicleSettingsValue(vehicle.ID, loaded, next)); err != nil {
+		s.logf("shell setting: encode: %v", err)
+		return nil
+	}
+	el, err := EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("vehicleSettings"), buf.Bytes())
+	if err != nil {
+		s.logf("shell setting: element: %v", err)
+		return nil
+	}
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		s.logf("shell setting: send: %v", err)
+		return nil
+	}
+	s.logf("shell setting %d = %d (loaded %d, next %d)", code, value, loaded, next)
+	return nil
+}
+
 // answerChangeSetting handles `Avatar.vehicle_changeSetting(code, value)`.
 //
 // The client's X key (`SiegeModeControl.__switchSiegeMode`) sends
@@ -1938,10 +2012,15 @@ func (s *BaseAppServer) answerChangeSetting(conn Transport, from *net.UDPAddr, s
 	if len(call.Args) < 2 || call.Args[0].Kind != entdef.VUint || call.Args[1].Kind != entdef.VInt {
 		return nil
 	}
-	if uint8(call.Args[0].Uint) != siegeModeSetting {
+	code := uint8(call.Args[0].Uint)
+	value := int32(call.Args[1].Int)
+	if code == settingCurrentShell || code == settingNextShell {
+		return s.answerShellSetting(conn, from, st, code, value)
+	}
+	if code != siegeModeSetting {
 		return nil
 	}
-	enable := call.Args[1].Int != 0
+	enable := value != 0
 	s.mu.Lock()
 	spec := st.gunSpec
 	vehicle := st.vehicle
@@ -2154,7 +2233,7 @@ func takeAmmo(ammo entdef.Value, shell int32) (entdef.Value, uint64, bool) {
 func (s *BaseAppServer) decrementAmmo(conn Transport, from *net.UDPAddr, st *clientState, comp nrlComponent) {
 	s.mu.Lock()
 	ammo := st.ammoList
-	shell := st.gunSpec.Dispersion.ShellCD
+	shell := st.loadedShell
 	s.mu.Unlock()
 	if ammo.Kind != entdef.VSeq || len(ammo.Seq) == 0 || shell == 0 {
 		return
