@@ -850,9 +850,10 @@ func TestStickerDecodesWhereTheShellHit(t *testing.T) {
 func TestResolveShotHitsTheTurret(t *testing.T) {
 	sh := shellSpec{Name: "test", Damage: 300, Pen: 400, Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2, Speed: 800}
 	boxes := dummyBoxes([3]float32{0, 0, 0}, 0)
-	// The hull's own top, from its box.
+	// The hull's own top, from its box; aim above the barrel, which covers
+	// the turret's middle band.
 	hullTop := dummyParts[0].Offset[1] + dummyParts[0].Bounds[1][1]
-	res := resolveShot(sh, [3]float32{0, hullTop + 0.4, 20}, [3]float32{0, 0, -1}, boxes)
+	res := resolveShot(sh, [3]float32{0, hullTop + 0.8, 20}, [3]float32{0, 0, -1}, boxes)
 	if !res.Hit {
 		t.Fatal("the shell passed over the tank: the turret is not a hit part")
 	}
@@ -959,5 +960,37 @@ func TestFiringPromotesTheNextShell(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no vehicleSettings with CURRENT_SHELLS=200 was sent")
+	}
+}
+
+// TestResolveShotHitsTheGun pins the barrel as a DEVICE part.
+//
+// The gun is a real hit part in the client (`TankPartIndexes.GUN`, its own
+// `Gun_01.havok` box and its own 25.4 mm in the item defs), and a shell that
+// gets through it damages the gun module and does NO hull damage — the hull's
+// health must not move, and the client's `VEHICLE_HIT_EFFECT`
+// `ARMOR_PIERced_DEVICE_DAMAGED` (6) is what its feedback turns into a
+// critical hit.
+func TestResolveShotHitsTheGun(t *testing.T) {
+	sh := shellSpec{Name: "test", Damage: 300, Pen: 400, Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2, Speed: 800}
+	boxes := dummyBoxes([3]float32{0, 0, 0}, 0)
+	gun := dummyParts[2]
+	// Square on the barrel, at its own height.
+	y := gun.Offset[1] + (gun.Bounds[0][1]+gun.Bounds[1][1])/2
+	res := resolveShot(sh, [3]float32{0, y, 20}, [3]float32{0, 0, -1}, boxes)
+	if !res.Hit {
+		t.Fatal("the shell passed through the barrel")
+	}
+	if res.Part != 3 {
+		t.Fatalf("part = %d, want 3 (GUN)", res.Part)
+	}
+	if res.Damage != 0 {
+		t.Fatalf("damage = %d, want 0 (a device hit does no hull damage)", res.Damage)
+	}
+	if res.Effect != hitEffectDeviceDamaged {
+		t.Fatalf("effect = %d, want %d (device damaged)", res.Effect, hitEffectDeviceDamaged)
+	}
+	if res.Flags&0x100 == 0 {
+		t.Fatalf("flags = %#x, want DEVICE_PIERCED_BY_PROJECTILE (0x100)", res.Flags)
 	}
 }

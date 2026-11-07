@@ -39,6 +39,9 @@ type dummyPart struct {
 	Offset [3]float32
 	// Armour by face: front (+Z), side (±X), rear (-Z), top (+Y).
 	Front, Side, Rear, Top float32
+	// Device marks a part that is a module, not armour: a shell that
+	// penetrates it damages the module and does NO hull damage (the gun).
+	Device bool
 }
 
 // dummyParts is the TOG II's hull and turret.
@@ -66,6 +69,18 @@ var dummyParts = []dummyPart{
 		Offset: [3]float32{0, 1.3553 + 0.704143, 1.81585},
 		Front:  114.3, Side: 76.2, Rear: 53.3, Top: 19,
 	},
+	{
+		// The gun is a DEVICE, not armour: a shell that penetrates its 25.4 mm
+		// damages the gun module and does no hull damage, which is why
+		// shooting a barrel shows a critical hit and no health bar movement.
+		// Box from `Gun_01.havok`, its origin at the turret's plus the
+		// chassis's `<gunPosition>0 0.46479 0.76407`.
+		Part:   3, // TankPartIndexes.GUN
+		Bounds: [2][3]float32{{-0.1589, -0.1617, -0.632}, {0.1589, 0.1617, 3.8129}},
+		Offset: [3]float32{0, 1.3553 + 0.704143 + 0.46479, 1.81585 + 0.76407},
+		Front:  25.4, Side: 25.4, Rear: 25.4, Top: 25.4,
+		Device: true,
+	},
 }
 
 // dummyHullBounds is the hull part's box, the bounds the hull's hit segment is
@@ -75,8 +90,9 @@ var dummyHullBounds = dummyParts[0].Bounds
 // `VEHICLE_HIT_EFFECT` codes the client's `DamageFromShotDecoder` maps to an
 // effect group.
 const (
-	hitEffectPierced    uint8 = 4
-	hitEffectNotPierced uint8 = 3
+	hitEffectPierced       uint8 = 4
+	hitEffectNotPierced    uint8 = 3
+	hitEffectDeviceDamaged uint8 = 6
 )
 
 // `VEHICLE_HIT_FLAGS`, as the reference's `ShellHit` sets them.
@@ -107,6 +123,9 @@ type hitBox struct {
 	Part   uint8
 	Bounds [2][3]float32
 	Armor  [4]float32
+	// Device marks a module part (the gun): a penetrating hit damages the
+	// module and does no hull damage.
+	Device bool
 }
 
 // intersect traces the ray origin+dir*t through the box. It returns the
@@ -232,7 +251,21 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 		Armor:    effective,
 		Pierced:  pen > effective,
 	}
-	if res.Pierced {
+	if box.Device {
+		// A module hit: the shell damages the device and the hull takes
+		// nothing. `ARMOR_PIERCED_DEVICE_DAMAGED` is the client's
+		// `VEHICLE_HIT_EFFECT` 6, which its feedback turns into a critical
+		// hit; a shell that does not get through the 25.4 mm is a plain
+		// non-penetration.
+		if res.Pierced {
+			res.Effect = hitEffectDeviceDamaged
+			res.Flags = hitFlagsPierced
+		} else {
+			res.Effect = hitEffectNotPierced
+			res.Flags = hitFlagDirect | hitFlagArmorNotPierced
+		}
+		res.Damage = 0
+	} else if res.Pierced {
 		res.Damage = int(math.Round(sh.Damage * (1 + (rand.Float64()*2-1)*damageSpread)))
 		res.Effect = hitEffectPierced
 		res.Flags = hitFlagsPierced
@@ -304,6 +337,7 @@ func dummyBoxes(pos [3]float32, yaw float32) []hitBox {
 			Part:   p.Part,
 			Bounds: p.Bounds,
 			Armor:  [4]float32{p.Front, p.Side, p.Rear, p.Top},
+			Device: p.Device,
 		})
 	}
 	return out

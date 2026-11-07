@@ -1225,12 +1225,17 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
   HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
   put every hole a few tenths of a metre off the aim point.
-- **The dummy has a hull AND a turret hit part.** `dummyParts` carries both
+- **The dummy has hull, turret AND gun hit parts.** `dummyParts` carries the
   boxes with their own frames and armour (hull 76.2/76.2/50.8/25.4, turret
-  114.3/76.2/53.3/19 from the item defs' per-material table), the trace takes
-  the nearest, and the segment carries that part's index and bounds. With
-  only the hull, a shell aimed at the turret passed over the hull's 2.088 m
-  top and did nothing at all. The shell's `<effects>` is a packed BLOB:
+  114.3/76.2/53.3/19 from the item defs' per-material table, gun 25.4), the
+  trace takes the nearest, and the segment carries that part's index and
+  bounds. With only the hull, a shell aimed at the turret passed over the
+  hull's 2.088 m top and did nothing at all. The gun is a DEVICE
+  (`Device: true`): a penetrating hit damages the gun module and does NO hull
+  damage — `VEHICLE_HIT_EFFECT.ARMOR_PIERced_DEVICE_DAMAGED` (6), which the
+  client's feedback turns into a critical hit, and the health bar does not
+  move. The module's own damaged STATE (the "gun damaged" icon and the slower
+  reload) is not modelled yet. The shell's `<effects>` is a packed BLOB:
   read it with `StrVal`, not `AsString`, or the sticker lookup silently
   fails. A kill also re-sends the arena's
   `AvatarVehiclesInfo.vehicles` with the victim's `isAlive` false + a
