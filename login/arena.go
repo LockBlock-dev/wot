@@ -1665,10 +1665,21 @@ func publicInfoOnlyRun(e *Entity, withFixed bool) ([]byte, error) {
 func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *clientState) error {
 	s.mu.Lock()
 	arena := st.arena
-	s.mu.Unlock()
 	if arena == nil {
+		s.mu.Unlock()
 		return nil // not in a battle: nothing to leave
 	}
+	// Stop the ticker BEFORE dropping the resend queue. A tick that lands
+	// between the forget and the arena clear is tracked again and then
+	// resent for the whole give-up window; the client, now back in its login
+	// state, drops those resends as "unexpected packet on external
+	// interface" and disconnects.
+	st.arena = nil
+	st.entered = false
+	st.resetSent = true
+	st.vehicle = nil
+	st.avatar = nil
+	s.mu.Unlock()
 	// Everything queued refers to entities the client is about to drop.
 	s.resend.forget(st.resendKey)
 	resetApp := answerApp([]byte{elResetEntities, 0})
@@ -1683,13 +1694,6 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	if s.cfg.Arenas != nil && s.cfg.Arenas.Leave != nil {
 		s.cfg.Arenas.Leave(st.accountID)
 	}
-	s.mu.Lock()
-	st.arena = nil
-	st.entered = false
-	st.resetSent = true
-	st.vehicle = nil
-	st.avatar = nil
-	s.mu.Unlock()
 	s.logf("stage2 %s: left arena %d — reset sent, back to the lobby", from, arena.ArenaID)
 	return nil
 }

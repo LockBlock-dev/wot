@@ -1148,7 +1148,11 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   and drops a separate `1a/76` packet as "Dropping unexpected packet on
   external interface". The client then logs `REASON_GENERAL_NETWORK` ×6 and
   `HANGAR LOADING STATE: DISCONNECTED`. Fixed by concatenating the two into
-  one packet; `TestEnterAccountSendsTheSequence` pins it.
+  one packet; `TestEnterAccountSendsTheSequence` pins it. The resend queue
+  must also be dropped AFTER the ticker is stopped (`st.arena = nil`): a
+  tick tracked between `forget` and the clear is resent for the whole
+  give-up window, and the client drops those as "unexpected packet" and
+  disconnects.
 - **Siege mode (X) works.** The client sends
   `Avatar.vehicle_changeSetting(VEHICLE_SETTING.SIEGE_MODE_ENABLED=3, enable)` —
   cell index 12, `UINT8` code + `INT32` value, fixed 5 bytes. The reply is
