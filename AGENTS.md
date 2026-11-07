@@ -1235,6 +1235,17 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   each component's `<price>` in the nation's `components/*.xml` — the
   definitions live under the packed file's `<shared>` child, not its root —
   and `ShopItemPrices` uses it instead of the flat 100-credit stand-in.
+- **The shell flies.** `login/ballistics.go` ports the reference's `gun.rs`
+  `fly`: the shell leaves the gun at its speed, gravity pulls it down, and it
+  lands on the first vehicle it meets, on the terrain, or at its
+  `maxDistance` — `landingVehicle`/`landingTerrain`/`landingRange`. The
+  distance flown is what `penAt`/`damageAt` fall off with, and a shot that
+  lands on the ground sends `Avatar.explodeProjectile` (the crater and the
+  explosion, its shot id flagged `| 0x40000000` so the client shows it from
+  the arguments) plus the `stopTracer` at the landing point.
+- **Magazines and bursts.** The gun's `<clip>`/`<burst>` (`count` and `rate`
+  per minute, `readClip`) are read into the dispersion spec; a magazine gun
+  reloads one shell at a time until it is empty, then the whole magazine.
 - **The tank collides with the map's static models.** `login/havok.go` ports
   the Havok tagfile decoder, `login/collision.go` the `hknpCompressedMeshShape`
   triangles and the `HKBodyFlagsData` bounds, and `login/statics.go` the

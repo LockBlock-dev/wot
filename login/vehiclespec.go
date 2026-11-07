@@ -58,6 +58,15 @@ type gunSpec struct {
 	// that clears its hull at the front can still depress over the side.
 	MinPitchCurve pitchCurve
 	MaxPitchCurve pitchCurve
+	// MagazineSize is the shells in a full magazine, 1 without one: the gun
+	// reloads it whole once empty, in its reload time. MagazineInterval is
+	// the seconds between two of its shots.
+	MagazineSize     uint32
+	MagazineInterval float32
+	// BurstSize is the shells the gun fires each time it is fired, 1 without
+	// bursts; BurstInterval the seconds between two of them.
+	BurstSize     uint32
+	BurstInterval float32
 }
 
 // shellSpec is the default shell's damage model: the gun's mounted `shots`
@@ -181,6 +190,15 @@ type dispersionSpec struct {
 	// Shell is the default shell's damage model, from the gun's `shots` entry
 	// and the shell's own def.
 	Shell shellSpec
+	// MagazineSize is the shells in a full magazine, 1 without one: the gun
+	// reloads it whole once empty, in its reload time. MagazineInterval is
+	// the seconds between two of its shots.
+	MagazineSize     uint32
+	MagazineInterval float32
+	// BurstSize is the shells the gun fires each time it is fired, 1 without
+	// bursts; BurstInterval the seconds between two of them.
+	BurstSize     uint32
+	BurstInterval float32
 }
 
 // gunSpeedCache is keyed by "<nation>/<vehicle>/<turret>/<gun>": the same
@@ -839,24 +857,32 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 	if err != nil {
 		return dispersionSpec{}, fmt.Errorf("vehiclespec: %s/%s: %w", gunsName, gun, err)
 	}
+	// The magazine and the burst, as `_readGunClip`/`_readGunBurst` read them:
+	// a count and a rate per minute; a count of 1 has no interval.
+	magSize, magInterval := readClip(gdf, "clip")
+	burstSize, burstInterval := readClip(gdf, "burst")
 	return dispersionSpec{
-		Angle:          math.Atan(radius / 100),
-		AimingTime:     aiming,
-		Movement:       move / 3.6,
-		Rotation:       rot * math.Pi / 180,
-		TurretRotation: turretRot * math.Pi / 180,
-		ShotSpeed:      shell.Speed,
-		AfterShot:      afterShot,
-		Piercing:       shell.Pen,
-		Shell:          shell,
-		ShellCD:        shellCD,
-		ReloadTime:     reload,
-		SiegeOn:        siegeOn,
-		SiegeOff:       siegeOff,
-		HasSiege:       hasSiege,
-		WheelRadii:     wheelRadii,
-		SiegeLimits:    siegeLimits,
-		HasSiegeLimits: hasSiegeLimits,
+		Angle:            math.Atan(radius / 100),
+		AimingTime:       aiming,
+		Movement:         move / 3.6,
+		Rotation:         rot * math.Pi / 180,
+		TurretRotation:   turretRot * math.Pi / 180,
+		ShotSpeed:        shell.Speed,
+		AfterShot:        afterShot,
+		Piercing:         shell.Pen,
+		Shell:            shell,
+		ShellCD:          shellCD,
+		ReloadTime:       reload,
+		SiegeOn:          siegeOn,
+		SiegeOff:         siegeOff,
+		HasSiege:         hasSiege,
+		WheelRadii:       wheelRadii,
+		SiegeLimits:      siegeLimits,
+		HasSiegeLimits:   hasSiegeLimits,
+		MagazineSize:     magSize,
+		MagazineInterval: magInterval,
+		BurstSize:        burstSize,
+		BurstInterval:    burstInterval,
 	}, nil
 }
 
@@ -1232,4 +1258,28 @@ func interpolateByDistance(near, far, distance float64) float64 {
 		return v
 	}
 	return 0
+}
+
+// readClip reads a gun's `<clip>` or `<burst>`: its shell count and its rate
+// per minute, turned into the seconds between two shells. A count of 1 is no
+// magazine and no interval.
+func readClip(gun *entdef.Section, name string) (uint32, float32) {
+	sec := gun.Child(name)
+	if sec == nil {
+		return 1, 0
+	}
+	count := uint32(1)
+	if c := sec.Child("count"); c != nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(c.StrVal())); err == nil && v > 1 {
+			count = uint32(v)
+		}
+	}
+	if count <= 1 {
+		return 1, 0
+	}
+	rate, err := floatChild(sec, "rate")
+	if err != nil || rate <= 0 {
+		return count, 0
+	}
+	return count, float32(60 / rate)
 }

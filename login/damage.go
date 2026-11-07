@@ -231,13 +231,13 @@ func resolveShot(sh shellSpec, origin, dir [3]float32, boxes []hitBox) shotResul
 		if !ok || (res.Hit && t >= res.Distance) {
 			continue
 		}
-		res = rollShot(sh, box, t, point, normal, localNormal, face, dir)
+		res = rollShot(sh, box, t, point, normal, localNormal, face, dir, float64(t))
 	}
 	return res
 }
 
 // rollShot rolls one hit on one part.
-func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3]float32, face int, dir [3]float32) shotResult {
+func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3]float32, face int, dir [3]float32, distance float64) shotResult {
 	armor := box.armorForFace(face, localNormal)
 	// The impact angle: the cosine between the shell's path and the face's
 	// outward normal. A grazing hit meets more armour.
@@ -248,7 +248,7 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 	// The shell's penetration falls off with the distance it flew, and
 	// varies either way by its own randomization: a normal distribution,
 	// clamped to ±1 and scaled by `PenRandomization`.
-	pen := sh.penAt(float64(t)) * (1 + clampF64(normalRandom()*0.5, -1, 1)*sh.PenRandomization)
+	pen := sh.penAt(distance) * (1 + clampF64(normalRandom()*0.5, -1, 1)*sh.PenRandomization)
 	// Normalization: an AP shell turns toward the armour's normal as it hits,
 	// more so when its caliber is over twice the armour (overmatch).
 	if sh.NormalizationAngle > 0 && cos < 1 {
@@ -294,7 +294,7 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 		}
 		res.Damage = 0
 	} else if res.Pierced {
-		res.Damage = int(math.Round(sh.damageAt(float64(t)) * (1 + (rand.Float64()*2-1)*damageSpread)))
+		res.Damage = int(math.Round(sh.damageAt(distance) * (1 + (rand.Float64()*2-1)*damageSpread)))
 		res.Effect = hitEffectPierced
 		res.Flags = hitFlagsPierced
 	} else {
@@ -303,7 +303,7 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 		// An HE shell that does not pierce explodes on the armour: half its
 		// damage at the armour, less what the armour absorbs.
 		if sh.KindIndex == 1 {
-			if dmg := 0.5*sh.damageAt(float64(t)) - 1.3*float64(effective); dmg > 0 {
+			if dmg := 0.5*sh.damageAt(distance) - 1.3*float64(effective); dmg > 0 {
 				res.Damage = int(math.Round(dmg * (1 + (rand.Float64()*2-1)*damageSpread)))
 				res.Flags |= hitFlagExploded
 			}
@@ -633,11 +633,47 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if length < 1e-6 {
 		return
 	}
-	dir := [3]float32{v[0] / length, v[1] / length, v[2] / length}
-	res := resolveShot(sh, marker.Position, dir, dummyBoxes(dummyPos, dummyYaw))
-	if !res.Hit {
+	// The shell flies: gravity pulls it down and it lands on the first
+	// vehicle it meets, on the terrain, or at its `maxDistance`. A shot that
+	// lands on the ground is an explosion the client draws; a vehicle hit's
+	// distance is what the penetration falls off with.
+	s.mu.Lock()
+	terrain := st.terrain
+	s.mu.Unlock()
+	landing := flyShell(sh, marker.Position, v, terrain, dummyBoxes(dummyPos, dummyYaw))
+	if landing.Kind != landingVehicle {
+		// A miss: the client drew its own shot, so only the end and, for the
+		// ground, the explosion go out. `explodeProjectile`'s shot id is
+		// flagged unknown (`| 0x40000000`) so the client shows it from these
+		// arguments alone.
+		var app []byte
+		app = append(app, EncodeSelectPlayerEntity()...)
+		if el, err := stopTracerElement(avatar, shotID, landing.Point); err == nil {
+			app = append(app, el...)
+		}
+		if landing.Kind == landingTerrain {
+			if el, err := explodeProjectileElement(avatar, uint32(shotID)|0x40000000, sh, landing); err == nil {
+				app = append(app, el...)
+			}
+		}
+		if len(app) > 0 {
+			st.sendMu.Lock()
+			seq, cumul := s.nextSeq(st)
+			err := s.sendReliableLocked(conn, from, st, app, seq, cumul)
+			st.sendMu.Unlock()
+			if err != nil {
+				s.logf("arena %d: miss: %v", arenaID, err)
+			} else if landing.Kind == landingTerrain {
+				s.logf("arena %d: shot %s landed on the ground at %v after %.0f m",
+					arenaID, sh.Name, landing.Point, landing.Distance)
+			} else {
+				s.logf("arena %d: shot %s flew its %.0f m and landed at %v",
+					arenaID, sh.Name, landing.Distance, landing.Point)
+			}
+		}
 		return
 	}
+	res := landing.Hit
 	// The module or crewman behind the armour: a penetrating hit damages one,
 	// and the client is told which one (`onExtraHitted`) and, for a wrecked
 	// track, to break its visual (`startOrUpdateExtraFromOutside`).

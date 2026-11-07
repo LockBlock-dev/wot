@@ -378,6 +378,12 @@ type clientState struct {
 	// modules is the dummy's module and crew damage, one entry per
 	// dummyModules entry; nil until the first module hit.
 	modules []moduleState
+	// terrain is the arena's ground, for the shell's flight: a shot lands on
+	// it when it misses everything else.
+	terrain *Terrain
+	// magazineShells is how many shells of the loaded one the gun has left
+	// before its whole reload: 1 for a gun without a magazine.
+	magazineShells uint32
 	// nrlAlloc hands out the arena's NRL node ids; it outlives the entry so a
 	// component created later (a fire) gets a fresh node.
 	nrlAlloc *nrlNodeAlloc
@@ -2387,6 +2393,20 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	s.mu.Lock()
 	comp := st.ownVehicle
 	reload := st.gunSpec.Dispersion.ReloadTime
+	// A magazine gun reloads one shell at a time until it is empty, then the
+	// whole magazine: `_readGunClip`'s `count` and `rate`.
+	magSize := st.gunSpec.Dispersion.MagazineSize
+	if magSize > 1 {
+		if st.magazineShells == 0 {
+			st.magazineShells = magSize
+		}
+		st.magazineShells--
+		if st.magazineShells > 0 {
+			reload = float64(st.gunSpec.Dispersion.MagazineInterval)
+		} else {
+			st.magazineShells = magSize
+		}
+	}
 	arenaID := uint64(0)
 	if st.arena != nil {
 		arenaID = st.arena.ArenaID
@@ -2765,6 +2785,9 @@ func stepTurret(cur, target, step float64) float64 {
 // bearing is therefore always a whole swing ahead, and the client jumps to it.
 // Stepping the server's yaw at the same rate keeps the two within one tick.
 func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, spec gunSpec, terrain *Terrain, arenaDef *ArenaDef, statics *staticScene) {
+	s.mu.Lock()
+	st.terrain = terrain
+	s.mu.Unlock()
 	// `SERVER_TICK_LENGTH` is 0.1 in the client's own `common/constants.pyc`
 	// and the reference ticks at 100 ms, but the client draws the tank at
 	// whatever the last position update said (see `arenaTickPeriod`), so the
