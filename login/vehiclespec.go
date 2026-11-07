@@ -828,9 +828,11 @@ func shellDataIn(pkg, nation, name string) (shellSpec, error) {
 			damage = v
 		}
 	}
+	// `effects` is a packed BLOB in the shipped defs, not a leaf string:
+	// `AsString` returns "" for it, `StrVal` decodes it.
 	effects := ""
 	if e := sh.Child("effects"); e != nil {
-		effects = strings.TrimSpace(e.AsString())
+		effects = strings.TrimSpace(e.StrVal())
 	}
 	shell := shellSpec{
 		Name:         name,

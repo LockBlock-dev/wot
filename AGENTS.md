@@ -1191,7 +1191,9 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   the own vehicle, and the shell hole is the `Vehicle.damageStickers`
   `ALL_CLIENTS` property (one `VEHICLE_HIT_POINT` per pierced hit, the
   segment context the `damage_stickers.xml` index of the shell's
-  `targetStickers/armorPierced`). A kill also re-sends the arena's
+  `targetStickers/armorPierced`). The shell's `<effects>` is a packed BLOB:
+  read it with `StrVal`, not `AsString`, or the sticker lookup silently
+  fails. A kill also re-sends the arena's
   `AvatarVehiclesInfo.vehicles` with the victim's `isAlive` false + a
   `deathInfo` and the shooter's `stFrags`/`frags` bumped; that is what greys
   the row, shows the kill message and fills the kill column.

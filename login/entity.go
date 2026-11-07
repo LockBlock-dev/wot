@@ -315,7 +315,12 @@ func EncodeClientMethodCall(e *Entity, method string, args []entdef.Value) ([]by
 }
 
 // EncodePropertyUpdate builds a property update element: the property's
-// index plus the base, then its value encoded from the defs.
+// client-server FullIndex plus the base, then its value encoded from the defs.
+//
+// The id is the FullIndex: `EntityDispatch.Properties` is filled from
+// `CSPropsOrdered()` (fixed sizes first, then variable by header width), so
+// the position in that table is the index the client's `updateEntity` run
+// addresses, not the property's position in the entity def.
 func EncodePropertyUpdate(e *Entity, name string) ([]byte, error) {
 	if e == nil || e.Type == nil {
 		return nil, fmt.Errorf("wotlogin: property update: no entity type")

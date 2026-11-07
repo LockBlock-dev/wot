@@ -252,8 +252,9 @@ func TestDamageStickersUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("damageStickers update: %v", err)
 	}
-	if el[0] <= entityPropertyBase {
-		t.Fatalf("damageStickers id = %#x, want above the property base %#x", el[0], entityPropertyBase)
+	// The id is the client-server FullIndex (33), not the def position.
+	if want := byte(entityPropertyBase + 33); el[0] != want {
+		t.Fatalf("damageStickers id = %#x, want %#x (FullIndex 33)", el[0], want)
 	}
 	if len(el) < 12 {
 		t.Fatalf("damageStickers = %d B, want the hit point payload", len(el))
@@ -491,5 +492,28 @@ func TestKillUpdatesVehiclesInfo(t *testing.T) {
 	s.killVehiclesInfo(st, 101, 100)
 	if st.infoKills != 2 {
 		t.Fatalf("kills = %d, want 2", st.infoKills)
+	}
+}
+
+// TestEBRSticker pins the packed-BLOB effects path: the EBR 105's shell
+// names `mainAPCR` in a TypeBlob node, which `AsString` cannot read, and
+// resolves to the `main_hole` sticker (7).
+func TestEBRSticker(t *testing.T) {
+	pkg := FindScriptsPkg()
+	if pkg == "" {
+		t.Skip("no scripts.pkg")
+	}
+	d, err := shellDataIn(pkg, "france", "_105mm_OFL_105_D_1504_EBR")
+	if err != nil {
+		t.Fatalf("shellDataIn: %v", err)
+	}
+	if !d.HasPiercedSticker {
+		t.Fatal("the APCR shell has no pierced sticker")
+	}
+	if d.PiercedSticker != 7 {
+		t.Fatalf("pierced sticker = %d, want 7 (main_hole)", d.PiercedSticker)
+	}
+	if d.EffectsIndex == 0 {
+		t.Fatal("effects index = 0, want the mainAPCR slot")
 	}
 }
