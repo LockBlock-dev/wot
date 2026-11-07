@@ -395,13 +395,6 @@ type clientState struct {
 	// it is dropped as "unexpected packet on external interface" and the
 	// client reports REASON_GENERAL_NETWORK and disconnects.
 	postHold bool
-	// pairDue, when non-zero, is when a leave's `selectPlayerEntity + showGUI`
-	// pair is due. It goes out AFTER the Account's creation because the
-	// client's `selectPlayerEntity` handler drops a packet whose source is
-	// not one of its channels, and during the battle teardown the BaseApp's
-	// proxy channel is closed: the pair in the login-reply packet is dropped
-	// and the hangar never loads.
-	pairDue time.Time
 	// accountDue, when non-zero, is when a leave's login reply is due: the
 	// client is still tearing down the battle's space (its NRL hub is
 	// destroyed about a second after leaveArena), and creating the Account
@@ -1492,7 +1485,7 @@ func (r QueueResult) Ok() bool { return r.Code == 0 }
 //
 // seq is the next free reliable seq on the channel; the caller owns the
 // numbering so the whole stage-2 stream stays contiguous.
-func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clientState, seq, cumul uint32, withCreate, deferPair bool) (uint32, error) {
+func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clientState, seq, cumul uint32, withCreate bool) (uint32, error) {
 	if !s.cfg.CreateBasePlayer || s.cfg.Dispatch == nil {
 		return seq, nil
 	}
@@ -1526,15 +1519,14 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		}
 		// `serveBulk` frames the same `1a/76` small as
 		// `EncodeTickSync(0x40) + dict`; keep that head inside the packet.
-		// A leave defers it instead: see `pairDue`.
-		if deferPair {
-			s.mu.Lock()
-			st.pairDue = time.Now().Add(leavePairDelay)
-			s.mu.Unlock()
-		} else {
-			app = append(app, EncodeTickSync(0x40)...)
-			app = append(app, pair...)
-		}
+		// The pair MUST ride the same packet as `CreateBasePlayer`: the
+		// client's `LoginReplyFilter` only passes the packet carrying the
+		// login-reply flag, and a separate `1a/76` packet is dropped as
+		// "unexpected packet on external interface" — measured after a
+		// `leaveArena`, the Account was created, the lobby app started, and
+		// the pair sent 600 ms later killed the connection.
+		app = append(app, EncodeTickSync(0x40)...)
+		app = append(app, pair...)
 		s.checkWire(app)
 		if err := s.sendReliable(conn, from, st, app, seq, cumul); err != nil {
 			return seq, err
@@ -2727,13 +2719,6 @@ func (s *BaseAppServer) tickEpoch() uint32 {
 // works because its reliable channel carries nothing else. Ours now carries
 // nothing else either, so the tick rides the same stream; the unreliable form
 // is the fallback for a deep backlog (see `arenaTickReliableBacklog`).
-// leavePairDelay is how long after a leave's login reply the
-// `selectPlayerEntity + showGUI` pair goes out. It must clear the client's
-// LoginReplyFilter (about half a second after the reply) and beat the battle
-// teardown, which lands about 0.8 s after it: measured, the client's NRL hub
-// is destroyed 821 ms after the Account is created.
-const leavePairDelay = 600 * time.Millisecond
-
 // leaveReplyDelay is how long after a leave's enableEntities the Account is
 // created. The client's battle space teardown (its NRL hub destruction) lands
 // about 1.1 s after leaveArena; creating the Account before it finishes is
@@ -3229,7 +3214,7 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 			return nil
 		}
 		s.mu.Unlock()
-		next, err := s.enterAccount(conn, from, st, seq, cumul, needCreate, needCreate)
+		next, err := s.enterAccount(conn, from, st, seq, cumul, needCreate)
 		if err != nil {
 			s.logf("stage2 %s: enterAccount: %v", from, err)
 			return nil
@@ -3902,34 +3887,12 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		// behind the gap, which is how the BATTLE period update was lost and
 		// the client stayed at PREBATTLE with `isOnArena` false — unable to
 		// move or aim.
-		if !st.pairDue.IsZero() && !now.Before(st.pairDue) {
-			st.pairDue = time.Time{}
-			addr := st.stage2Addr
-			seq, cumul := st.postSeq, st.postCumul
-			s.mu.Unlock()
-			pair, err := BuildSessionDict(int64(accountIDFor(st.accountID, st.name)), st.admittedAt, time.Now())
-			if err != nil {
-				s.logf("stage2 %s: deferred showGUI: %v", addr, err)
-			} else {
-				app := append(EncodeTickSync(0x40), pair...)
-				if err := s.sendReliable(conn, addr, st, app, seq, cumul); err != nil {
-					s.logf("stage2 %s: deferred showGUI: %v", addr, err)
-				} else {
-					s.logf("stage2 %s: deferred selectPlayerEntity + showGUI sent", addr)
-					s.mu.Lock()
-					st.postSeq = seq + 1
-					s.mu.Unlock()
-				}
-			}
-			s.mu.Lock()
-			continue
-		}
 		if !st.accountDue.IsZero() && !now.Before(st.accountDue) {
 			st.accountDue = time.Time{}
 			seq, cumul := st.postSeq, st.postCumul
 			addr := st.stage2Addr
 			s.mu.Unlock()
-			next, err := s.enterAccount(conn, addr, st, seq, cumul, true, true)
+			next, err := s.enterAccount(conn, addr, st, seq, cumul, true)
 			if err != nil {
 				s.logf("stage2 %s: deferred enterAccount: %v", addr, err)
 			} else {
@@ -4359,7 +4322,7 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 	// SelectPlayerEntity + showGUI: the calls that make the hangar
 	// appear. The bundle already created the Account entity, so this
 	// only selects it and shows the GUI.
-	next, err := s.enterAccount(conn, from, st, statsSeq+1, dictCumul, false, false)
+	next, err := s.enterAccount(conn, from, st, statsSeq+1, dictCumul, false)
 	if err != nil {
 		return err
 	}

@@ -369,24 +369,16 @@ func (s *BaseAppServer) enterArena(conn Transport, from *net.UDPAddr, st *client
 	if err := s.mintPost(conn, from, st, resetApp); err != nil {
 		return err
 	}
-	// The switchBaseApp (0x44): the client's `SmartServerConnection` has to
-	// revert to the BaseApp BEFORE the new Account is created. Without it the
-	// client creates the Account on the battle's connection, and
-	// `Account.onBecomePlayer` → `BigWorld.clearAllSpaces()` tears that
-	// connection down ~0.8 s later, destroying the Account with it:
-	// `NRL Integration: Client Hub destroyed`, `Account.onBecomeNonPlayer`,
-	// DISCONNECTED. The element is `[0x44][ip4][port BE][00 00][01]`, the
-	// same core the stage-2 redirect carries (`ServerConnection::switchBaseApp`).
-	if s.cfg.Redirect != nil {
-		if ip := s.cfg.Redirect.IP.To4(); ip != nil {
-			app := []byte{0x44, ip[0], ip[1], ip[2], ip[3],
-				byte(s.cfg.Redirect.Port >> 8), byte(s.cfg.Redirect.Port), 0x00, 0x00, 0x01}
-			if err := s.mintPost(conn, from, st, app); err != nil {
-				return err
-			}
-			s.logf("stage2 %s: leaveArena switchBaseApp %v", from, s.cfg.Redirect)
-		}
-	}
+	// No switchBaseApp here. The genuine server sends it because its battle
+	// runs on a DIFFERENT BaseApp: the client rebinds, re-handshakes against
+	// the battle app and gets a fresh login reply there. This server serves
+	// the lobby and the battle on one stage-2 endpoint, so a `0x44` pointing
+	// at that same endpoint makes the client tear its connection down and
+	// re-handshake against itself — measured: the client switched to a
+	// garbage address, exhausted 60 attempts and disconnected. The battle
+	// entry works without it (the client rebinds its socket when it builds
+	// the battle app and the server follows the new source address), so the
+	// element is deliberately not sent.
 	s.mu.Lock()
 	st.arena = h
 	st.entered = false // the reset cleared the client's entities

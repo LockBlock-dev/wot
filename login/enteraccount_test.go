@@ -48,7 +48,7 @@ func TestEnterAccountSendsTheSequence(t *testing.T) {
 	st := &clientState{entityID: 0x1234, name: "playerone", blockKey: "0123456789abcdef"}
 
 	tr := &fakeTransport{}
-	if _, err := s.enterAccount(tr, addr, st, 3, 0, true, false); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
 		t.Fatalf("enterAccount: %v", err)
 	}
 	if len(tr.writes) != 1 {
@@ -123,11 +123,11 @@ func TestEnterAccountIsOnce(t *testing.T) {
 	st := &clientState{entityID: 1, name: "x", blockKey: "0123456789abcdef"}
 
 	tr := &fakeTransport{}
-	if _, err := s.enterAccount(tr, addr, st, 3, 0, true, false); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	first := len(tr.writes)
-	if _, err := s.enterAccount(tr, addr, st, 6, 0, true, false); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 6, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(tr.writes) != first {
@@ -141,7 +141,7 @@ func TestEnterAccountIsOffByDefault(t *testing.T) {
 	s.cfg.CreateBasePlayer = false
 	tr := &fakeTransport{}
 	if _, err := s.enterAccount(tr, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
-		&clientState{entityID: 1, blockKey: "0123456789abcdef"}, 3, 0, true, false); err != nil {
+		&clientState{entityID: 1, blockKey: "0123456789abcdef"}, 3, 0, true); err != nil {
 		t.Fatal(err)
 	}
 	if len(tr.writes) != 0 {
@@ -192,7 +192,7 @@ func TestLoginReplyHoldsTheTicksUntilTheClientSpeaks(t *testing.T) {
 		stage2Addr: addr, tickPeriod: PostTickPeriod,
 	}
 	tr := &fakeTransport{}
-	if _, err := s.enterAccount(tr, addr, st, 3, 0, true, false); err != nil {
+	if _, err := s.enterAccount(tr, addr, st, 3, 0, true); err != nil {
 		t.Fatalf("enterAccount: %v", err)
 	}
 	if !st.postHold {
@@ -297,22 +297,21 @@ func TestLeaveReplyWaitsForTheSpaceTeardown(t *testing.T) {
 	if !st.postHold {
 		t.Fatal("the deferred reply did not hold the ticks")
 	}
-	// The `selectPlayerEntity + showGUI` pair is deferred past the battle
-	// teardown: the client's handler drops a packet whose source is not one
-	// of its channels, and the proxy channel is closed while the cell one is
-	// torn down.
-	if st.pairDue.IsZero() {
-		t.Fatal("the showGUI pair was not deferred")
+	// The `selectPlayerEntity + showGUI` pair rides the SAME packet as
+	// `CreateBasePlayer`: the client's `LoginReplyFilter` passes only the
+	// packet carrying the login-reply flag, so a separate pair packet is
+	// dropped as "unexpected packet on external interface" and the client
+	// disconnects (measured: the Account came up, the lobby app started, and
+	// the pair 600 ms later killed the connection).
+	clear, err := decryptBlowfish(st.blockKey, tr.writes[0][4:])
+	if err != nil {
+		t.Fatal(err)
 	}
-	s.sweepStage2(tr, time.Now())
-	if len(tr.writes) != 1 {
-		t.Fatalf("%d packets before the pair's window, want 1", len(tr.writes))
+	app, err := frameApp(clear)
+	if err != nil {
+		t.Fatal(err)
 	}
-	s.mu.Lock()
-	st.pairDue = time.Now().Add(-time.Second)
-	s.mu.Unlock()
-	s.sweepStage2(tr, time.Now())
-	if len(tr.writes) != 2 {
-		t.Fatalf("%d packets after the pair's window, want 2 (the login reply and the pair)", len(tr.writes))
+	if !bytes.Contains(app, []byte{0x13, 0x40, elSelectPlayerEntity, byte(entityMethodBase + 40)}) {
+		t.Fatalf("app = % x, want the 1a/76 pair inside the login reply", app)
 	}
 }
