@@ -380,12 +380,17 @@ type clientState struct {
 	modules []moduleState
 	// postHold stops the login phase's 10 Hz ticks until the client speaks
 	// again. It is set when a login reply goes out (the leave's Account
-	// re-entry) and cleared by the client's own next datagram: the client's
+	// re-entry) and cleared by the client's first LOBBY call: the client's
 	// `LoginReplyFilter` only passes packets whose byte 146 is the login-reply
-	// flag while the login is in flight, and a 28 B tick has no byte 146 at
-	// all, so it is dropped as "unexpected packet on external interface" and
-	// the client reports REASON_GENERAL_NETWORK and disconnects.
-	postHold   bool
+	// flag while the login is in flight, and a tick has no byte 146 at all, so
+	// it is dropped as "unexpected packet on external interface" and the
+	// client reports REASON_GENERAL_NETWORK and disconnects.
+	postHold bool
+	// postHoldAt is when the login reply went out. The filter stays armed for
+	// about a second after it — the client is still loading the hangar — so
+	// the ticks also wait out postHoldWindow from here, whatever the client
+	// sends in the meantime.
+	postHoldAt time.Time
 	infoDummy  int
 	infoPlayer int
 	infoKills  int
@@ -1296,6 +1301,23 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 	return nil
 }
 
+// hasBaseCall reports whether a client app carries a base entity method
+// element (0x88..0xFE), which is what the lobby's sync calls are. The
+// battle's own calls are cell methods (0x10..0x4D) and do not count.
+func hasBaseCall(app []byte) bool {
+	// The opener is the authenticate element: `[02][key u32]`.
+	off := 5
+	for off+3 <= len(app) {
+		id := app[off]
+		n := int(app[off+1]) | int(app[off+2])<<8
+		if id >= entityMethodBase {
+			return true
+		}
+		off += 3 + n
+	}
+	return false
+}
+
 // noteReliable reads the channel footers of one decrypted client datagram
 // and does the two things they carry: retire our resend queue (the
 // client's cumulative ack) and advance our own cumul watermark (the
@@ -1324,15 +1346,20 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	if len(clear) < 2+tr {
 		return
 	}
-	// The client's first APP CALL after a login reply ends the login: its
-	// LoginReplyFilter is gone from then on, so the ticks may resume. An ack
-	// is not enough — the client acks the login reply immediately (its
-	// ack-only datagram carries just the 5-byte authenticate element) while
-	// the filter stays armed for another second, so releasing on any datagram
-	// let the 10 Hz ticker run straight into the filter and the drop was a
-	// fatal `REASON_GENERAL_NETWORK`.
-	if len(clear) > 2+tr+5 {
+	// The client's first LOBBY call after a login reply ends the login: its
+	// LoginReplyFilter is gone from then on, so the ticks may resume. Neither
+	// an ack nor a battle call is enough: the client acks the login reply at
+	// once (its ack-only datagram carries just the 5-byte authenticate
+	// element), and the battle's in-flight `setRemoteCamera` datagrams keep
+	// arriving for a moment after `leaveArena` — both released the hold and
+	// the 10 Hz ticker ran straight into the still-armed filter, whose drop
+	// is a fatal `REASON_GENERAL_NETWORK`. A base method element (0x88..0xFE)
+	// is the lobby's own sync, which only goes out once the hangar is back.
+	if len(clear) > 2+tr+5 && hasBaseCall(clear[2:len(clear)-tr]) {
 		s.mu.Lock()
+		if st.postHold {
+			s.logf("stage2 %s: lobby call after the login reply — ticks resume", from)
+		}
 		st.postHold = false
 		s.mu.Unlock()
 	}
@@ -1493,6 +1520,7 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		// passes only the first copy.
 		s.mu.Lock()
 		st.postHold = true
+		st.postHoldAt = time.Now()
 		s.mu.Unlock()
 		s.resend.forget(st.resendKey)
 		seq++
@@ -2656,6 +2684,12 @@ func (s *BaseAppServer) tickEpoch() uint32 {
 // works because its reliable channel carries nothing else. Ours now carries
 // nothing else either, so the tick rides the same stream; the unreliable form
 // is the fallback for a deep backlog (see `arenaTickReliableBacklog`).
+// postHoldWindow is how long after a login reply the client's
+// `LoginReplyFilter` is still armed. Measured live: the client created the
+// Account and then dropped a tick 511 ms later, while the hangar was still
+// loading; the lobby app was up at 1.1 s.
+const postHoldWindow = 2 * time.Second
+
 const arenaTickPeriod = 100 * time.Millisecond
 
 // arenaTickReliableBacklog is how many of a session's reliable packets may be
@@ -3781,9 +3815,10 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		if st.postAt.IsZero() || now.Before(st.postAt) {
 			continue
 		}
-		// A login reply just went out and the client has not spoken since:
-		// its LoginReplyFilter would drop this tick (see postHold).
-		if st.postHold {
+		// A login reply just went out: its LoginReplyFilter is still armed
+		// (see postHold), so hold the ticks until the client's lobby call
+		// arrives AND the window has passed.
+		if st.postHold || time.Since(st.postHoldAt) < postHoldWindow {
 			continue
 		}
 		st.postAt = now.Add(st.tickPeriod)

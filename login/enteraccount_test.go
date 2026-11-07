@@ -219,14 +219,32 @@ func TestLoginReplyHoldsTheTicksUntilTheClientSpeaks(t *testing.T) {
 	if !st.postHold {
 		t.Fatal("an ack-only datagram released the ticks")
 	}
-	// A real app call is: the client is back in the lobby.
-	call := []byte{0x58, 0x04, 0x02, 0x00, 0x00, 0x00, 0x95, 0x1c, 0x00, 0xdd, 0x00, 0x42}
+	// A battle call is not enough either: the client's in-flight
+	// `setRemoteCamera` datagrams keep arriving right after leaveArena.
+	battle := []byte{0x58, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x1a, 0x1a, 0x00}
+	battle = append(battle, make([]byte, 26+8)...)
+	s.noteReliable(st, addr, battle)
+	if !st.postHold {
+		t.Fatal("a battle call released the ticks")
+	}
+	// A lobby base call is: the client is back in the hangar.
+	call := []byte{0x58, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x95, 0x1c, 0x00, 0xdd, 0x00, 0x42}
 	call = append(call, make([]byte, 8)...)
 	s.noteReliable(st, addr, call)
 	if st.postHold {
 		t.Fatal("the client's app call did not release the ticks")
 	}
+	// The filter's window still holds them for a moment after the reply.
 	s.mu.Lock()
+	st.postAt = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	s.sweepStage2(tr, time.Now())
+	if len(tr.writes) != before {
+		t.Fatalf("%d packets inside the post-login window, want none", len(tr.writes)-before)
+	}
+	// Once the window has passed, they resume.
+	s.mu.Lock()
+	st.postHoldAt = time.Now().Add(-postHoldWindow - time.Second)
 	st.postAt = time.Now().Add(-time.Second)
 	s.mu.Unlock()
 	s.sweepStage2(tr, time.Now())
