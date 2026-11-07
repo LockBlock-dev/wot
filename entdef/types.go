@@ -573,6 +573,30 @@ func Alias(name string) DataType {
 	return aliases[name]
 }
 
+// DictFieldInfo is one FIXED_DICT field: its name and its type.
+type DictFieldInfo struct {
+	Name string
+	Type DataType
+}
+
+// FixedDictFields returns a FIXED_DICT's fields in wire order, or nil when dt
+// is not a fixed dict.
+//
+// It exists for the NRL nested updates, whose compressed path indexes the
+// FIXED_DICT's field table: the encoder needs the index of one field and the
+// table's size to know how many bits the index takes.
+func FixedDictFields(dt DataType) []DictFieldInfo {
+	fd, ok := dt.(*fixedDictType)
+	if !ok {
+		return nil
+	}
+	out := make([]DictFieldInfo, 0, len(fd.fields))
+	for _, f := range fd.fields {
+		out = append(out, DictFieldInfo{Name: f.name, Type: f.typ})
+	}
+	return out
+}
+
 // AllowsNone reports whether dt is an `AllowNone` FIXED_DICT: the type whose
 // wire form carries a leading "has value" flag and whose absent value is
 // None, not a zeroed dict.

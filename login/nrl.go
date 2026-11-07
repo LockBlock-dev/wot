@@ -520,6 +520,99 @@ func nrlVolatileRecord(value []byte) []byte { return value }
 // nrlMethodRecord is a method child's update: its arguments, already encoded.
 func nrlMethodRecord(args []byte) []byte { return args }
 
+// bitWriter packs bits MSB-first, the way BigWorld's own BitWriter does
+// (`cstdmf/bit_writer.cpp`): each value's bits fill the current byte from its
+// most-significant unused bit and spill into the next.
+type bitWriter struct {
+	buf []byte
+	pos int
+}
+
+func (w *bitWriter) add(n int, v uint32) {
+	for i := n - 1; i >= 0; i-- {
+		bit := (v >> uint(i)) & 1
+		byteIdx := w.pos / 8
+		if byteIdx >= len(w.buf) {
+			w.buf = append(w.buf, 0)
+		}
+		shift := 7 - uint(w.pos%8)
+		w.buf[byteIdx] |= byte(bit) << shift
+		w.pos++
+	}
+}
+
+// bitsRequired is the engine's `BitReader::bitsRequired`
+// (`cstdmf/bit_reader.cpp`): the bits an index into `n` values needs.
+func bitsRequired(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	bits := 0
+	for v := n - 1; v > 0; v >>= 1 {
+		bits++
+	}
+	return bits
+}
+
+// nrlNestedRecord builds the body of a NESTED property update: `kind 1`, then
+// the compressed path and the leaf value.
+//
+// The path is `[1][index]` per container descended into, then `[0][index]` for
+// the leaf, each index `bitsRequired(count)` bits wide, MSB-first; the bytes
+// after the path are the leaf's value. That is `encode_compressed_path` in the
+// reference (wg-toolkit `app/client/element.rs`), which decodes what the
+// client's `setNested_<prop>` handlers receive.
+func nrlNestedRecord(path []byte, value []byte) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte(1)
+	writePackedU24(&buf, uint32(len(path)+len(value)))
+	buf.Write(path)
+	buf.Write(value)
+	return buf.Bytes()
+}
+
+// EncodeNrlNestedField writes a nested change of ONE field of ONE element of a
+// component's ARRAY property, as the `0x26` fragment plus the `0x25` flag.
+//
+// The client's dynamic components only react to nested changes for properties
+// whose handler is `setNested_<name>` — `AvatarVehiclesInfo` is the one that
+// matters: a whole-value update of `vehiclesInfo` sets the attribute and calls
+// nothing, so the kill never reaches `ClientArena` (`setNested_vehiclesInfo`
+// buffers the diff and the `__generation` bump flushes it).
+//
+// propCount is the component's property-table size, arrayCount the ARRAY's
+// live length and fieldCount the FIXED_DICT's field count; each is the size
+// the path's index is encoded against.
+func EncodeNrlNestedField(c nrlComponent, propIndex, propCount, elemIndex, arrayCount, fieldIndex, fieldCount int, value []byte) ([]byte, error) {
+	node, ok := c.propertyNode(propIndex)
+	if !ok {
+		return nil, fmt.Errorf("nrl: component %d has no property %d", c.TypeID, propIndex)
+	}
+	if propCount <= 0 || arrayCount <= 0 || fieldCount <= 0 {
+		return nil, fmt.Errorf("nrl: nested path needs positive counts (prop %d, array %d, fields %d)", propCount, arrayCount, fieldCount)
+	}
+	var w bitWriter
+	// Descend into the component's property.
+	w.add(1, 1)
+	w.add(bitsRequired(propCount), uint32(propIndex))
+	// Descend into the ARRAY element.
+	w.add(1, 1)
+	w.add(bitsRequired(arrayCount), uint32(elemIndex))
+	// The leaf: the FIXED_DICT's field.
+	w.add(1, 0)
+	w.add(bitsRequired(fieldCount), uint32(fieldIndex))
+	var buf bytes.Buffer
+	var b [2]byte
+	binary.BigEndian.PutUint16(b[:], node)
+	buf.Write(b[:])
+	buf.Write(nrlNestedRecord(w.buf, value))
+	out, err := EncodeNrlData(buf.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	return append(out, EncodeNrlUpdateNodeFlag()...), nil
+}
+
 // nrlComponent is one dynamic component as the node tree holds it: the node
 // that carries it, the node of its first property child, and how many property
 // children it has. Property i's node is FirstChild+i, because

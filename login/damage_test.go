@@ -2,6 +2,7 @@ package login
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"net"
 	"testing"
@@ -594,5 +595,184 @@ func TestShotPacketsSurviveTheClientReader(t *testing.T) {
 		if err := CheckClientApp(d, app); err != nil {
 			t.Fatalf("packet %d: the client would drop this bundle: %v (app % x)", i, err, app)
 		}
+	}
+}
+
+// TestKillPacketsSurviveTheClientReader fires the killing shot and runs every
+// packet through the client's reader, including the nested `vehiclesInfo`
+// updates and the battle-events feedback.
+//
+// The kill is the one update that has to be NESTED: `AvatarVehiclesInfo` has no
+// whole-value handler, so a re-sent list sets the attribute and calls nothing —
+// the tab keeps the row alive, the kill count stays 0 and no kill message
+// appears. The nested path is `[1][prop][1][elem][0][field]` bits, then the
+// value, then a `__generation` bump that flushes the diff.
+func TestKillPacketsSurviveTheClientReader(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	d := s.cfg.Dispatch
+	vehType := d.Entity("Vehicle")
+	avatarType := d.Entity("Avatar")
+	if vehType == nil || avatarType == nil {
+		t.Fatal("defs have no Vehicle/Avatar")
+	}
+	const ebrCompDescr = "\x41\x4a\x9d\x00\x65\x00\xcd\x00\x22\x00\x82\x00\x63\x00\x00"
+	spec, ok := vehicleGunSpeeds([]byte(ebrCompDescr))
+	if !ok {
+		t.Fatal("no gun spec for the EBR 105")
+	}
+	vehicle := NewEntity(100003, vehType)
+	avatar := NewEntity(100001, avatarType)
+	dummy := NewEntity(100004, vehType)
+	for _, p := range vehType.CellProps {
+		vehicle.Set(p.Name, entdef.ZeroValue(p.Type))
+		dummy.Set(p.Name, entdef.ZeroValue(p.Type))
+	}
+	for _, p := range avatarType.CellProps {
+		avatar.Set(p.Name, entdef.ZeroValue(p.Type))
+	}
+	shell := spec.Dispersion.ShellCD
+	ammo := entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{{Kind: entdef.VDict, Dict: []entdef.DictField{
+		{Name: "compactDescr", Value: entdef.Value{Kind: entdef.VInt, Int: int64(shell)}},
+		{Name: "quantity", Value: entdef.Value{Kind: entdef.VUint, Uint: 30}},
+		{Name: "quantityInClip", Value: entdef.Value{Kind: entdef.VUint, Uint: 1}},
+	}}}}
+	hull := hull{Position: [3]float32{0, 0, 0}, Direction: [3]float32{0, 0, 0}, Limits: spec.Limits}
+	marker := gunMarkerFor(hull, 0, 0, spec, 1)
+	dir := [3]float32{marker.Velocity[0], marker.Velocity[1], marker.Velocity[2]}
+	l := float32(math.Sqrt(float64(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2])))
+	dummyPos := [3]float32{marker.Position[0] + dir[0]/l*12, marker.Position[1] + dir[1]/l*12, marker.Position[2] + dir[2]/l*12}
+
+	// The arena's vehicle list, so the kill has a `vehiclesInfo` to update.
+	infoType := entdef.Alias("VEHICLES_INFO")
+	if infoType == nil {
+		t.Fatal("no VEHICLES_INFO alias")
+	}
+	vehicles := []entdef.Value{
+		vehicleInfoValue(infoType, ArenaPlayerDoc{AccountID: 2, Name: "admin", Team: 1, VehicleCompDescr: []byte(ebrCompDescr)}, vehicle.ID, 1, 0, 0),
+		vehicleInfoValue(infoType, ArenaPlayerDoc{AccountID: 3, Name: "dummy", Team: 2, VehicleCompDescr: dummyCompDescr()}, dummy.ID, 1, 0, 0),
+	}
+	st := &clientState{
+		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
+		entityID: avatar.ID, avatar: avatar, vehicle: vehicle, dummy: dummy,
+		dummyID: dummy.ID, dummyPos: dummyPos, dummyHealth: 10, dummyMaxHealth: 10,
+		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
+		ownVehicle:   nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
+		infoComp:     nrlComponent{TypeID: AvatarVehiclesInfoNrlID, Node: 40, FirstChild: 41, Props: 1},
+		infoVehicles: vehicles, infoPlayer: 0, infoDummy: 1,
+		postSeq: 100, postCumul: 3, tick: 1000,
+	}
+	tr := &fakeTransport{}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	if err := s.answerShoot(tr, addr, st); err != nil {
+		t.Fatalf("answerShoot: %v", err)
+	}
+	if st.dummyHealth != 0 {
+		t.Fatalf("dummy health = %d, want 0 (the shot must kill it)", st.dummyHealth)
+	}
+	if st.infoKills != 1 {
+		t.Fatalf("kills = %d, want 1", st.infoKills)
+	}
+	if st.damageDealt == 0 {
+		t.Fatal("damage total was not accumulated")
+	}
+	if len(tr.writes) < 2 {
+		t.Fatalf("%d packets, want the damage and the kill", len(tr.writes))
+	}
+	for i, pkt := range tr.writes {
+		app := findAppInPacket(t, pkt, st.blockKey)
+		if app == nil {
+			t.Fatalf("packet %d has no app", i)
+		}
+		if err := CheckClientApp(d, app); err != nil {
+			t.Fatalf("packet %d: the client would drop this bundle: %v (app % x)", i, err, app)
+		}
+	}
+}
+
+// dummyCompDescr is the TOG II's full descriptor, the dummy's vehicle.
+func dummyCompDescr() []byte {
+	return []byte{0x51, 0xd2, 0x3f, 0x00, 0x36, 0x00, 0xcd, 0x00, 0x02, 0x00, 0x3c, 0x00, 0x24, 0x00, 0x00}
+}
+
+// TestNrlNestedPathBits pins the compressed path of a nested `vehiclesInfo`
+// update: `[1][prop][1][elem][0][field]`, each index as many bits as its
+// container needs, MSB-first, then the value.
+//
+// The client decodes exactly this (`encode_compressed_path`'s inverse in
+// `setNested_vehiclesInfo`), and a wrong bit count silently addresses the
+// wrong field — the kill would land on some other attribute.
+func TestNrlNestedPathBits(t *testing.T) {
+	// Loads the defs and with them the alias table.
+	tokenTestServer(t, nil)
+	comp := nrlComponent{TypeID: AvatarVehiclesInfoNrlID, Node: 40, FirstChild: 41, Props: 1}
+	// vehiclesInfo[1]['isAlive']: one component property (0 index bits), two
+	// vehicles (1 bit), the FIXED_DICT's `isAlive` field.
+	infoType := entdef.Alias("VEHICLES_INFO")
+	if infoType == nil {
+		t.Skip("no VEHICLES_INFO alias")
+	}
+	fields := entdef.FixedDictFields(infoType)
+	isAlive := -1
+	for i := range fields {
+		if fields[i].Name == "isAlive" {
+			isAlive = i
+		}
+	}
+	if isAlive < 0 {
+		t.Fatal("VEHICLES_INFO has no isAlive")
+	}
+	el, err := EncodeNrlNestedField(comp, 0, comp.Props, 1, 2, isAlive, len(fields), []byte{0})
+	if err != nil {
+		t.Fatalf("EncodeNrlNestedField: %v", err)
+	}
+	// [0x26][u16 len][node u16 BE][kind 1][len u24][path][value]
+	if el[0] != elNrlData {
+		t.Fatalf("element id = %#02x, want %#02x", el[0], elNrlData)
+	}
+	// The record addresses the PROPERTY child node, not the component node.
+	if got := binary.BigEndian.Uint16(el[3:5]); got != comp.FirstChild {
+		t.Fatalf("node = %d, want the property node %d", got, comp.FirstChild)
+	}
+	if el[5] != 1 {
+		t.Fatalf("record kind = %d, want 1 (nested)", el[5])
+	}
+	// The record length is the NRL packed-u24: one byte below 255, else 0xFF
+	// plus three little-endian bytes.
+	off := 6
+	n := int(el[off])
+	off++
+	if n == 0xFF {
+		n = int(el[off]) | int(el[off+1])<<8 | int(el[off+2])<<16
+		off += 3
+	}
+	path := el[off : off+n]
+	// Bits: 1 (descend) | 1 (descend) | elem index 1 bit (1) | 0 (leaf) | field bits.
+	var bits []int
+	for _, b := range path[:len(path)-1] {
+		for k := 7; k >= 0; k-- {
+			bits = append(bits, int(b>>uint(k))&1)
+		}
+	}
+	// The last path byte holds the field index; the value is the byte after.
+	want := []int{1, 1, 1, 0}
+	if len(bits) < len(want) {
+		t.Fatalf("path too short: %v", bits)
+	}
+	for i := range want {
+		if bits[i] != want[i] {
+			t.Fatalf("path bits = %v, want prefix %v", bits, want)
+		}
+	}
+	// The field index is the remaining bits of the path.
+	fieldBits := bitsRequired(len(fields))
+	got := 0
+	for i := 0; i < fieldBits; i++ {
+		got = got<<1 | bits[len(want)+i]
+	}
+	if got != isAlive {
+		t.Fatalf("field index = %d, want %d", got, isAlive)
+	}
+	if path[len(path)-1] != 0 {
+		t.Fatalf("value byte = %#02x, want 0 (isAlive false)", path[len(path)-1])
 	}
 }

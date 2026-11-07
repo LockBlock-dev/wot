@@ -365,9 +365,19 @@ type clientState struct {
 	// shooter's indexes in that array; infoKills is the shooter's `stFrags`.
 	infoComp     nrlComponent
 	infoVehicles []entdef.Value
-	infoDummy    int
-	infoPlayer   int
-	infoKills    int
+	// infoGen is the `vehiclesInfo` `__generation` counter. The client's
+	// `AvatarVehiclesInfo` only reacts to NESTED changes, and it buffers them
+	// until a `__generation` bump flushes the diff into `ClientArena`
+	// (`setNested_vehiclesInfo`), so every kill sends its fields and then a
+	// fresh generation.
+	infoGen uint32
+	// damageDealt is the total this session has damaged enemies for, which is
+	// what `OwnVehicle.battleEventsSummary` carries: the personal efficiency
+	// panel's damage counter reads it and nothing else.
+	damageDealt uint32
+	infoDummy   int
+	infoPlayer  int
+	infoKills   int
 	// shotID numbers the tracers this session fires.
 	shotID int32
 	// reloadGen numbers the reloads this session starts, so a completion

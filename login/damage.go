@@ -2,6 +2,7 @@ package login
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/rand"
 	"net"
@@ -553,10 +554,33 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if el, err := showShotResultsElement(avatar, dummyID, flags); err == nil {
 		avatarApp = append(avatarApp, el...)
 	}
-
+	// The damage log and the personal efficiency panel. Neither is fed by the
+	// victim's health update: `Avatar.onBattleEvents` is the per-event record
+	// (the bottom-left log and its totals) and `OwnVehicle.battleEventsSummary`
+	// is the running total the panel's damage counter reads. Without them the
+	// shot does damage on the server and the player's UI shows nothing.
+	var events []battleEvent
+	if damage > 0 {
+		details := packDamage(uint64(damage), 0 /* ATTACK_REASON.SHOT */, uint64(battleLogShellType(sh.Kind)), -1)
+		events = append(events, battleEvent{eventType: battleEventDamage, targetID: dummyID, details: details, count: uint16(damage)})
+	}
+	if newHealth == 0 && damage > 0 {
+		events = append(events, battleEvent{eventType: battleEventKill, targetID: dummyID, details: packDamage(uint64(damage), 0, uint64(battleLogShellType(sh.Kind)), -1), count: 1})
+	}
+	if len(events) > 0 {
+		if el, err := onBattleEventsElement(avatar, events); err == nil {
+			avatarApp = append(avatarApp, el...)
+		}
+	}
 	s.mu.Lock()
 	st.dummyHealth = newHealth
+	st.damageDealt += uint32(damage)
+	damageDealt := st.damageDealt
+	comp := st.ownVehicle
 	s.mu.Unlock()
+	if el, err := battleEventsSummaryElement(comp, damageDealt); err == nil {
+		avatarApp = append(avatarApp, el...)
+	}
 
 	st.sendMu.Lock()
 	for _, app := range [][]byte{dummyApp, avatarApp} {
@@ -575,12 +599,39 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 }
 
 // killVehiclesInfo marks the victim dead in the arena's `vehiclesInfo` and
-// counts the kill, returning the NRL property update that re-sends the list.
+// counts the kill, returning the NRL NESTED updates that make the client
+// apply it.
 //
 // The team panel's greyed-out row, the orange kill message and the kill column
 // all read this: `isAlive` false and a `deathInfo` on the victim, `stFrags`
 // and `frags` on the shooter.
+//
+// It has to be NESTED updates, not a whole-value re-send of the list. The
+// client's `AvatarVehiclesInfo` component has no `set_vehiclesInfo` handler:
+// a whole-value update sets the attribute and calls nothing, so `ClientArena`
+// never learns about it and the row stays alive. Its handlers are
+// `setNested_vehiclesInfo` (which buffers one field's diff) and the
+// `__generation` bump that flushes the buffer into
+// `ClientArena.updateVehicleInfo` plus the per-field setters
+// (`setVehInfo_isAlive` → `updateVehicleIsAlive` → `onVehicleKilled`).
 func (s *BaseAppServer) killVehiclesInfo(st *clientState, dummyID, attacker uint32) []byte {
+	infoType := entdef.Alias("VEHICLES_INFO")
+	if infoType == nil {
+		return nil
+	}
+	fields := entdef.FixedDictFields(infoType)
+	fieldIndex := func(name string) int {
+		for i := range fields {
+			if fields[i].Name == name {
+				return i
+			}
+		}
+		return -1
+	}
+	genIdx := fieldIndex("__generation")
+	if genIdx < 0 {
+		return nil
+	}
 	s.mu.Lock()
 	if st.infoComp.TypeID == 0 || st.infoDummy < 0 || st.infoDummy >= len(st.infoVehicles) {
 		s.mu.Unlock()
@@ -596,27 +647,143 @@ func (s *BaseAppServer) killVehiclesInfo(st *clientState, dummyID, attacker uint
 		{Name: "numVehiclesAffected", Value: entdef.Value{Kind: entdef.VInt}},
 	}})
 	st.infoVehicles[st.infoDummy] = victim
+	playerIdx := -1
 	if st.infoPlayer >= 0 && st.infoPlayer < len(st.infoVehicles) {
 		st.infoKills++
-		shooter := st.infoVehicles[st.infoPlayer]
+		playerIdx = st.infoPlayer
+		shooter := st.infoVehicles[playerIdx]
 		shooter = dictSet(shooter, "stFrags", entdef.Value{Kind: entdef.VUint, Uint: uint64(st.infoKills)})
 		shooter = dictSet(shooter, "frags", entdef.Value{Kind: entdef.VInt, Int: int64(st.infoKills)})
-		st.infoVehicles[st.infoPlayer] = shooter
+		st.infoVehicles[playerIdx] = shooter
 	}
 	comp := st.infoComp
-	vehicles := append([]entdef.Value(nil), st.infoVehicles...)
+	nVehicles := len(st.infoVehicles)
+	dummyIdx := st.infoDummy
+	st.infoGen++
+	gen := st.infoGen
 	s.mu.Unlock()
-	infoType := entdef.Alias("VEHICLES_INFO")
-	if infoType == nil {
-		return nil
+
+	// One vehicle's fields, then its `__generation` bump: the client buffers
+	// per FIELD NAME, so the flush has to come after the fields it should
+	// carry and before the next vehicle's.
+	nested := func(elemIdx int, name string, v entdef.Value) []byte {
+		i := fieldIndex(name)
+		if i < 0 {
+			return nil
+		}
+		var buf bytes.Buffer
+		if err := entdef.NewCodec().Write(&buf, fields[i].Type, v); err != nil {
+			return nil
+		}
+		el, err := EncodeNrlNestedField(comp, 0, comp.Props, elemIdx, nVehicles, i, len(fields), buf.Bytes())
+		if err != nil {
+			return nil
+		}
+		return el
 	}
-	var data bytes.Buffer
-	if err := entdef.EncodeArray(&data, infoType, vehicles); err != nil {
-		return nil
+	var out []byte
+	out = append(out, nested(dummyIdx, "isAlive", entdef.Value{Kind: entdef.VUint})...)
+	deathInfo, _ := victim.Get("deathInfo")
+	out = append(out, nested(dummyIdx, "deathInfo", deathInfo)...)
+	out = append(out, nested(dummyIdx, "__generation", entdef.Value{Kind: entdef.VUint, Uint: uint64(gen)})...)
+	if playerIdx >= 0 {
+		shooter := st.infoVehicles[playerIdx]
+		frags, _ := shooter.Get("frags")
+		stFrags, _ := shooter.Get("stFrags")
+		out = append(out, nested(playerIdx, "frags", frags)...)
+		out = append(out, nested(playerIdx, "stFrags", stFrags)...)
+		out = append(out, nested(playerIdx, "__generation", entdef.Value{Kind: entdef.VUint, Uint: uint64(gen)})...)
 	}
-	el, err := EncodeNrlPropertyUpdate(comp, 0, data.Bytes())
-	if err != nil {
-		return nil
+	return out
+}
+
+// battleEvent is one `BATTLE_EVENT`: the damage log's per-event record.
+type battleEvent struct {
+	eventType uint8
+	targetID  uint32
+	details   uint64
+	count     uint16
+}
+
+// Battle event types (`BattleFeedbackCommon.BATTLE_EVENT_TYPE`).
+const (
+	battleEventDamage uint8 = 7
+	battleEventKill   uint8 = 8
+)
+
+// Battle log shell types (`BATTLE_LOG_SHELL_TYPES`).
+const (
+	shellTypeHollowCharge uint8 = 0
+	shellTypeAP           uint8 = 1
+	shellTypeAPCR         uint8 = 3
+	shellTypeHE           uint8 = 5
+	shellTypeNone         uint8 = 127
+)
+
+// battleLogShellType maps a shell kind to the damage log's shell icon id.
+func battleLogShellType(kind string) uint8 {
+	switch kind {
+	case "ARMOR_PIERCING":
+		return shellTypeAP
+	case "ARMOR_PIERCING_CR":
+		return shellTypeAPCR
+	case "HOLLOW_CHARGE":
+		return shellTypeHollowCharge
+	case "HIGH_EXPLOSIVE":
+		return shellTypeHE
 	}
-	return el
+	return shellTypeNone
+}
+
+// packDamage is `BattleFeedbackCommon.BATTLE_EVENT_TYPE.packDamage`: the
+// damage, the attack reason, the shell type and the extended reason packed
+// into the event's `details` word.
+func packDamage(damage, attackReasonID, shellTypeID uint64, attackReasonExtID int8) uint64 {
+	return (damage&0xFFFF)<<25 |
+		(attackReasonID&0xFF)<<17 |
+		(shellTypeID&0x7F)<<9 |
+		// secondaryAttackReasonID = ATTACK_REASON_INDICES[NONE] = 16
+		16&0xFF |
+		uint64(uint8(attackReasonExtID))<<43
+}
+
+// onBattleEventsElement is `Avatar.onBattleEvents`, the per-event damage log
+// the client's feedback controller turns into the damage log entries and the
+// personal efficiency log.
+func onBattleEventsElement(avatar *Entity, events []battleEvent) ([]byte, error) {
+	t := entdef.Alias("BATTLE_EVENT")
+	if t == nil {
+		return nil, fmt.Errorf("no BATTLE_EVENT alias")
+	}
+	seq := make([]entdef.Value, 0, len(events))
+	for _, ev := range events {
+		v := entdef.ZeroValue(t)
+		v = dictSet(v, "eventType", entdef.Value{Kind: entdef.VUint, Uint: uint64(ev.eventType)})
+		v = dictSet(v, "targetID", entdef.Value{Kind: entdef.VUint, Uint: uint64(ev.targetID)})
+		v = dictSet(v, "details", entdef.Value{Kind: entdef.VUint, Uint: ev.details})
+		v = dictSet(v, "count", entdef.Value{Kind: entdef.VUint, Uint: uint64(ev.count)})
+		seq = append(seq, v)
+	}
+	return EncodeClientMethodCall(avatar, "onBattleEvents", []entdef.Value{{Kind: entdef.VSeq, Seq: seq}})
+}
+
+// battleEventsSummaryElement is `OwnVehicle.battleEventsSummary`: the running
+// totals the personal efficiency panel's damage counter reads
+// (`BattleSummaryFeedbackEvent.fromDict`).
+func battleEventsSummaryElement(comp nrlComponent, damage uint32) ([]byte, error) {
+	t := entdef.Alias("BATTLE_EVENTS_SUMMARY")
+	if t == nil {
+		return nil, fmt.Errorf("no BATTLE_EVENTS_SUMMARY alias")
+	}
+	v := entdef.ZeroValue(t)
+	v = dictSet(v, "damage", entdef.Value{Kind: entdef.VUint, Uint: uint64(damage)})
+	// `lastKillerID`/`lastDeathReasonID` are the player's own death, not the
+	// victim's: -1/0 is "not dead".
+	v = dictSet(v, "lastKillerID", entdef.Value{Kind: entdef.VInt, Int: -1})
+	v = dictSet(v, "attackReasonExtID", entdef.Value{Kind: entdef.VInt, Int: -1})
+	var buf bytes.Buffer
+	if err := entdef.NewCodec().Write(&buf, t, v); err != nil {
+		return nil, err
+	}
+	return EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("battleEventsSummary"), buf.Bytes())
 }
