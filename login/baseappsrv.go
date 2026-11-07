@@ -1438,12 +1438,7 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		app = append(app, EncodeTickSync(0x40)...)
 		app = append(app, pair...)
 		s.checkWire(app)
-		// Unreliable: the client's `LoginReplyFilter` passes only the first
-		// copy of a login reply (a retransmission's fresh prefix changes the
-		// byte at offset 146), so a resent `CreateBasePlayer` is dropped as
-		// "unexpected packet on external interface" and the client
-		// disconnects. Nothing is retransmitted on this stream.
-		if err := s.sendUnreliableLocked(conn, from, st, app); err != nil {
+		if err := s.sendReliable(conn, from, st, app, seq, cumul); err != nil {
 			return seq, err
 		}
 		s.logf("stage2 %s: CreateBasePlayer + showGUI %dB (entity %d, Account, %d components, seq %d) % x",

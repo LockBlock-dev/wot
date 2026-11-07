@@ -344,7 +344,7 @@ func (s *BaseAppServer) enterArena(conn Transport, from *net.UDPAddr, st *client
 	s.resend.forget(st.resendKey)
 	resetApp := answerApp([]byte{elResetEntities, 0})
 	s.logf("stage2 %s: leaveArena reset app % x", from, resetApp)
-	if err := s.mintPostUnreliable(conn, from, st, resetApp); err != nil {
+	if err := s.mintPost(conn, from, st, resetApp); err != nil {
 		return err
 	}
 	s.mu.Lock()
