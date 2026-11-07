@@ -1043,7 +1043,10 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   says why. `ClientArena` fires `onPeriodChange` on a *change*, so the server
   sends PREBATTLE at entry and BATTLE after the delay, repeated
   (`arenaPeriodDelays`) because a BATTLE that lands before
-  `Avatar.setClientReady` is dropped. **The announcement must mint its seq
+  `Avatar.setClientReady` is dropped, AND sends BATTLE at the entry too:
+  the client's `MapActivities` period listener throws on the missing
+  `sectorComponent` and can take the Avatar listener with it, so the
+  `setClientReady` period check is the reliable path. **The announcement must mint its seq
   under `st.sendMu`** (`nextSeq` + `sendReliableLocked`): reading `postSeq`
   and letting `sendReliable` take the lock afterwards races the 100 ms ticker
   and the client drops the packet as a duplicate.

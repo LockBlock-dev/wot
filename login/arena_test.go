@@ -191,12 +191,12 @@ func TestEnterArenaSequence(t *testing.T) {
 	}
 	// space, cell, Vehicle create/select/update/enter, AvatarInfo
 	// create/enter/NRL, OwnVehicle, selectEntity(Avatar), the hull attitude,
-	// the update frequency, then the period change.
-	if seq != 25 {
-		t.Fatalf("seq = %d, want 25 (fourteen more frames)", seq)
+	// the update frequency, then WAITING and the BATTLE-at-entry period.
+	if seq != 26 {
+		t.Fatalf("seq = %d, want 26 (fifteen more frames)", seq)
 	}
-	if len(tr3.writes) != 14 {
-		t.Fatalf("%d writes, want 14 (space, cell, Vehicle x4, AvatarInfo x3, OwnVehicle, select, auxPhysics, frequency, period)", len(tr3.writes))
+	if len(tr3.writes) != 15 {
+		t.Fatalf("%d writes, want 15 (space, cell, Vehicle x4, AvatarInfo x3, OwnVehicle, select, auxPhysics, frequency, WAITING, BATTLE)", len(tr3.writes))
 	}
 	// The period call is an Avatar method, so the Avatar must be the selected
 	// entity when it goes out: an entity method applies to whatever

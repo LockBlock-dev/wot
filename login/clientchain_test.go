@@ -110,9 +110,9 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	}
 	// space, cell, Vehicle create/select/update/enter, AvatarInfo
 	// create/enter/NRL, OwnVehicle, selectEntity(Avatar), the hull attitude,
-	// the update frequency, then the period change.
-	if len(tr3.writes) != 14 {
-		t.Fatalf("%d packets, want 14", len(tr3.writes))
+	// the update frequency, then WAITING and the BATTLE-at-entry period.
+	if len(tr3.writes) != 15 {
+		t.Fatalf("%d packets, want 15", len(tr3.writes))
 	}
 	avatar := parseClientPacket(t, d, tr2.writes[0], st.blockKey)
 	avatar = withoutTick(avatar)

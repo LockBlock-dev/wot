@@ -978,6 +978,27 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	seq++
 	s.logf("stage2 %s: arena %d period → WAITING (%dB)", from, h.ArenaID, len(period))
 
+	// Send BATTLE at the entry as well. `Avatar.setClientReady` sets
+	// `isOnArena` only when the period is ALREADY BATTLE at that moment, and
+	// its `onPeriodChange` listener chain is fragile: the `MapActivities`
+	// listener throws `'ClientArenaComponentSystem' object has no attribute
+	// 'sectorComponent'` (the private server has no sector component) and can
+	// take the Avatar listener with it. A `setClientReady` that runs before
+	// the delayed BATTLE then still sees BATTLE and enters the arena directly,
+	// instead of waiting for a period change that never lands.
+	if battle, err := arenaPeriodUpdateFull(st.avatar, ArenaPeriodBattle, arenaPeriodEnd(st.tick, 1500), 1500, []float64{10, 10}); err == nil {
+		if sel, serr := EncodeSelectEntity(st.entityID); serr == nil {
+			battle = append(sel, battle...)
+		}
+		if err := s.sendReliableEntity(conn, from, st, battle, seq, cumul); err == nil {
+			seq++
+			s.mu.Lock()
+			st.battleStarted = true
+			s.mu.Unlock()
+			s.logf("stage2 %s: arena %d period → BATTLE at entry (%dB)", from, h.ArenaID, len(battle))
+		}
+	}
+
 	// Then BATTLE, once the client has had time to finish loading and register
 	// its `onPeriodChange` handler.
 	//
