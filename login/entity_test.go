@@ -165,9 +165,13 @@ func TestPropertyUpdateFromDefs(t *testing.T) {
 	if want := byte(entityPropertyBase + idx); elem[0] != want {
 		t.Errorf("element id = %#02x, want %#02x", elem[0], want)
 	}
-	// A 1-byte length header, then the string.
-	if elem[3] != 4 || string(elem[4:]) != "tank" {
-		t.Errorf("payload = % x", elem[3:])
+	// The element length header is the property's OWN width — one byte for a
+	// STRING/ARRAY alias — then the value, which carries its own 1-byte
+	// string length. Writing a u16 header here (the `updateEntity` run's
+	// form) shifts every following element by one byte; that is what made
+	// the shell-hole `damageStickers` update crash the client.
+	if elem[1] != 5 || elem[2] != 4 || string(elem[3:]) != "tank" {
+		t.Errorf("payload = % x", elem[1:])
 	}
 	if _, err := EncodePropertyUpdate(e, "noSuchProp"); err == nil {
 		t.Error("unknown property accepted")

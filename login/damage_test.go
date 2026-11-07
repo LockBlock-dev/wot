@@ -517,3 +517,82 @@ func TestEBRSticker(t *testing.T) {
 		t.Fatal("effects index = 0, want the mainAPCR slot")
 	}
 }
+
+// TestShotPacketsSurviveTheClientReader fires a shot at the dummy and runs
+// every packet the server emits through the client's own bundle reader.
+//
+// The shot is the one path that puts several elements with different shapes in
+// one bundle (entity methods on two entities, a property update, a bare
+// property, NRL component updates), and the client has no way to resynchronise:
+// a stray length field is read as the next element id and the bundle dies as
+// REASON_CORRUPTED_PACKET — on the next one it asserts
+// `pCurr_ + nBytes <= pEnd_` and the game crashes. This is the regression test
+// for that: nothing may be left over and every element must be in the table.
+func TestShotPacketsSurviveTheClientReader(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	d := s.cfg.Dispatch
+	vehType := d.Entity("Vehicle")
+	avatarType := d.Entity("Avatar")
+	if vehType == nil || avatarType == nil {
+		t.Fatal("defs have no Vehicle/Avatar")
+	}
+	// The EBR 105: a real vehicle whose gun spec resolves (turret speeds,
+	// yaw arc, shell data), so the shot is resolved for real.
+	const ebrCompDescr = "\x41\x4a\x9d\x00\x65\x00\xcd\x00\x22\x00\x82\x00\x63\x00\x00"
+	spec, ok := vehicleGunSpeeds([]byte(ebrCompDescr))
+	if !ok {
+		t.Fatal("no gun spec for the EBR 105")
+	}
+	vehicle := NewEntity(100003, vehType)
+	avatar := NewEntity(100001, avatarType)
+	dummy := NewEntity(100004, vehType)
+	for _, p := range vehType.CellProps {
+		vehicle.Set(p.Name, entdef.ZeroValue(p.Type))
+		dummy.Set(p.Name, entdef.ZeroValue(p.Type))
+	}
+	for _, p := range avatarType.CellProps {
+		avatar.Set(p.Name, entdef.ZeroValue(p.Type))
+	}
+	shell := spec.Dispersion.ShellCD
+	ammo := entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{{Kind: entdef.VDict, Dict: []entdef.DictField{
+		{Name: "compactDescr", Value: entdef.Value{Kind: entdef.VInt, Int: int64(shell)}},
+		{Name: "quantity", Value: entdef.Value{Kind: entdef.VUint, Uint: 30}},
+		{Name: "quantityInClip", Value: entdef.Value{Kind: entdef.VUint, Uint: 1}},
+		{Name: "previousStage", Value: entdef.Value{Kind: entdef.VUint}},
+		{Name: "endTime", Value: entdef.Value{Kind: entdef.VFloat}},
+		{Name: "totalTime", Value: entdef.Value{Kind: entdef.VInt}},
+		{Name: "index", Value: entdef.Value{Kind: entdef.VUint}},
+	}}}}
+	hull := hull{Position: [3]float32{0, 0, 0}, Direction: [3]float32{0, 0, 0}, Limits: spec.Limits}
+	marker := gunMarkerFor(hull, 0, 0, spec, 1)
+	// Put the dummy 12 m down the barrel so the trace is a clean front hit.
+	dir := [3]float32{marker.Velocity[0], marker.Velocity[1], marker.Velocity[2]}
+	l := float32(math.Sqrt(float64(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2])))
+	dummyPos := [3]float32{marker.Position[0] + dir[0]/l*12, marker.Position[1] + dir[1]/l*12, marker.Position[2] + dir[2]/l*12}
+
+	st := &clientState{
+		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
+		entityID: avatar.ID, avatar: avatar, vehicle: vehicle, dummy: dummy,
+		dummyID: dummy.ID, dummyPos: dummyPos, dummyHealth: 1248, dummyMaxHealth: 1248,
+		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
+		ownVehicle: nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
+		postSeq:    100, postCumul: 3, tick: 1000,
+	}
+	tr := &fakeTransport{}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	if err := s.answerShoot(tr, addr, st); err != nil {
+		t.Fatalf("answerShoot: %v", err)
+	}
+	if len(tr.writes) == 0 {
+		t.Fatal("the shot emitted nothing")
+	}
+	for i, pkt := range tr.writes {
+		app := findAppInPacket(t, pkt, st.blockKey)
+		if app == nil {
+			t.Fatalf("packet %d has no app", i)
+		}
+		if err := CheckClientApp(d, app); err != nil {
+			t.Fatalf("packet %d: the client would drop this bundle: %v (app % x)", i, err, app)
+		}
+	}
+}

@@ -1484,6 +1484,13 @@ func (s *BaseAppServer) nextSeq(st *clientState) (seq, cumul uint32) {
 // sendReliableLocked is sendReliable for a caller that already holds
 // `st.sendMu` because it is sending a sequence that must not be interleaved.
 func (s *BaseAppServer) sendReliableLocked(conn Transport, to *net.UDPAddr, st *clientState, app []byte, seq, cumul uint32) error {
+	// The battle's own traffic (period updates, NRL component updates, the
+	// shot's method calls) goes through here rather than sendReliableEntity,
+	// so this is the only place the wire check can see it. A malformed
+	// element here is what makes the client drop the bundle as
+	// REASON_CORRUPTED_PACKET and, on the next one, assert
+	// `pCurr_ + nBytes <= pEnd_`.
+	s.checkWire(app)
 	pkt, err := buildChannelPacket(st.blockKey, flagsRel, app, nil, seq, cumul)
 	if err != nil {
 		return err

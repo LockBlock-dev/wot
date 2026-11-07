@@ -314,8 +314,23 @@ func EncodeClientMethodCall(e *Entity, method string, args []entdef.Value) ([]by
 	return appendElement(nil, byte(entityMethodBase+id), width, buf.Bytes())
 }
 
-// EncodePropertyUpdate builds a property update element: the property's
+// EncodePropertyUpdate builds a STANDALONE property element: the property's
 // client-server FullIndex plus the base, then its value encoded from the defs.
+//
+// The framing is the property's own declared element length, which is what the
+// client's table carries:
+//
+//   - a FIXED-size property (`health`, INT16) is `[id][value]` with no length
+//     field at all — the client reads exactly the type's size;
+//   - a variable one (`damageStickers`, an ARRAY alias) is
+//     `[id][len][value]` with the length header's width being the property's
+//     `VariableLengthHeaderSize`, which is ONE for an ARRAY alias.
+//
+// Writing a u16 length where the client reads a u8 shifts every following
+// element by one byte: the client walks the rest of the bundle as garbage and
+// dies on `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_` (after first
+// dropping a bundle as REASON_CORRUPTED_PACKET). That is the shell-hole
+// update, so it crashed on the first PIERCED hit and not on a bounce.
 //
 // The id is the FullIndex: `EntityDispatch.Properties` is filled from
 // `CSPropsOrdered()` (fixed sizes first, then variable by header width), so
@@ -344,7 +359,15 @@ func EncodePropertyUpdate(e *Entity, name string) ([]byte, error) {
 	if err := entdef.NewCodec().Write(&buf, p.Type, v); err != nil {
 		return nil, fmt.Errorf("wotlogin: %s.%s: %w", e.Type.Name, name, err)
 	}
-	return element(byte(entityPropertyBase+idx), buf.Bytes())
+	id := byte(entityPropertyBase + idx)
+	if p.Length.Fixed {
+		return append([]byte{id}, buf.Bytes()...), nil
+	}
+	width := p.Length.Var
+	if width <= 0 {
+		width = 1
+	}
+	return appendElement(nil, id, width, buf.Bytes())
 }
 
 // EncodeSelectPlayerEntity builds the SelectPlayerEntity element: FIXED 0,

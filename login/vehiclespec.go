@@ -277,6 +277,13 @@ func yawLimitsIn(pkg, name, turret, gun string) (float64, float64, error) {
 			if yl := g.Child("turretYawLimits"); yl != nil {
 				return parsePair(yl.AsString())
 			}
+			// No limits declared means the turret turns all the way round:
+			// the client's `typeDescriptor.gun.turretYawLimits` is then None
+			// and `VehicleGunRotator` clamps nothing. Returning an error here
+			// threw away the WHOLE gun spec for every such vehicle — the TOG
+			// II among them — so it had no shell, no reload and no shot could
+			// be resolved at all.
+			return -180, 180, nil
 		}
 	}
 	return 0, 0, fmt.Errorf("vehiclespec: %s/%s/guns/%s has no turretYawLimits", name, turret, gun)

@@ -44,11 +44,12 @@ func (s msgShape) String() string {
 	return fmt.Sprintf("var(%d)", s.width)
 }
 
-// clientShape resolves an element id the way the client's table does. The
-// entity method and property ranges are per-entity slots, so they are
-// resolved against every entity the handoff touches and the answers must
-// agree — a disagreement is itself a bug (the client has one table).
-func clientShape(d *entdef.Dispatch, id byte) (msgShape, string, error) {
+// clientShape resolves an element id the way the client's table does, for ONE
+// entity. The method and property ranges are per-entity slots: the same byte
+// is a different method on Account, Avatar and Vehicle, and the app does not
+// say which entity it addresses. `ParseClientApp` therefore tries each entity
+// and keeps the one that consumes the app exactly.
+func clientShape(d *entdef.Dispatch, ent string, id byte) (msgShape, string, error) {
 	switch id {
 	case elResetEntities:
 		return msgShape{fixed: true, size: 1}, "resetEntities", nil
@@ -96,95 +97,142 @@ func clientShape(d *entdef.Dispatch, id byte) (msgShape, string, error) {
 		return msgShape{fixed: true, size: 36}, "updateTargetingInfo", nil
 	case elNrlCreateNode:
 		return msgShape{width: 2}, "nrlCreateNode", nil
+	case elNrlUpdateNodeFlag:
+		// Payload-less by design: it consumes one record from the NRL
+		// stream, so it carries no length field at all.
+		return msgShape{fixed: true, size: 0}, "nrlUpdateNodeFlag", nil
+	case elNrlData:
+		return msgShape{width: 2}, "nrlData", nil
 	case 0x45:
 		return msgShape{width: 2}, "resourceHeader", nil
 	case 0x46:
 		return msgShape{width: 2}, "resourceFragment", nil
 	}
-	var found *msgShape
-	var name string
-	for _, ent := range []string{"Account", "Avatar"} {
-		e := d.Entity(ent)
-		if e == nil {
-			continue
-		}
-		var s msgShape
-		var n string
-		switch {
-		case id >= entityMethodBase && id < entityPropertyBase:
-			i := int(id - entityMethodBase)
-			if i >= len(e.ClientMethods) {
-				continue
-			}
-			m := e.ClientMethods[i]
-			s = msgShape{fixed: m.Length.Fixed, size: m.Length.Size, width: int(m.Length.Var)}
-			n = ent + "." + m.Name
-		case id >= entityPropertyBase:
-			i := int(id - entityPropertyBase)
-			if i >= len(e.Properties) {
-				continue
-			}
-			s = msgShape{width: 2}
-			n = ent + "." + e.Properties[i].Name
-		default:
-			continue
-		}
-		// The client resolves an element id against the entity it is
-		// addressing, and the same slot means different things on different
-		// entities (0x5f is Account.onCmdResponseExt and also the revisions
-		// small; 0x69 is Account.update and Avatar.onSwitchViewpoint). The
-		// app does not say which entity it is for, so take the first match —
-		// the check is about framing, not about naming the method.
-		if found == nil {
-			found, name = &s, n
-		}
+	e := d.Entity(ent)
+	if e == nil {
+		return msgShape{}, "", fmt.Errorf("element %#02x: no %s entity", id, ent)
 	}
-	if found == nil {
-		return msgShape{}, "", fmt.Errorf("element %#02x is not in the client's table", id)
+	switch {
+	case id >= entityMethodBase && id < entityPropertyBase:
+		i := int(id - entityMethodBase)
+		if i >= len(e.ClientMethods) {
+			return msgShape{}, "", fmt.Errorf("element %#02x: %s has no client method %d", id, ent, i)
+		}
+		m := e.ClientMethods[i]
+		return msgShape{fixed: m.Length.Fixed, size: m.Length.Size, width: int(m.Length.Var)}, ent + "." + m.Name, nil
+	case id >= entityPropertyBase:
+		i := int(id - entityPropertyBase)
+		if i >= len(e.Properties) {
+			return msgShape{}, "", fmt.Errorf("element %#02x: %s has no property %d", id, ent, i)
+		}
+		// A STANDALONE property element is framed by the property's own
+		// declared length: a fixed-size value (`health`, INT16) carries no
+		// length field at all, a variable one (`damageStickers`, ARRAY) is
+		// `[id][u16 len][value]`. Reading a length off a fixed property is
+		// what made this checker reject a correct bundle — and the same
+		// mistake in the encoder is what shifts every element after it and
+		// crashes the client on `pCurr_ + nBytes <= pEnd_`.
+		pr := e.Properties[i]
+		return msgShape{fixed: pr.Length.Fixed, size: pr.Length.Size, width: int(pr.Length.Var)}, ent + "." + pr.Name, nil
 	}
-	return *found, name, nil
+	return msgShape{}, "", fmt.Errorf("element %#02x is not in the %s table", id, ent)
 }
 
 // ParseClientApp walks an app exactly as the client does and returns the
 // messages it yields, or the first byte it could not consume.
+//
+// The method and property slots are per-entity, and a bundle can address
+// several entities in a row (`selectEntity(vehicle)` → a Vehicle method →
+// `selectPlayerEntity` → an Avatar method, which is exactly what a shot
+// sends), so the walk carries a current entity and may SWITCH it at any
+// element. Because the app does not say which entity an id belongs to, the
+// walk backtracks over the entity choice: the app is accepted only if some
+// path consumes it to its last byte. A bundle the client would drop has no
+// such path.
 func ParseClientApp(d *entdef.Dispatch, app []byte) ([]clientMsg, error) {
-	var out []clientMsg
-	for i := 0; i < len(app); {
-		id := app[i]
-		shape, name, err := clientShape(d, id)
-		if err != nil {
-			return out, fmt.Errorf("at %d: %w", i, err)
+	var ents []string
+	for _, n := range []string{"Account", "Avatar", "Vehicle"} {
+		if d.Entity(n) != nil {
+			ents = append(ents, n)
 		}
-		i++
-		var body []byte
-		if shape.fixed {
-			if i+shape.size > len(app) {
-				return out, fmt.Errorf("%s (%#02x) at %d: %s, %d B left", name, id, i-1, shape, len(app)-i)
-			}
-			body = app[i : i+shape.size]
-			i += shape.size
-		} else {
-			w := shape.width
-			if w <= 0 {
-				w = 2
-			}
-			if i+w > len(app) {
-				return out, fmt.Errorf("%s (%#02x) at %d: length needs %d B, %d left", name, id, i-1, w, len(app)-i)
-			}
-			n := 0
-			for k := 0; k < w; k++ {
-				n |= int(app[i+k]) << (8 * k)
-			}
-			i += w
-			if i+n > len(app) {
-				return out, fmt.Errorf("%s (%#02x): payload %d B, %d left", name, id, n, len(app)-i)
-			}
-			body = app[i : i+n]
-			i += n
-		}
-		out = append(out, clientMsg{ID: id, Body: body})
 	}
-	return out, nil
+	if len(ents) == 0 {
+		return nil, fmt.Errorf("no entity table to read the app against")
+	}
+	type state struct{ off, ent int }
+	seen := make(map[state]bool)
+	var walk func(off, ent int, out []clientMsg) ([]clientMsg, error)
+	walk = func(off, ent int, out []clientMsg) ([]clientMsg, error) {
+		if off == len(app) {
+			return out, nil
+		}
+		if off > len(app) {
+			return nil, fmt.Errorf("at %d: ran past the end", off)
+		}
+		if seen[state{off, ent}] {
+			return nil, fmt.Errorf("at %d: loop", off)
+		}
+		seen[state{off, ent}] = true
+		// Try the entity the bundle is already addressing first, then the
+		// others: a `selectEntity`/`selectPlayerEntity` may have switched it.
+		order := []int{ent}
+		for i := range ents {
+			if i != ent {
+				order = append(order, i)
+			}
+		}
+		id := app[off]
+		var lastErr error
+		for _, e := range order {
+			shape, name, err := clientShape(d, ents[e], id)
+			if err != nil {
+				if lastErr == nil {
+					lastErr = err
+				}
+				continue
+			}
+			body := []byte(nil)
+			next := off + 1
+			if shape.fixed {
+				if next+shape.size > len(app) {
+					lastErr = fmt.Errorf("at %d: %s wants %d B, %d left", off, name, shape.size, len(app)-next)
+					continue
+				}
+				body = app[next : next+shape.size]
+				next += shape.size
+			} else {
+				width := shape.width
+				if width <= 0 {
+					width = 1
+				}
+				if next+width > len(app) {
+					lastErr = fmt.Errorf("at %d: %s length header overruns", off, name)
+					continue
+				}
+				n := 0
+				for k := 0; k < width; k++ {
+					n |= int(app[next+k]) << (8 * k)
+				}
+				next += width
+				if next+n > len(app) {
+					lastErr = fmt.Errorf("at %d: %s (%#02x): payload %d B, %d left", off, name, id, n, len(app)-next)
+					continue
+				}
+				body = app[next : next+n]
+				next += n
+			}
+			msgs, err := walk(next, e, append(out, clientMsg{ID: id, Body: body}))
+			if err == nil {
+				return msgs, nil
+			}
+			lastErr = err
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("at %d: element %#02x is not in any entity table", off, id)
+		}
+		return nil, lastErr
+	}
+	return walk(0, 0, nil)
 }
 
 // CheckClientApp is ParseClientApp as a pass/fail check.
