@@ -554,8 +554,15 @@ func bitsRequired(n int) int {
 	return bits
 }
 
-// nrlNestedRecord builds the body of a NESTED property update: `kind 1`, then
+// nrlNestedRecord builds the body of a NESTED property update: `kind 2`, then
 // the compressed path and the leaf value.
+//
+// The record kind is the client's dispatch: 0 is the whole value, 1 is a
+// SLICE change (`setSlice_<prop>`) and 2 is a nested one (`setNested_<prop>`)
+// — the reference's `NrlReader::decode_update` maps them in that order. Sending
+// 1 for a field path calls `setSlice_vehiclesInfo` with an int where a range
+// belongs and the client raises `TypeError: 'int' object is not iterable`, so
+// the kill never lands.
 //
 // The path is `[1][index]` per container descended into, then `[0][index]` for
 // the leaf, each index `bitsRequired(count)` bits wide, MSB-first; the bytes
@@ -564,7 +571,7 @@ func bitsRequired(n int) int {
 // client's `setNested_<prop>` handlers receive.
 func nrlNestedRecord(path []byte, value []byte) []byte {
 	var buf bytes.Buffer
-	buf.WriteByte(1)
+	buf.WriteByte(2)
 	writePackedU24(&buf, uint32(len(path)+len(value)))
 	buf.Write(path)
 	buf.Write(value)

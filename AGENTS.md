@@ -1276,13 +1276,15 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   kill count stays 0 and no kill message appears. The client's handlers are
   `setNested_vehiclesInfo` (buffers one field's diff) and the `__generation`
   bump that flushes it into `ClientArena` (`setVehInfo_isAlive` →
-  `updateVehicleIsAlive` → `onVehicleKilled`). The wire is NRL record kind 1:
-  `[node u16 BE][1][len packed-u24][compressed path][value]`, the path
+  `updateVehicleIsAlive` → `onVehicleKilled`). The wire is NRL record kind 2:
+  `[node u16 BE][2][len packed-u24][compressed path][value]`, the path
   `[1][prop][1][elem][0][field]` bits MSB-first, each index
   `bitsRequired(count)` wide (`EncodeNrlNestedField`). Send the victim's
   `isAlive`/`deathInfo` + a generation, then the shooter's `frags`/`stFrags` +
   another generation (the diff buffer is per field name, so each vehicle needs
-  its own flush).
+  its own flush). The kind matters: 1 is a SLICE change
+  (`setSlice_vehiclesInfo`, which raises `TypeError: 'int' object is not
+  iterable` on a field path) and 2 is the nested one.
 - **A STANDALONE property element is framed by the property's own declared
   length, not by `updateEntity`'s u16.** `EntityDispatch.Properties[i].Length`
   is the client's element length: a fixed-size value (`health`, INT16) is

@@ -743,8 +743,10 @@ func TestNrlNestedPathBits(t *testing.T) {
 	if got := binary.BigEndian.Uint16(el[3:5]); got != comp.FirstChild {
 		t.Fatalf("node = %d, want the property node %d", got, comp.FirstChild)
 	}
-	if el[5] != 1 {
-		t.Fatalf("record kind = %d, want 1 (nested)", el[5])
+	// Kind 2 is the nested change; 1 is a slice change, which the client
+	// dispatches to setSlice_vehiclesInfo and which raises there.
+	if el[5] != 2 {
+		t.Fatalf("record kind = %d, want 2 (nested)", el[5])
 	}
 	// The record length is the NRL packed-u24: one byte below 255, else 0xFF
 	// plus three little-endian bytes.
