@@ -707,6 +707,8 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	// context is the sticker id. The client's `addDamageSticker` draws it.
 	if res.Pierced && sh.HasPiercedSticker {
 		sticker := hitPointValue(encodeHitSegment(res.Bounds, res.Local, res.LocalDir, res.Part, sh.PiercedSticker), hitParams(sh, hitEffectPierced))
+		s.logf("arena %d: sticker %d on part %d (local %v, dir %v, bounds %v..%v)",
+			arenaID, sh.PiercedSticker, res.Part, res.Local, res.LocalDir, res.Bounds[0], res.Bounds[1])
 		s.mu.Lock()
 		st.dummyStickers = append(st.dummyStickers, sticker)
 		stickers := append([]entdef.Value(nil), st.dummyStickers...)
@@ -798,8 +800,8 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if fireNode != 0 {
 		go s.burnFire(conn, from, st, arenaID, dummy, dummyID, fire.Attacker, fireNode)
 	}
-	s.logf("arena %d: shot %s hit dummy %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
-		arenaID, sh.Name, dummyID, damage, oldHealth, newHealth, res.Pierced, res.Armor)
+	s.logf("arena %d: shot %s hit dummy %d part %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
+		arenaID, sh.Name, dummyID, res.Part, damage, oldHealth, newHealth, res.Pierced, res.Armor)
 }
 
 // killVehiclesInfo marks the victim dead in the arena's `vehiclesInfo` and
