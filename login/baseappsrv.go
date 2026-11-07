@@ -2050,26 +2050,8 @@ func (s *BaseAppServer) answerShellSetting(conn Transport, from *net.UDPAddr, st
 	if comp.TypeID == 0 || vehicle == nil {
 		return nil
 	}
-	dt := entdef.Alias("VEHICLE_SETTINGS")
-	if dt == nil {
-		return nil
-	}
-	var buf bytes.Buffer
-	if err := entdef.NewCodec().Write(&buf, dt, vehicleSettingsValue(vehicle.ID, loaded, next)); err != nil {
-		s.logf("shell setting: encode: %v", err)
-		return nil
-	}
-	el, err := EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("vehicleSettings"), buf.Bytes())
-	if err != nil {
-		s.logf("shell setting: element: %v", err)
-		return nil
-	}
-	st.sendMu.Lock()
-	seq, cumul := s.nextSeq(st)
-	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
-	st.sendMu.Unlock()
-	if err != nil {
-		s.logf("shell setting: send: %v", err)
+	if err := s.sendVehicleSettings(conn, from, st, comp, vehicle, loaded, next); err != nil {
+		s.logf("shell setting: %v", err)
 		return nil
 	}
 	s.logf("shell setting %d = %d (loaded %d, next %d)", code, value, loaded, next)
@@ -2083,6 +2065,63 @@ func (s *BaseAppServer) answerShellSetting(conn Transport, from *net.UDPAddr, st
 		}
 	}
 	return nil
+}
+
+// sendVehicleSettings re-sends `OwnVehicle.vehicleSettings`: the loaded shell
+// (`CURRENT_SHELLS`) and the next one (`NEXT_SHELLS`).
+//
+// The client's `AmmoController` follows these two and nothing else — the ammo
+// panel's loaded/next slots and the shell it will fire both read them — so
+// every change of either has to go out, including the promotion on firing.
+func (s *BaseAppServer) sendVehicleSettings(conn Transport, from *net.UDPAddr, st *clientState, comp nrlComponent, vehicle *Entity, loaded, next int32) error {
+	dt := entdef.Alias("VEHICLE_SETTINGS")
+	if dt == nil {
+		return fmt.Errorf("no VEHICLE_SETTINGS alias")
+	}
+	var buf bytes.Buffer
+	if err := entdef.NewCodec().Write(&buf, dt, vehicleSettingsValue(vehicle.ID, loaded, next)); err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+	el, err := EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("vehicleSettings"), buf.Bytes())
+	if err != nil {
+		return fmt.Errorf("element: %w", err)
+	}
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("send: %w", err)
+	}
+	return nil
+}
+
+// promoteNextShell makes the shell selected as NEXT the loaded one, which is
+// what firing does.
+//
+// The official server reloads the NEXT shell after a shot: load A, select B,
+// fire, and the gun reloads B. The client does not do this itself — its
+// `AmmoController.setCurrentShellCD` is driven by `vehicleSettings` — so
+// without the promotion the reload loads A again and the selection is lost.
+func (s *BaseAppServer) promoteNextShell(conn Transport, from *net.UDPAddr, st *clientState, comp nrlComponent) {
+	s.mu.Lock()
+	loaded, next := st.loadedShell, st.nextShell
+	vehicle := st.vehicle
+	if next == 0 || next == loaded || vehicle == nil {
+		s.mu.Unlock()
+		return
+	}
+	st.loadedShell = next
+	arenaID := uint64(0)
+	if st.arena != nil {
+		arenaID = st.arena.ArenaID
+	}
+	s.mu.Unlock()
+	if err := s.sendVehicleSettings(conn, from, st, comp, vehicle, next, next); err != nil {
+		s.logf("arena %d: promote next shell: %v", arenaID, err)
+		return
+	}
+	s.logf("arena %d: fired %d, reloading the selected %d", arenaID, loaded, next)
 }
 
 // answerChangeSetting handles `Avatar.vehicle_changeSetting(code, value)`.
@@ -2287,9 +2326,13 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	if comp.TypeID == 0 || reload <= 0 {
 		return nil
 	}
-	// The shot consumes a shell. This goes out before the reload so the
-	// panel's count drops as the reload starts.
+	// The shot consumes the LOADED shell. This goes out before the reload so
+	// the panel's count drops as the reload starts.
 	s.decrementAmmo(conn, from, st, comp)
+	// The gun then reloads the shell selected as NEXT, not the one just
+	// fired: the official server promotes it, and the client follows
+	// `vehicleSettings` rather than doing it itself.
+	s.promoteNextShell(conn, from, st, comp)
 	if err := s.sendReloadStart(conn, from, st, comp, arenaID, reload); err != nil {
 		s.logf("arena %d: shoot: reload start failed: %v", arenaID, err)
 	}

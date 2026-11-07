@@ -875,3 +875,89 @@ func TestResolveShotHitsTheTurret(t *testing.T) {
 		t.Fatalf("hull shot: hit=%v part=%d, want the hull (1)", res.Hit, res.Part)
 	}
 }
+
+// TestFiringPromotesTheNextShell pins the shell the gun reloads after a shot.
+//
+// Load A, select B as the next shell, fire: the official server reloads B, not
+// A. The client does not do it itself — its `AmmoController.setCurrentShellCD`
+// is driven by the `vehicleSettings` property — so firing has to promote the
+// next shell and re-send the settings.
+func TestFiringPromotesTheNextShell(t *testing.T) {
+	d := testDispatch(t)
+	s := &BaseAppServer{
+		cfg:        BaseAppConfig{Dispatch: d},
+		resend:     newResendQueue(400*time.Millisecond, 20*time.Second),
+		pending:    map[uint32]*clientState{},
+		byStageKey: map[uint32]*clientState{},
+		byAddr:     map[string]*clientState{},
+	}
+	ammoType := entdef.Alias("VEHICLE_AMMO")
+	if ammoType == nil {
+		t.Skip("no VEHICLE_AMMO alias")
+	}
+	shell := func(cd, qty int64) entdef.Value {
+		v := entdef.ZeroValue(ammoType)
+		v = dictSet(v, "compactDescr", entdef.Value{Kind: entdef.VInt, Int: cd})
+		v = dictSet(v, "quantity", entdef.Value{Kind: entdef.VUint, Uint: uint64(qty)})
+		v = dictSet(v, "quantityInClip", entdef.Value{Kind: entdef.VUint, Uint: 1})
+		return v
+	}
+	st := &clientState{
+		blockKey:    "0123456789abcdef",
+		resendKey:   "test",
+		vehicle:     NewEntity(7, d.Entity("Vehicle")),
+		ownVehicle:  nrlComponent{TypeID: 53, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
+		gunSpec:     gunSpec{Dispersion: dispersionSpec{ReloadTime: 10, ShellCD: 100}},
+		ammoList:    entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{shell(100, 5), shell(200, 5)}},
+		loadedShell: 100,
+		nextShell:   200,
+		tick:        100,
+		arena:       &ArenaHandoff{ArenaID: 1},
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	tr := &fakeTransport{}
+	if err := s.answerShoot(tr, addr, st); err != nil {
+		t.Fatalf("answerShoot: %v", err)
+	}
+	if st.loadedShell != 200 || st.nextShell != 200 {
+		t.Fatalf("loaded/next = %d/%d, want 200/200 (the selected shell is promoted)", st.loadedShell, st.nextShell)
+	}
+	// The fired shell is the one that went down, not the promoted one.
+	for _, want := range []struct{ cd, qty int64 }{{100, 4}, {200, 5}} {
+		for _, v := range st.ammoList.Seq {
+			cd, _ := v.Get("compactDescr")
+			q, _ := v.Get("quantity")
+			if cd.Int == want.cd && int64(q.Uint) != want.qty {
+				t.Fatalf("shell %d quantity = %d, want %d", want.cd, q.Uint, want.qty)
+			}
+		}
+	}
+	// One of the packets is the new `vehicleSettings` with CURRENT_SHELLS=200.
+	dt := entdef.Alias("VEHICLE_SETTINGS")
+	found := false
+	for _, pkt := range tr.writes {
+		app := findAppInPacket(t, pkt, st.blockKey)
+		if len(app) < 9 || app[0] != elNrlData {
+			continue
+		}
+		off := 3 + 2 + 1 // element header, node, kind
+		n := int(app[off])
+		off++
+		if n == 0xFF {
+			n = int(app[off]) | int(app[off+1])<<8 | int(app[off+2])<<16
+			off += 3
+		}
+		val, err := entdef.NewCodec().Read(bytes.NewReader(app[off:off+n]), dt)
+		if err != nil || val.Kind != entdef.VSeq || len(val.Seq) != 2 {
+			continue
+		}
+		cur, _ := val.Seq[0].Get("value")
+		nxt, _ := val.Seq[1].Get("value")
+		if cur.Int == 200 && nxt.Int == 200 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no vehicleSettings with CURRENT_SHELLS=200 was sent")
+	}
+}
