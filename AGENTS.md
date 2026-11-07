@@ -72,9 +72,13 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `lobby/` — offline application layer, stdlib-only (no transport):
   `vehicle_data.go` + `vehicle_data_gen.go` (COMMITTED codegen output:
   1251 vehicles, components, per-turret guns, shells — built by
-  `cmd/wotgendata` from 2.4.0.0 item_defs (1252 list rows minus the
-  Observer pseudo-row); `GeneratedTable`/`GunSpec`
-  replace XML at runtime),
+  `cmd/wotgendata` from **2.4.0.0** item_defs (1252 list rows minus the
+  Observer pseudo-row); `GeneratedTable`/`GunSpec` replace XML at runtime.
+  **The served build is 2.4.1.1** (see the "Client build" note): this table
+  is the one remaining 2.4.0 input, and it is safe only because the gun and
+  shell descriptors it carries have not changed for the vehicles in use —
+  regenerate it from the live `scripts.pkg` item_defs if a shell or gun id
+  ever mismatches),
   `garage.go` `OwnableVehicle` carries `Class`/`Level` from the list
   entry's `<tags>`/`<level>`, which is what the matchmaker's census
   buckets by; `ParseIntDescr` subtracts
@@ -501,6 +505,10 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   unpacked item_defs; rerun + `gofmt -w` after client updates.
 - `cmd/wotgarage/main.go` — codegen CLI (`-item-defs DIR -out
   lobby/garage_gen.go`): every OWN-able vehicle from the client's
+  **2.4.1.1** `scripts.pkg` item_defs (extract `scripts/item_defs` from
+  `res/packages/scripts.pkg`; the 2.4.0.0 tree produces descriptors the
+  client rejects as `compact descriptor to XML mismatch`), carrying each
+  hull's `<maxHealth>` as `MaxHealth`; every OWN-able vehicle from the client's
   `item_defs/vehicles/<nation>/list.xml` (premium, collector, reward,
   event, variant — only the `maps_training` bots are dropped).
   `wotserver -garage-all` (or `GARAGE_ALL=1 ./start-server.sh`, or
