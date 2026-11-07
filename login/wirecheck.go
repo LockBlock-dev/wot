@@ -58,6 +58,11 @@ func clientShape(d *entdef.Dispatch, ent string, id byte) (msgShape, string, err
 	// has no shape to resolve.
 	case elSelectPlayerEntity:
 		return msgShape{fixed: true, size: 0}, "selectPlayerEntity", nil
+	case 0x44:
+		// switchBaseApp: FIXED 9, `[ip4][port BE][salt u16 LE][reset]`. It is
+		// a connection-level element, not an entity one, so it is resolved
+		// here rather than against the entity table.
+		return msgShape{fixed: true, size: 9}, "switchBaseApp", nil
 	case elUpdateFrequency:
 		return msgShape{fixed: true, size: 7}, "updateFrequency", nil
 	case elTickSync:

@@ -574,9 +574,69 @@ func TestEntryShellSettingsDoNotPreSelectTheNextShell(t *testing.T) {
 	}
 }
 
-// TestLeaveArenaResetIsReliable pins the leave reset's stream. It must be
-// RELIABLE: an unreliable one shares the unreliable counter with the arena
-// ticks, so the client's packet receiver drops it as out-of-order
+// TestLeaveArenaSwitchesBackToStage1 pins the leave's real shape: a
+// `switchBaseApp` back to the stage-1 endpoint, and the session reset to
+// "just admitted" so the client's re-handshake walks the ordinary login
+// (stage-1 22B → rotation → createBasePlayer → [44] → stage-2 22B → flood →
+// Account → showGUI).
+//
+// Answering the leave with a login reply on the battle connection instead
+// creates the Account there, and `SmartServerConnection` tears it down 0.8 s
+// later (`NRL Integration: Client Hub destroyed`, `Account.onBecomeNonPlayer`,
+// `HANGAR LOADING STATE: DISCONNECTED`).
+func TestLeaveArenaSwitchesBackToStage1(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	stage1 := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 32850}
+	s.cfg.Stage1 = stage1
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	st := &clientState{
+		accountID: 2, name: "admin", blockKey: "0123456789abcdef", entityID: 0x1234,
+		stage2Addr: addr, postSeq: 100, postCumul: 3, tick: 1000,
+		stage2Key: 0xabcdef, flooded: true, entered: true, resetSent: true,
+		arena: &ArenaHandoff{ArenaID: 9},
+	}
+	s.mu.Lock()
+	s.byAddr[addr.String()] = st
+	s.mu.Unlock()
+	tr := &fakeTransport{}
+	if err := s.answerLeaveArena(tr, addr, st); err != nil {
+		t.Fatalf("answerLeaveArena: %v", err)
+	}
+	if len(tr.writes) != 1 {
+		t.Fatalf("%d packets, want 1 (the switchBaseApp)", len(tr.writes))
+	}
+	app := findAppInPacket(t, tr.writes[0], st.blockKey)
+	// [13][tag][44][ip4][port BE][00 00][01]
+	if app == nil || len(app) < 12 || app[0] != elTickSync || app[2] != 0x44 {
+		t.Fatalf("app = % x, want [13][tag][44] + the stage-1 address", app)
+	}
+	if !bytes.Equal(app[3:7], []byte{127, 0, 0, 1}) {
+		t.Errorf("switch address = %v, want 127.0.0.1", app[3:7])
+	}
+	if got := int(app[7])<<8 | int(app[8]); got != 32850 {
+		t.Errorf("switch port = %d, want 32850", got)
+	}
+	if app[9] != 0 || app[10] != 0 || app[11] != 1 {
+		t.Errorf("switch trailer = % x, want 00 00 01 (reset_entities)", app[9:12])
+	}
+	// The session is back to "just admitted": the stage-2 handshake state is
+	// gone, so the client's next 22B mints a fresh rotation and the flood
+	// runs again.
+	if st.stage2Key != 0 || st.stage2Addr != nil || st.flooded {
+		t.Errorf("stage2 state = key %#x addr %v flooded %v, want a fresh handshake",
+			st.stage2Key, st.stage2Addr, st.flooded)
+	}
+	if st.arena != nil || st.entered || st.resetSent {
+		t.Errorf("arena state = %v entered %v resetSent %v, want cleared", st.arena, st.entered, st.resetSent)
+	}
+	if _, ok := s.byAddr[addr.String()]; ok {
+		t.Error("the old socket is still bound to the session")
+	}
+}
+
+// TestLeaveArenaResetIsReliable pins the fallback leave (no stage-1 endpoint):
+// a RELIABLE reset. An unreliable one shares the unreliable counter with the
+// arena ticks, so the client's packet receiver drops it as out-of-order
 // (`Dropping out-of-order unreliable packet seq=…`) and never processes the
 // reset — no `enableEntities`, no Account re-entry, the lobby sync calls are
 // dropped as "no entity between reset and re-entry", and the unacked 10 Hz

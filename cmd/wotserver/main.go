@@ -633,6 +633,7 @@ func startBaseApp(a baseAppArgs) (*login.BaseAppServer, *net.UDPConn, *net.UDPCo
 	}
 	base, err := login.NewBaseAppServer(login.BaseAppConfig{
 		Redirect:      redirect,
+		Stage1:        advertiseOf(s1conn),
 		Settings:      settings,
 		SettingsSmall: settingsSmall,
 		// The bundle is authored from the defs and the server's own

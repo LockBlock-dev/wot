@@ -159,6 +159,14 @@ type GarageItem struct {
 type BaseAppConfig struct {
 	Redirect *net.UDPAddr
 
+	// Stage1 is the stage-1 endpoint the client is sent back to when it
+	// leaves a battle. The leave is a BaseApp re-entry, not a login reply on
+	// the battle connection: the client closes that connection and
+	// re-handshakes, exactly like a first login (22B → rotation →
+	// createBasePlayer → [44] redirect → stage-2 → flood → Account →
+	// showGUI). nil = no switchBaseApp on leave.
+	Stage1 *net.UDPAddr
+
 	// Stage1Space is the space name the stage-1 1a/50 small announces
 	// (the genuine capture carries "default"). The client enters this
 	// space after the redirect; an empty value falls back to "default".

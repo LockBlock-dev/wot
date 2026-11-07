@@ -1838,10 +1838,24 @@ func (s *BaseAppServer) markClientReady(st *clientState) {
 // answerLeaveArena takes a client out of its battle and back to the lobby.
 //
 // "Back to hangar" ends in `Avatar.leaveArena` → `self.base.leaveArena()`, a
-// base method on the Avatar. Nothing answered it, so the client sat in the
-// battle forever. The way out is the way in, in reverse: reset the entities,
-// drop the arena, and let the `enableEntities` the reset provokes take the
-// lobby path.
+// base method on the Avatar.
+//
+// The leave is a BaseApp RE-ENTRY, not a login reply on the battle connection.
+// Measured: answering the `enableEntities` the reset provokes with a
+// `CreateBasePlayer` on the battle connection makes the client create the
+// Account there, start the lobby app, and then tear it all down 0.8 s later —
+// `NRL Integration: Client Hub destroyed`, `Account.onBecomeNonPlayer`,
+// `HANGAR LOADING STATE: DISCONNECTED` — because `SmartServerConnection` still
+// treats that connection as the battle's. The one leave that worked went
+// through the client's own reconnect: LoginApp → LOGGED_ON → stage-1 →
+// `[44]` → stage-2 → Account → `showGUI`.
+//
+// So the leave sends `switchBaseApp` back to the stage-1 endpoint and resets
+// the session to "just admitted": the client closes the battle connection,
+// re-handshakes on stage-1 (22B → rotation → createBasePlayer → `[44]`
+// redirect), and walks the ordinary stage-2 login on a fresh socket — flood,
+// session dict, stats, Account, `showGUI`. `reset_entities` is 1 in the
+// element, so the client drops the battle's entities itself.
 func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *clientState) error {
 	s.mu.Lock()
 	arena := st.arena
@@ -1849,40 +1863,63 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 		s.mu.Unlock()
 		return nil // not in a battle: nothing to leave
 	}
-	// Stop the ticker BEFORE dropping the resend queue. A tick that lands
-	// between the forget and the arena clear is tracked again and then
-	// resent for the whole give-up window; the client, now back in its login
-	// state, drops those resends as "unexpected packet on external
-	// interface" and disconnects.
+	if s.cfg.Stage1 == nil {
+		// No re-entry endpoint: keep the old behaviour (reset + a login reply
+		// on this connection) rather than leaving the client stuck in the
+		// battle.
+		st.arena = nil
+		st.entered = false
+		st.resetSent = true
+		st.vehicle = nil
+		st.avatar = nil
+		s.mu.Unlock()
+		s.resend.forget(st.resendKey)
+		resetApp := answerApp([]byte{elResetEntities, 0})
+		if err := s.mintPost(conn, from, st, resetApp); err != nil {
+			return err
+		}
+		if s.cfg.Arenas != nil && s.cfg.Arenas.Leave != nil {
+			s.cfg.Arenas.Leave(st.accountID)
+		}
+		s.logf("stage2 %s: left arena %d — reset sent (no stage-1 endpoint), back to the lobby", from, arena.ArenaID)
+		return nil
+	}
+	// Reset the session to "just admitted". The client's next datagrams come
+	// from a new socket, so the old address binding and the whole stage-2
+	// handshake state go: the stage-1 22B mints a fresh rotation key, the
+	// stage-2 22B mints another, and `serveBulk` runs the flood again.
 	st.arena = nil
 	st.entered = false
-	st.resetSent = true
+	st.resetSent = false
 	st.vehicle = nil
 	st.avatar = nil
+	st.dummy = nil
+	st.stage2Key = 0
+	st.stage2Addr = nil
+	st.flooded = false
+	st.postHold = false
+	st.accountDue = time.Time{}
+	st.tailAt = time.Time{}
+	st.addr = nil
+	delete(s.byAddr, from.String())
 	s.mu.Unlock()
-	// Everything queued refers to entities the client is about to drop.
+	// Everything queued refers to entities the client is about to drop, and a
+	// retransmission would arrive on a connection the client is closing.
 	s.resend.forget(st.resendKey)
-	resetApp := answerApp([]byte{elResetEntities, 0})
-	s.logf("stage2 %s: leaveArena reset app % x", from, resetApp)
-	// RELIABLE, like the arena-entry reset. An unreliable one is dropped by
-	// the client's packet receiver as out-of-order (`Dropping out-of-order
-	// unreliable packet seq=…`) because it shares the unreliable counter with
-	// the arena ticks, and then the client never processes the reset: it
-	// never sends `enableEntities`, our Account re-entry never happens, the
-	// lobby sync calls are dropped as "no entity between reset and
-	// re-entry", the 10 Hz ticks pile up unacked and the client's channel
-	// overflows ("Disconnecting since channel … has overflowed").
-	if err := s.mintPost(conn, from, st, resetApp); err != nil {
-		return err
-	}
-	// Drop the slot as well as the session's view of it. The reset makes the
-	// client send `enableEntities`, and the rejoin hook answers that — so
-	// without this the client is dragged straight back into the battle it just
-	// left, mid-teardown, and asserts `pEntity`.
+	// Drop the slot as well as the session's view of it: the client is
+	// re-entering the lobby, and a held slot would drag it back into the
+	// battle it just left.
 	if s.cfg.Arenas != nil && s.cfg.Arenas.Leave != nil {
 		s.cfg.Arenas.Leave(st.accountID)
 	}
-	s.logf("stage2 %s: left arena %d — reset sent, back to the lobby", from, arena.ArenaID)
+	app, err := redirectApp(s.cfg.Stage1)
+	if err != nil {
+		return err
+	}
+	if err := s.mintPost(conn, from, st, app); err != nil {
+		return err
+	}
+	s.logf("stage2 %s: left arena %d — switchBaseApp %v, the client re-enters on stage-1", from, arena.ArenaID, s.cfg.Stage1)
 	return nil
 }
 
