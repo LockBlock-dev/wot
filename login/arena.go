@@ -823,10 +823,20 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		}
 		seq++
 	}
-	if err := s.sendReliableEntity(conn, from, st, infoApp, seq, cumul); err != nil {
-		return seq, err
+	if len(infoApp) > DefaultBulkPayload {
+		// The whole vehicle list in one element: it has to be fragmented, and
+		// the chain consumes one sequence number per frame.
+		n, err := s.sendReliableEntityLarge(conn, from, st, infoApp, seq, cumul)
+		if err != nil {
+			return seq, err
+		}
+		seq += n
+	} else {
+		if err := s.sendReliableEntity(conn, from, st, infoApp, seq, cumul); err != nil {
+			return seq, err
+		}
+		seq++
 	}
-	seq++
 	s.logf("stage2 %s: AvatarInfo %d created (createEntityDetailed %dB, NRL %dB, %d vehicles)",
 		from, info.ID, len(icreate), len(infoApp), len(vehicles))
 

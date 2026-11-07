@@ -1656,6 +1656,31 @@ func (s *BaseAppServer) sendReliableEntity(conn Transport, to *net.UDPAddr, st *
 	return s.sendReliable(conn, to, st, app, seq, cumul)
 }
 
+// sendReliableEntityLarge sends an entity element that does not fit one
+// datagram as a reliable FRAGMENT chain, and returns how many sequence numbers
+// it consumed (the caller's next element must use seq+n).
+//
+// A 30-vehicle `AvatarVehiclesInfo` component create is 4.4 KB and one
+// datagram carries 1223 B. Sent whole it is dropped by the channel, the client
+// never runs `ClientArena.updateVehiclesList`, and the battle then has no team
+// panels and no tank of its own (`KeyError: 100003` in `shootInSkyPoint`).
+func (s *BaseAppServer) sendReliableEntityLarge(conn Transport, to *net.UDPAddr, st *clientState, app []byte, seq, cumul uint32) (uint32, error) {
+	s.checkWire(app)
+	frames, err := BuildFrames(st.blockKey, app, DefaultBulkPayload, seq)
+	if err != nil {
+		return 0, err
+	}
+	st.sendMu.Lock()
+	defer st.sendMu.Unlock()
+	for i, frame := range frames {
+		if _, err := conn.WriteToUDP(frame, to); err != nil {
+			return uint32(i), err
+		}
+		s.resend.track(st.resendKey, to.String(), seq+uint32(i), frame)
+	}
+	return uint32(len(frames)), nil
+}
+
 // AccountSettingsKeys is the part of the lobby's settings document that has to
 // ride the Account entity when it is re-created after a battle.
 //
