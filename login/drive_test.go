@@ -210,14 +210,15 @@ func TestEncodeForcedPosition(t *testing.T) {
 	}
 }
 
-// TestHullHandbrakeStopsAndBlocksTurning pins the handbrake.
+// TestHullHandbrakeSlidesInsteadOfStopping pins the handbrake's drift.
 //
-// The client's space bar is `CMD_BLOCK_TRACKS`, which `Avatar.moveVehicle` folds
-// into the same flag byte it sends to `cell.vehicle_moveWith` as
-// `MOVEMENT_FLAGS.BLOCK_TRACKS` (64). It locks the tracks, so the tank brakes to
-// a stop and cannot pivot on the spot — ignoring the bit leaves the hull driving
-// straight through the handbrake.
-func TestHullHandbrakeStopsAndBlocksTurning(t *testing.T) {
+// The client's space bar is `CMD_BLOCK_TRACKS`, which `Avatar.moveVehicle`
+// folds into the same flag byte it sends to `cell.vehicle_moveWith` as
+// `MOVEMENT_FLAGS.BLOCK_TRACKS` (64). Locking the tracks drops their lateral
+// grip, so the hull keeps its velocity vector while the steering turns it
+// under that vector: a slide. It is not a dead stop, and it is not "drive
+// straight through the handbrake" either.
+func TestHullHandbrakeSlidesInsteadOfStopping(t *testing.T) {
 	h := hull{Limits: motionLimits{SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5}}
 	h.Flags = moveForward
 	for i := 0; i < 100; i++ {
@@ -226,20 +227,34 @@ func TestHullHandbrakeStopsAndBlocksTurning(t *testing.T) {
 	if h.Speed < 30 {
 		t.Fatalf("speed = %v, want the tank up to speed before the handbrake", h.Speed)
 	}
-	// Handbrake while still holding forward and a turn: it must brake, not turn.
+	// Handbrake while still holding forward and a turn: the tracks lock, the
+	// steering still bites while the hull is moving, and the velocity lags.
 	h.Flags = moveForward | moveRotateRight | moveBlockTracks
 	yaw := h.Direction[2]
-	for i := 0; i < 50; i++ {
+	h.step(0.1)
+	if h.YawRate == 0 {
+		t.Fatal("yawRate = 0, want the steering to bite while moving")
+	}
+	if h.Speed <= 0 {
+		t.Fatalf("speed = %v, want the hull to keep its momentum", h.Speed)
+	}
+	if h.Direction[2] == yaw {
+		t.Fatalf("yaw = %v, want the hull to turn", h.Direction[2])
+	}
+	// The velocity is not along the heading: the hull is sliding. Keep the
+	// handbrake on and the slide builds instead of being gripped away.
+	for i := 0; i < 10; i++ {
 		h.step(0.1)
 	}
-	if h.Speed != 0 {
-		t.Fatalf("speed = %v, want 0 with the handbrake on", h.Speed)
+	if lateral := lateralSpeed(&h); abs32(lateral) < 3 {
+		t.Fatalf("lateral speed = %v, want a slide", lateral)
 	}
-	if h.YawRate != 0 {
-		t.Fatalf("yawRate = %v, want 0 with the handbrake on", h.YawRate)
+	// The brake still wins in the end.
+	for i := 0; i < 100; i++ {
+		h.step(0.1)
 	}
-	if h.Direction[2] != yaw {
-		t.Fatalf("yaw = %v, want %v (the handbrake blocks the tracks)", h.Direction[2], yaw)
+	if h.Speed != 0 || h.Velocity != [2]float32{} {
+		t.Fatalf("speed = %v velocity = %v, want the hull stopped", h.Speed, h.Velocity)
 	}
 	// Releasing it lets the tank drive again.
 	h.Flags = moveForward
@@ -249,4 +264,42 @@ func TestHullHandbrakeStopsAndBlocksTurning(t *testing.T) {
 	if h.Speed <= 0 {
 		t.Fatalf("speed = %v, want the tank moving again after the handbrake", h.Speed)
 	}
+}
+
+// TestHullHandbrakeCannotPivotInPlace keeps the one behaviour the old model
+// got right: with the tracks locked and no speed, the steering has nothing to
+// push against, so the hull cannot turn on the spot.
+func TestHullHandbrakeCannotPivotInPlace(t *testing.T) {
+	h := hull{Limits: motionLimits{RotationSpeed: 0.5}}
+	h.Flags = moveRotateRight | moveBlockTracks
+	yaw := h.Direction[2]
+	for i := 0; i < 50; i++ {
+		h.step(0.1)
+	}
+	if h.Direction[2] != yaw {
+		t.Fatalf("yaw = %v, want %v (no pivot with the tracks locked)", h.Direction[2], yaw)
+	}
+}
+
+// TestHullGripHoldsTheTurn is the contrast: without the handbrake the tracks
+// grip, so the velocity stays close to the heading instead of sliding.
+func TestHullGripHoldsTheTurn(t *testing.T) {
+	h := hull{Limits: motionLimits{SpeedForward: 37, SpeedBackward: 14, RotationSpeed: 0.5}}
+	h.Flags = moveForward
+	for i := 0; i < 100; i++ {
+		h.step(0.1)
+	}
+	h.Flags = moveForward | moveRotateRight
+	for i := 0; i < 10; i++ {
+		h.step(0.1)
+	}
+	if lateral := lateralSpeed(&h); abs32(lateral) > 2 {
+		t.Fatalf("lateral speed = %v, want the tracks to hold the turn", lateral)
+	}
+}
+
+// lateralSpeed is the hull's sideways velocity in its own frame, m/s.
+func lateralSpeed(h *hull) float32 {
+	yaw := h.Direction[2]
+	return h.Velocity[0]*cos32(yaw) - h.Velocity[1]*sin32(yaw)
 }

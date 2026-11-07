@@ -1163,8 +1163,11 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
 - **The handbrake is `MOVEMENT_FLAGS.BLOCK_TRACKS` (64)** in the same
   `cell.vehicle_moveWith` flag byte as forward/back/turn — the client's space
   bar is `CMD_BLOCK_TRACKS`, which `Avatar.moveVehicle` folds in. `hull.step`
-  brakes to a stop and refuses to pivot while it is set; ignoring the bit leaves
-  the tank driving straight through the handbrake.
+  keeps the hull's velocity in world space and drops the tracks' lateral grip
+  while the bit is set, so the steering turns the hull under the velocity
+  vector and the tank slides (the drift); it still brakes, and a stationary
+  hull cannot pivot. Ignoring the bit leaves the tank driving straight through
+  the handbrake.
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the

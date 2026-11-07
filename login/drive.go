@@ -8,12 +8,14 @@ import (
 // The player's tank, driven by the client's `vehicle_moveWith` flags.
 //
 // The real server simulates the vehicle's physics and streams the result; this
-// is the same stand-in the reference implementation uses — the hull moves and
-// turns at the vehicle's own limits and rests on the terrain, with no collision,
-// slope resistance or engine model. What matters is that the client's own
-// prediction agrees with it: the client drives its hull locally and corrects
-// toward whatever the server sends, so a server that never moves leaves the tank
-// stuck at the spawn.
+// is a stand-in, not the engine's track model — the hull moves and turns at the
+// vehicle's own limits and rests on the terrain, with no collision, slope
+// resistance or engine model. It does keep velocity in world space and model
+// the tracks' lateral grip, which is what makes the handbrake slide instead of
+// stopping dead. What matters is that the client's own prediction agrees with
+// it: the client drives its hull locally and corrects toward whatever the
+// server sends, so a server that never moves leaves the tank stuck at the
+// spawn.
 //
 // The flags are `MOVEMENT_FLAGS` in the client's `Avatar.py`.
 
@@ -31,10 +33,36 @@ const (
 	moveBlockTracks uint8 = 64
 )
 
-// How quickly the speed reaches what the flags ask for, in m/s².
+// How quickly the speed reaches what the flags ask for, in m/s², and how
+// hard the tracks hold the hull against sideways motion.
 const (
+	// hullAcceleration is the longitudinal acceleration the engine can
+	// produce. The real value comes from the engine's power and the
+	// vehicle's weight; this is the stand-in the reference uses.
 	hullAcceleration float32 = 4.0
-	hullBraking      float32 = 10.0
+	// hullBraking is the deceleration when the driver lifts off or reverses.
+	hullBraking float32 = 10.0
+	// hullHandbrakeBraking is the deceleration with the tracks locked. It is
+	// lower than hullBraking so the hull keeps enough momentum to slide.
+	hullHandbrakeBraking float32 = 7.0
+	// hullGrip is the lateral acceleration the tracks can hold, in m/s².
+	// High grip keeps the velocity aligned with the heading.
+	hullGrip float32 = 30.0
+	// hullHandbrakeGrip is the lateral grip with the tracks locked. The
+	// tracks can no longer resist sideways motion, so the hull slides.
+	hullHandbrakeGrip float32 = 5.0
+	// handbrakeSteer is the steering authority left with the handbrake on.
+	// A moving hull still steers (the wheeled vehicles steer their front
+	// wheels), but with less bite than the tracks give.
+	handbrakeSteer float32 = 0.7
+	// handbrakePivotSpeed is the speed below which a handbraking hull cannot
+	// pivot on the spot: the tracks are locked, so there is no differential
+	// steering to turn with.
+	handbrakePivotSpeed float32 = 0.5
+	// handbrakeFullSteerSpeed is the speed at which a handbraking hull still
+	// has full steering authority; below it the bite falls with the speed, so
+	// the drift settles instead of spinning as the hull slows.
+	handbrakeFullSteerSpeed float32 = 15.0
 )
 
 // Where the hull is sampled to tilt it with the ground: half its length and
@@ -68,8 +96,16 @@ type hull struct {
 	// Direction is roll, pitch and yaw in radians, the order the position
 	// updates carry them. A yaw of 0 faces +Z, and turning right increases it.
 	Direction [3]float32
-	// Speed is signed along the heading, in m/s; YawRate is in rad/s.
-	Speed   float32
+	// Velocity is the hull's world-space velocity in the XZ plane. It is
+	// kept in world space, not in the hull frame: the hull turns under its
+	// momentum, and the lateral component left behind is the slip angle the
+	// tracks grip against — and, with the handbrake on, the slide that reads
+	// as a drift.
+	Velocity [2]float32
+	// Speed is the signed longitudinal component of Velocity, in m/s: what
+	// the engine, the track scroll and the dispersion model read.
+	Speed float32
+	// YawRate is in rad/s.
 	YawRate float32
 	// Flags is the latest `vehicle_moveWith` byte.
 	Flags  uint8
@@ -100,35 +136,77 @@ func (h *hull) targetSpeed() float32 {
 // step advances the hull by dt seconds. It reports whether the hull moved or
 // turned, which is what decides whether a position update is worth sending.
 func (h *hull) step(dt float32) bool {
+	if dt <= 0 {
+		return false
+	}
+	yaw := h.Direction[2]
+	// The hull frame: +Z at yaw 0, +X to the right.
+	fx, fz := sin32(yaw), cos32(yaw)
+	rx, rz := cos32(yaw), -sin32(yaw)
+
+	// Split the world velocity into the hull's longitudinal and lateral
+	// components.
+	vLong := h.Velocity[0]*fx + h.Velocity[1]*fz
+	vLat := h.Velocity[0]*rx + h.Velocity[1]*rz
+
+	handbrake := h.Flags&moveBlockTracks != 0
+
+	// Longitudinal: the engine drives toward the speed the flags ask for,
+	// the brakes slow the hull. With the handbrake on the target is zero and
+	// the tracks brake, but the hull keeps its momentum.
 	target := h.targetSpeed()
-	// Braking applies when slowing down or reversing, accelerating otherwise.
 	rate := hullAcceleration
-	if abs32(target) < abs32(h.Speed) || target*h.Speed < 0 {
+	if abs32(target) < abs32(vLong) || target*vLong < 0 {
 		rate = hullBraking
 	}
-	delta := clamp32(target-h.Speed, -rate*dt, rate*dt)
-	h.Speed += delta
+	if handbrake {
+		rate = hullHandbrakeBraking
+	}
+	vLong += clamp32(target-vLong, -rate*dt, rate*dt)
 
+	// Lateral: the tracks hold the hull against sideways motion. Locking
+	// them drops that grip, so the hull keeps its velocity vector while the
+	// yaw turns under it — the slide that reads as a drift.
+	grip := hullGrip
+	if handbrake {
+		grip = hullHandbrakeGrip
+	}
+	vLat -= clamp32(vLat, -grip*dt, grip*dt)
+
+	// Recompose in the frame the forces acted in. The yaw update below does
+	// NOT rotate this vector: the hull turns under its momentum, and the
+	// lateral component that leaves behind is what the next tick grips
+	// against.
+	h.Velocity[0] = fx*vLong + rx*vLat
+	h.Velocity[1] = fz*vLong + rz*vLat
+	h.Speed = vLong
+
+	// Yaw: the steering turns the hull. A locked-track hull cannot pivot on
+	// the spot; while moving it still steers, with reduced authority.
 	var turn float32
-	if h.Flags&moveBlockTracks == 0 {
-		switch h.Flags & (moveRotateLeft | moveRotateRight) {
-		case moveRotateLeft:
-			turn = -1
-		case moveRotateRight:
-			turn = 1
-		}
+	switch h.Flags & (moveRotateLeft | moveRotateRight) {
+	case moveRotateLeft:
+		turn = -1
+	case moveRotateRight:
+		turn = 1
 	}
 	// Backing up steers like a car: left swings the rear to the left.
 	if h.Flags&moveBackward != 0 {
 		turn = -turn
 	}
+	if handbrake {
+		if abs32(vLong) < handbrakePivotSpeed {
+			turn = 0
+		} else {
+			turn *= handbrakeSteer * min32(abs32(vLong)/handbrakeFullSteerSpeed, 1)
+		}
+	}
 	h.YawRate = turn * h.Limits.RotationSpeed
-	h.Direction[2] = wrapAngle(h.Direction[2] + h.YawRate*dt)
+	h.Direction[2] = wrapAngle(yaw + h.YawRate*dt)
 
-	yaw := h.Direction[2]
-	h.Position[0] += sin32(yaw) * h.Speed * dt
-	h.Position[2] += cos32(yaw) * h.Speed * dt
-	return h.Speed != 0 || turn != 0
+	h.Position[0] += h.Velocity[0] * dt
+	h.Position[2] += h.Velocity[1] * dt
+	return h.Velocity[0] != 0 || h.Velocity[1] != 0 || h.YawRate != 0
 }
 
 // settle rests the hull on the terrain: at its height, rolled and pitched with
@@ -174,6 +252,10 @@ func (h *hull) engineMode() [2]byte {
 	switch {
 	case h.Flags == 0:
 		mode = 1
+	case h.Flags&moveBlockTracks != 0:
+		// The tracks are locked: the engine is off the drivetrain and idles
+		// while the hull slides.
+		mode = 1
 	case abs32(h.targetSpeed()-h.Speed) > 0.01:
 		mode = 3
 	}
@@ -186,6 +268,11 @@ func (h *hull) engineMode() [2]byte {
 // from shiftRPM to 1 across it; turning in place, the RPM follows the turn rate
 // in first gear.
 func (h *hull) engine() (byte, float32) {
+	// With the tracks locked the drivetrain is not driving the hull; the
+	// engine sits at idle while the hull slides.
+	if h.Flags&moveBlockTracks != 0 {
+		return 0, idleRPM
+	}
 	top := h.Limits.SpeedForward
 	if h.Speed < 0 {
 		top = h.Limits.SpeedBackward
@@ -230,9 +317,14 @@ func (h *hull) engine() (byte, float32) {
 // bits over a turn, the left then right track speeds on 8 bits each over
 // -15..30 m/s, and the engine's relative RPM on 8 bits over 0..1.2.
 func (h *hull) auxPhysicsData() uint64 {
-	// The inner track goes slower, the outer one faster.
-	turning := h.YawRate * hullHalfWidth
-	left, right := h.Speed+turning, h.Speed-turning
+	// The inner track goes slower, the outer one faster. With the handbrake
+	// on the tracks are locked: they do not scroll even while the hull
+	// slides.
+	left, right := float32(0), float32(0)
+	if h.Flags&moveBlockTracks == 0 {
+		turning := h.YawRate * hullHalfWidth
+		left, right = h.Speed+turning, h.Speed-turning
+	}
 	_, rpm := h.engine()
 	return packRange(rpm, 0, 1.2, 8)<<56 |
 		packRange(right, -15, 30, 8)<<48 |

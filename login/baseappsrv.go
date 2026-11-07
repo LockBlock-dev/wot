@@ -2503,6 +2503,8 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 			} else if st.hadGround {
 				st.hull = before
 				st.hull.Speed = 0
+				st.hull.Velocity = [2]float32{}
+				st.hull.YawRate = 0
 				moved = false
 			}
 		}
