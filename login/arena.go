@@ -746,6 +746,14 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: no AvatarInfo (%v); the loading screen will stay empty", from, h.ArenaID, err)
 		return seq, nil
 	}
+	s.mu.Lock()
+	st.infoPlayer = 0
+	if h.Dummy != nil {
+		st.infoDummy = 1
+	} else {
+		st.infoDummy = -1
+	}
+	s.mu.Unlock()
 	iprops, err := EntityPropertyRunLevel(info, false)
 	if err != nil {
 		s.logf("stage2 %s: arena %d: AvatarInfo properties (%v)", from, h.ArenaID, err)
@@ -1466,7 +1474,11 @@ func vehicleInfoValue(typ entdef.DataType, doc ArenaPlayerDoc, id uint32, index 
 	// A string, not a number: the client's DAAPI casts it into
 	// `DAAPIVehicleInfoPO.sessionID` and refuses a numeric value.
 	set("avatarSessionID", entdef.Value{Kind: entdef.VString, Str: fmt.Sprintf("%d", id)})
-	set("maxHealth", entdef.Value{Kind: entdef.VInt, Int: 1000})
+	maxHealth := doc.MaxHealth
+	if maxHealth <= 0 {
+		maxHealth = 1000
+	}
+	set("maxHealth", entdef.Value{Kind: entdef.VInt, Int: int64(maxHealth)})
 	// Its slot in the team, 1-based: the scoreboard sorts on it.
 	set("index", entdef.Value{Kind: entdef.VUint, Uint: uint64(index)})
 	// `badges` is a PYTHON field, and the zero value for those is an empty
@@ -1537,6 +1549,16 @@ func (s *BaseAppServer) arenaInfoApp(st *clientState, h *ArenaHandoff, alloc *nr
 	if err != nil {
 		return nil, nil, err
 	}
+	comp := nrlComponent{
+		TypeID:     AvatarVehiclesInfoNrlID,
+		Node:       uint16(compNode),
+		FirstChild: uint16(children[0]),
+		Props:      1,
+	}
+	s.mu.Lock()
+	st.infoComp = comp
+	st.infoVehicles = vehicles
+	s.mu.Unlock()
 	return e, app, nil
 }
 

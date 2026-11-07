@@ -450,3 +450,46 @@ func TestShellSwitchRestartsTheReload(t *testing.T) {
 		t.Fatalf("%d packets after the current completion, want %d", len(tr.writes), before+1)
 	}
 }
+
+// TestKillUpdatesVehiclesInfo pins the kill: the victim's row goes dead with a
+// deathInfo, the shooter's stFrags/frags count it, and the whole list is
+// re-sent as an NRL property update.
+func TestKillUpdatesVehiclesInfo(t *testing.T) {
+	infoType := entdef.Alias("VEHICLES_INFO")
+	if infoType == nil {
+		t.Skip("no VEHICLES_INFO type")
+	}
+	player := vehicleInfoValue(infoType, ArenaPlayerDoc{Name: "me", Team: 1}, 100, 1, 0, 0)
+	dummy := vehicleInfoValue(infoType, ArenaPlayerDoc{Name: "tog", Team: 2}, 101, 1, 0, 0)
+	st := &clientState{
+		infoComp:     nrlComponent{TypeID: AvatarVehiclesInfoNrlID, Node: 1, FirstChild: 2, Props: 1},
+		infoVehicles: []entdef.Value{player, dummy},
+		infoDummy:    1,
+		infoPlayer:   0,
+	}
+	s := &BaseAppServer{}
+	el := s.killVehiclesInfo(st, 101, 100)
+	if len(el) == 0 {
+		t.Fatal("no vehiclesInfo update")
+	}
+	if st.infoKills != 1 {
+		t.Fatalf("kills = %d, want 1", st.infoKills)
+	}
+	if alive, ok := st.infoVehicles[1].Get("isAlive"); !ok || alive.Uint != 0 {
+		t.Fatalf("victim isAlive = %v (ok=%v), want 0", alive, ok)
+	}
+	if _, ok := st.infoVehicles[1].Get("deathInfo"); !ok {
+		t.Fatal("victim has no deathInfo")
+	}
+	if frags, ok := st.infoVehicles[0].Get("stFrags"); !ok || frags.Uint != 1 {
+		t.Fatalf("shooter stFrags = %v (ok=%v), want 1", frags, ok)
+	}
+	if frags, ok := st.infoVehicles[0].Get("frags"); !ok || frags.Int != 1 {
+		t.Fatalf("shooter frags = %v (ok=%v), want 1", frags, ok)
+	}
+	// A second kill counts again.
+	s.killVehiclesInfo(st, 101, 100)
+	if st.infoKills != 2 {
+		t.Fatalf("kills = %d, want 2", st.infoKills)
+	}
+}

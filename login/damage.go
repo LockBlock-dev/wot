@@ -1,6 +1,7 @@
 package login
 
 import (
+	"bytes"
 	"math"
 	"math/rand"
 	"net"
@@ -526,6 +527,12 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 			dummyApp = append(dummyApp, el...)
 		}
 	}
+	// A kill also goes into the arena's `vehiclesInfo`.
+	if newHealth == 0 && damage > 0 {
+		if el := s.killVehiclesInfo(st, dummyID, attacker); len(el) > 0 {
+			dummyApp = append(dummyApp, el...)
+		}
+	}
 	// The shooter's own gun: its muzzle flash and smoke. `showShooting` is a
 	// Vehicle client method, so the own vehicle is selected for it; the
 	// tracer that follows is an Avatar method and re-selects the player.
@@ -565,4 +572,51 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	st.sendMu.Unlock()
 	s.logf("arena %d: shot %s hit dummy %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
 		arenaID, sh.Name, dummyID, damage, oldHealth, newHealth, res.Pierced, res.Armor)
+}
+
+// killVehiclesInfo marks the victim dead in the arena's `vehiclesInfo` and
+// counts the kill, returning the NRL property update that re-sends the list.
+//
+// The team panel's greyed-out row, the orange kill message and the kill column
+// all read this: `isAlive` false and a `deathInfo` on the victim, `stFrags`
+// and `frags` on the shooter.
+func (s *BaseAppServer) killVehiclesInfo(st *clientState, dummyID, attacker uint32) []byte {
+	s.mu.Lock()
+	if st.infoComp.TypeID == 0 || st.infoDummy < 0 || st.infoDummy >= len(st.infoVehicles) {
+		s.mu.Unlock()
+		return nil
+	}
+	victim := st.infoVehicles[st.infoDummy]
+	victim = dictSet(victim, "isAlive", entdef.Value{Kind: entdef.VUint})
+	victim = dictSet(victim, "deathInfo", entdef.Value{Kind: entdef.VDict, Dict: []entdef.DictField{
+		{Name: "victimID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(dummyID)}},
+		{Name: "killerID", Value: entdef.Value{Kind: entdef.VInt, Int: int64(attacker)}},
+		{Name: "reasonID", Value: entdef.Value{Kind: entdef.VInt}},
+		{Name: "equipmentID", Value: entdef.Value{Kind: entdef.VInt}},
+		{Name: "numVehiclesAffected", Value: entdef.Value{Kind: entdef.VInt}},
+	}})
+	st.infoVehicles[st.infoDummy] = victim
+	if st.infoPlayer >= 0 && st.infoPlayer < len(st.infoVehicles) {
+		st.infoKills++
+		shooter := st.infoVehicles[st.infoPlayer]
+		shooter = dictSet(shooter, "stFrags", entdef.Value{Kind: entdef.VUint, Uint: uint64(st.infoKills)})
+		shooter = dictSet(shooter, "frags", entdef.Value{Kind: entdef.VInt, Int: int64(st.infoKills)})
+		st.infoVehicles[st.infoPlayer] = shooter
+	}
+	comp := st.infoComp
+	vehicles := append([]entdef.Value(nil), st.infoVehicles...)
+	s.mu.Unlock()
+	infoType := entdef.Alias("VEHICLES_INFO")
+	if infoType == nil {
+		return nil
+	}
+	var data bytes.Buffer
+	if err := entdef.EncodeArray(&data, infoType, vehicles); err != nil {
+		return nil
+	}
+	el, err := EncodeNrlPropertyUpdate(comp, 0, data.Bytes())
+	if err != nil {
+		return nil
+	}
+	return el
 }

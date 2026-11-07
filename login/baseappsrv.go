@@ -359,6 +359,15 @@ type clientState struct {
 	// dummyStickers is the dummy's accumulated `damageStickers` (the shell
 	// holes); every pierced hit re-sends the whole list.
 	dummyStickers []entdef.Value
+	// infoComp is the arena's `AvatarVehiclesInfo` component and infoVehicles
+	// its `vehicles` array: the team panel, the kill message and the kill
+	// column all read it. infoDummy/infoPlayer are the victim's and the
+	// shooter's indexes in that array; infoKills is the shooter's `stFrags`.
+	infoComp     nrlComponent
+	infoVehicles []entdef.Value
+	infoDummy    int
+	infoPlayer   int
+	infoKills    int
 	// shotID numbers the tracers this session fires.
 	shotID int32
 	// reloadGen numbers the reloads this session starts, so a completion

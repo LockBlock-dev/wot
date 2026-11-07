@@ -1191,7 +1191,10 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   the own vehicle, and the shell hole is the `Vehicle.damageStickers`
   `ALL_CLIENTS` property (one `VEHICLE_HIT_POINT` per pierced hit, the
   segment context the `damage_stickers.xml` index of the shell's
-  `targetStickers/armorPierced`).
+  `targetStickers/armorPierced`). A kill also re-sends the arena's
+  `AvatarVehiclesInfo.vehicles` with the victim's `isAlive` false + a
+  `deathInfo` and the shooter's `stFrags`/`frags` bumped; that is what greys
+  the row, shows the kill message and fills the kill column.
   The exposed ids are the defs' indexes; `selectEntity(dummy)` must precede the
   Vehicle calls and `selectPlayerEntity` the Avatar's, in the SAME packet.
   `health` is a bare `[0xB5][i16]` — `EncodePropertyUpdate`'s
