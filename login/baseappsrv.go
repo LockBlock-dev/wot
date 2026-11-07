@@ -1312,9 +1312,6 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear []byte) {
 	s.mu.Lock()
 	st.lastSeen = time.Now()
-	// The client's first datagram after a login reply ends the login: its
-	// LoginReplyFilter is gone from then on, so the ticks may resume.
-	st.postHold = false
 	s.mu.Unlock()
 	if len(clear) < 6 {
 		return
@@ -1323,6 +1320,18 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	tr := ChannelTrailerLen(flags)
 	if len(clear) < 2+tr {
 		return
+	}
+	// The client's first APP CALL after a login reply ends the login: its
+	// LoginReplyFilter is gone from then on, so the ticks may resume. An ack
+	// is not enough — the client acks the login reply immediately (its
+	// ack-only datagram carries just the 5-byte authenticate element) while
+	// the filter stays armed for another second, so releasing on any datagram
+	// let the 10 Hz ticker run straight into the filter and the drop was a
+	// fatal `REASON_GENERAL_NETWORK`.
+	if len(clear) > 2+tr+5 {
+		s.mu.Lock()
+		st.postHold = false
+		s.mu.Unlock()
 	}
 	// The trailer is [seq][cumul] (8B), [first][last][seq][cumul] (16B),
 	// [seq] alone (4B) or [cumul] alone (4B). `seq` is the CLIENT's own
@@ -1473,10 +1482,16 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		}
 		s.logf("stage2 %s: CreateBasePlayer + showGUI %dB (entity %d, Account, %d components, seq %d) % x",
 			from, len(app), st.entityID, s.cfg.AccountComponents, seq, app[:min(len(app), 24)])
-		// Hold the ticks until the client speaks: see clientState.postHold.
+		// Hold the ticks until the client speaks, and drop the resend queue:
+		// everything in it was minted for the battle the client just left,
+		// and a retransmission would be dropped by the client's
+		// `LoginReplyFilter` as a fatal network error (see postHold). The
+		// login reply itself must not be retransmitted either — the filter
+		// passes only the first copy.
 		s.mu.Lock()
 		st.postHold = true
 		s.mu.Unlock()
+		s.resend.forget(st.resendKey)
 		seq++
 	}
 	return seq, nil

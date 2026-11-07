@@ -211,10 +211,20 @@ func TestLoginReplyHoldsTheTicksUntilTheClientSpeaks(t *testing.T) {
 		t.Fatalf("%d packets after the login reply, want none (the filter would drop them)",
 			len(tr.writes)-before)
 	}
-	// The client speaks: the login is over and the ticks resume.
-	s.noteReliable(st, addr, []byte{0x58, 0x04, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00})
+	// An ACK is not enough: the client acks the login reply at once, while
+	// its filter stays armed for another second.
+	ack := []byte{0x48, 0x14, 0x02, 0x00, 0x00, 0x00}
+	ack = append(ack, make([]byte, 12)...)
+	s.noteReliable(st, addr, ack)
+	if !st.postHold {
+		t.Fatal("an ack-only datagram released the ticks")
+	}
+	// A real app call is: the client is back in the lobby.
+	call := []byte{0x58, 0x04, 0x02, 0x00, 0x00, 0x00, 0x95, 0x1c, 0x00, 0xdd, 0x00, 0x42}
+	call = append(call, make([]byte, 8)...)
+	s.noteReliable(st, addr, call)
 	if st.postHold {
-		t.Fatal("the client's datagram did not release the ticks")
+		t.Fatal("the client's app call did not release the ticks")
 	}
 	s.mu.Lock()
 	st.postAt = time.Now().Add(-time.Second)
