@@ -18,7 +18,7 @@ func TestResolveShotHitsTheDummyFront(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
 	sh := shellSpec{Name: "test", Damage: 300, Pen: 200, Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2, Speed: 800}
 	// From 20 m in front of the tank, firing straight at it (-Z).
-	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, box)
+	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, []hitBox{box})
 	if !res.Hit {
 		t.Fatal("shot missed the dummy")
 	}
@@ -53,7 +53,7 @@ func TestResolveShotHitsTheDummyFront(t *testing.T) {
 func TestResolveShotRearArmour(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
 	sh := shellSpec{Damage: 300, Pen: 200, KindIndex: 2, Caliber: 76.2}
-	res := resolveShot(sh, [3]float32{0, 2, -20}, [3]float32{0, 0, 1}, box)
+	res := resolveShot(sh, [3]float32{0, 2, -20}, [3]float32{0, 0, 1}, []hitBox{box})
 	if !res.Hit {
 		t.Fatal("shot missed the dummy")
 	}
@@ -69,7 +69,7 @@ func TestResolveShotRearArmour(t *testing.T) {
 func TestResolveShotMisses(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
 	sh := shellSpec{Damage: 300, Pen: 200, KindIndex: 2, Caliber: 76.2}
-	if res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{1, 0, 0}, box); res.Hit {
+	if res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{1, 0, 0}, []hitBox{box}); res.Hit {
 		t.Fatalf("shot beside the tank hit at %v", res.Point)
 	}
 }
@@ -82,7 +82,7 @@ func TestResolveShotAngleIncreasesArmour(t *testing.T) {
 	// 45° off the front normal, from far enough left that the ray meets
 	// the front plate before the side.
 	dir := [3]float32{float32(math.Sin(math.Pi / 4)), 0, -float32(math.Cos(math.Pi / 4))}
-	res := resolveShot(sh, [3]float32{-15, 2, 20}, dir, box)
+	res := resolveShot(sh, [3]float32{-15, 2, 20}, dir, []hitBox{box})
 	if !res.Hit {
 		t.Fatal("shot missed the dummy")
 	}
@@ -97,7 +97,7 @@ func TestResolveShotAngleIncreasesArmour(t *testing.T) {
 func TestResolveShotNotPierced(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
 	sh := shellSpec{Damage: 300, Pen: 50, KindIndex: 2, Caliber: 76.2}
-	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, box)
+	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, []hitBox{box})
 	if !res.Hit {
 		t.Fatal("shot missed the dummy")
 	}
@@ -120,7 +120,7 @@ func TestResolveShotNotPierced(t *testing.T) {
 func TestResolveShotHEExplodes(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
 	sh := shellSpec{Damage: 300, Pen: 10, Kind: "HIGH_EXPLOSIVE", KindIndex: 1, Caliber: 76.2}
-	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, box)
+	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, []hitBox{box})
 	if !res.Hit || res.Pierced {
 		t.Fatalf("hit=%v pierced=%v, want a non-piercing hit", res.Hit, res.Pierced)
 	}
@@ -802,7 +802,7 @@ func TestStickerDecodesWhereTheShellHit(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
 	sh := shellSpec{Name: "test", Damage: 300, Pen: 400, Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2, Speed: 800}
 	// From 20 m in front, aimed at the upper front plate.
-	res := resolveShot(sh, [3]float32{0, 1.6, 20}, [3]float32{0, 0, -1}, box)
+	res := resolveShot(sh, [3]float32{0, 1.6, 20}, [3]float32{0, 0, -1}, []hitBox{box})
 	if !res.Hit {
 		t.Fatal("shot missed the dummy")
 	}
@@ -837,5 +837,41 @@ func TestStickerDecodesWhereTheShellHit(t *testing.T) {
 	step := math.Sqrt(float64(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]))
 	if dist > step {
 		t.Fatalf("decoded segment is %.3f m from the hit point (step %.3f)", dist, step)
+	}
+}
+
+// TestResolveShotHitsTheTurret fires at the TOG II's turret, above the hull's
+// 2.088 m top: the hull box cannot be hit there, so before the turret was a
+// part of its own the shell passed over the tank and did nothing at all.
+//
+// The turret's box is `Turret_01.havok`'s, its origin at the chassis's
+// `<turretPositions><turret>` — which is relative to the HULL, so the turret
+// sits at 2.059 m and rises to 3.058 m.
+func TestResolveShotHitsTheTurret(t *testing.T) {
+	sh := shellSpec{Name: "test", Damage: 300, Pen: 400, Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2, Speed: 800}
+	boxes := dummyBoxes([3]float32{0, 0, 0}, 0)
+	// The hull's own top, from its box.
+	hullTop := dummyParts[0].Offset[1] + dummyParts[0].Bounds[1][1]
+	res := resolveShot(sh, [3]float32{0, hullTop + 0.4, 20}, [3]float32{0, 0, -1}, boxes)
+	if !res.Hit {
+		t.Fatal("the shell passed over the tank: the turret is not a hit part")
+	}
+	if res.Part != 2 {
+		t.Fatalf("part = %d, want 2 (TURRET)", res.Part)
+	}
+	if res.Bounds != dummyParts[1].Bounds {
+		t.Fatalf("segment bounds = %v, want the turret's %v", res.Bounds, dummyParts[1].Bounds)
+	}
+	// The turret's front is armor_1, 114.3 mm, and the shot is square on.
+	if math.Abs(float64(res.Armor-114.3)) > 0.01 {
+		t.Fatalf("armour = %v, want 114.3 (the turret's front)", res.Armor)
+	}
+	if !res.Pierced || res.Damage <= 0 {
+		t.Fatalf("pierced=%v damage=%d, want a penetrating hit", res.Pierced, res.Damage)
+	}
+	// The hull is still hit below its top, and reports the hull.
+	res = resolveShot(sh, [3]float32{0, hullTop - 0.4, 20}, [3]float32{0, 0, -1}, boxes)
+	if !res.Hit || res.Part != 1 {
+		t.Fatalf("hull shot: hit=%v part=%d, want the hull (1)", res.Hit, res.Part)
 	}
 }

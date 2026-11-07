@@ -1217,12 +1217,20 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `ALL_CLIENTS` property (one `VEHICLE_HIT_POINT` per pierced hit, the
   segment context the `damage_stickers.xml` index of the shell's
   `targetStickers/armorPierced`). The segment's fractions are quantized over
-  the hull's OWN collision bounds in the HULL PART's frame — the client's
-  `getBoundingBox(1)` is `Hull.havok`'s `HKBodyFlagsData`
-  `minBounds_`/`maxBounds_` (TOG II: `(-1.5622,-0.8706,-5.2344)..(1.5622,
-  0.7324,4.2737)`), and the part frame sits `<hullPosition>` above the
-  vehicle origin (`0 1.3553 0`). A centred guess put every hole a few
-  tenths of a metre off the aim point. The shell's `<effects>` is a packed BLOB:
+  the hit PART's own collision bounds in that part's frame — the client's
+  `getBoundingBox(part)` is the part's `HKBodyFlagsData`
+  `minBounds_`/`maxBounds_` (TOG II hull `(-1.5622,-0.8706,-5.2344)..
+  (1.5622,0.7324,4.2737)` at `<hullPosition>0 1.3553 0`; turret
+  `(-1.025,-0.2735,-1.4434)..(1.025,0.9986,1.0816)` at
+  `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
+  HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
+  put every hole a few tenths of a metre off the aim point.
+- **The dummy has a hull AND a turret hit part.** `dummyParts` carries both
+  boxes with their own frames and armour (hull 76.2/76.2/50.8/25.4, turret
+  114.3/76.2/53.3/19 from the item defs' per-material table), the trace takes
+  the nearest, and the segment carries that part's index and bounds. With
+  only the hull, a shell aimed at the turret passed over the hull's 2.088 m
+  top and did nothing at all. The shell's `<effects>` is a packed BLOB:
   read it with `StrVal`, not `AsString`, or the sticker lookup silently
   fails. A kill also re-sends the arena's
   `AvatarVehiclesInfo.vehicles` with the victim's `isAlive` false + a

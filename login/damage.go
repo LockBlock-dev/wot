@@ -21,33 +21,56 @@ import (
 // `showDamageFromShot` / `onHealthChanged` / `showShotResults`, with the
 // method ids and argument types from the shipped 2.4.1 defs.
 
-// The dummy's hull collision box, in metres, and its armour in millimetres.
-// The TOG II is a long, tall heavy; its defs give 76.2 mm on the front and
-// sides, 50.8 on the rear and 25.4 on the roof.
+// dummyPart is one of the dummy's hit parts: its collision box in the PART's
+// own frame, where that frame sits in the vehicle frame, and the armour of
+// each face in millimetres.
 //
-// The box is NOT a guess: it is the client's own `getBoundingBox(1)` for the
-// hull, which is what `DamageFromShotDecoder.decodeSegment` maps a hit point's
-// quantized fractions back through. It is the `HKBodyFlagsData` of
-// `vehicles/british/GB63_TOG_II/collision_client/Hull.havok`
-// (`minBounds_`/`maxBounds_`), in the HULL PART's frame — the model's own
-// origin, which sits `hullPosition` above the vehicle origin
-// (`GB63_TOG_II.xml` `<chassis><hullPosition>0 1.3553 0`). Encoding over a
-// centred guess instead put every shell hole a few tenths of a metre off.
-var dummyHullBounds = [2][3]float32{
-	{-1.5622, -0.8706, -5.2344},
-	{1.5622, 0.7324, 4.2737},
+// The boxes are NOT guesses: they are the client's own `getBoundingBox(part)`,
+// which is what `DamageFromShotDecoder.decodeSegment` maps a hit point's
+// quantized fractions back through. Each is the `HKBodyFlagsData`
+// `minBounds_`/`maxBounds_` of the part's collision model, in the part's own
+// frame — the model's origin, which sits at the part's offset in the vehicle
+// frame.
+type dummyPart struct {
+	// Part is the client's `TankPartIndexes` index: 1 hull, 2 turret.
+	Part   uint8
+	Bounds [2][3]float32
+	// Offset is the part's origin in the vehicle frame, from the item defs.
+	Offset [3]float32
+	// Armour by face: front (+Z), side (±X), rear (-Z), top (+Y).
+	Front, Side, Rear, Top float32
 }
 
-// dummyHullPosition is the hull part's origin in the vehicle frame, from the
-// chassis's `hullPosition`.
-const dummyHullPositionY float32 = 1.3553
+// dummyParts is the TOG II's hull and turret.
+//
+// The hull is `Hull.havok`'s box, its origin at the chassis's
+// `<hullPosition>0 1.3553 0`. The turret is `Turret_01.havok`'s box, its origin
+// at the chassis's `<turretPositions><turret>0 0.704143 1.81585` — which is
+// relative to the HULL, not the vehicle, so it sits at 2.059 m and the turret
+// rises above the hull's 2.088 m top. Without it a shell aimed at the turret
+// passed over the hull box and did nothing at all.
+//
+// The armour is the item defs' per-material table: the hull's `armor_1` 76.2,
+// `armor_4` 50.8, `armor_9` 25.4; the turret's `armor_1` 114.3, `armor_3` 76.2,
+// `armor_4` 53.3, `armor_6` 19.
+var dummyParts = []dummyPart{
+	{
+		Part:   1, // TankPartIndexes.HULL
+		Bounds: [2][3]float32{{-1.5622, -0.8706, -5.2344}, {1.5622, 0.7324, 4.2737}},
+		Offset: [3]float32{0, 1.3553, 0},
+		Front:  76.2, Side: 76.2, Rear: 50.8, Top: 25.4,
+	},
+	{
+		Part:   2, // TankPartIndexes.TURRET
+		Bounds: [2][3]float32{{-1.025, -0.2735, -1.4434}, {1.025, 0.9986, 1.0816}},
+		Offset: [3]float32{0, 1.3553 + 0.704143, 1.81585},
+		Front:  114.3, Side: 76.2, Rear: 53.3, Top: 19,
+	},
+}
 
-const (
-	dummyArmorFront float32 = 76.2
-	dummyArmorSide  float32 = 76.2
-	dummyArmorRear  float32 = 50.8
-	dummyArmorTop   float32 = 25.4
-)
+// dummyHullBounds is the hull part's box, the bounds the hull's hit segment is
+// quantized over.
+var dummyHullBounds = dummyParts[0].Bounds
 
 // `VEHICLE_HIT_EFFECT` codes the client's `DamageFromShotDecoder` maps to an
 // effect group.
@@ -78,6 +101,12 @@ type hitBox struct {
 	Half   [3]float32
 	Yaw    float32
 	Origin [3]float32
+	// Part is the client's `TankPartIndexes` index and Bounds the part's own
+	// box, both of which the hit-point segment carries; Armor is front, side,
+	// rear, top in millimetres.
+	Part   uint8
+	Bounds [2][3]float32
+	Armor  [4]float32
 }
 
 // intersect traces the ray origin+dir*t through the box. It returns the
@@ -157,25 +186,36 @@ func (b hitBox) intersect(origin, dir [3]float32) (t float32, point, normal, loc
 type shotResult struct {
 	Hit      bool
 	Point    [3]float32 // world
-	Local    [3]float32 // the hit point in the hull's frame
-	LocalDir [3]float32 // the shell's direction in the hull's frame
+	Local    [3]float32 // the hit point in the hit PART's frame
+	LocalDir [3]float32 // the shell's direction in the hit part's frame
 	Normal   [3]float32 // world, outward
 	Distance float32
-	Armor    float32 // effective, after the impact angle
+	Part     uint8         // TankPartIndexes
+	Bounds   [2][3]float32 // the hit part's box, for the segment
+	Armor    float32       // effective, after the impact angle
 	Pierced  bool
 	Damage   int
 	Effect   uint8
 	Flags    uint32
 }
 
-// resolveShot traces one shell against the dummy's hull box and rolls its
-// penetration and damage.
-func resolveShot(sh shellSpec, origin, dir [3]float32, box hitBox) shotResult {
-	t, point, normal, localNormal, face, ok := box.intersect(origin, dir)
-	if !ok {
-		return shotResult{}
+// resolveShot traces one shell against every part of the dummy and rolls its
+// penetration and damage against the NEAREST one it meets.
+func resolveShot(sh shellSpec, origin, dir [3]float32, boxes []hitBox) shotResult {
+	var res shotResult
+	for _, box := range boxes {
+		t, point, normal, localNormal, face, ok := box.intersect(origin, dir)
+		if !ok || (res.Hit && t >= res.Distance) {
+			continue
+		}
+		res = rollShot(sh, box, t, point, normal, localNormal, face, dir)
 	}
-	armor := dummyArmorForFace(face, localNormal)
+	return res
+}
+
+// rollShot rolls one hit on one part.
+func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3]float32, face int, dir [3]float32) shotResult {
+	armor := box.armorForFace(face, localNormal)
 	// The impact angle: the cosine between the shell's path and the face's
 	// outward normal. A grazing hit meets more armour.
 	cos := abs32(dir[0]*normal[0] + dir[1]*normal[1] + dir[2]*normal[2])
@@ -208,7 +248,7 @@ func resolveShot(sh shellSpec, origin, dir [3]float32, box hitBox) shotResult {
 			}
 		}
 	}
-	// The hit point and direction in the HULL PART's frame, which is what the
+	// The hit point and direction in the hit PART's frame, which is what the
 	// client's hit-point segment is encoded over: the part's own origin, not
 	// the trace box's centre.
 	c, s := cos32(box.Yaw), sin32(box.Yaw)
@@ -216,41 +256,62 @@ func resolveShot(sh shellSpec, origin, dir [3]float32, box hitBox) shotResult {
 	lz := point[2] - box.Origin[2]
 	res.Local = [3]float32{lx*c - lz*s, point[1] - box.Origin[1], lx*s + lz*c}
 	res.LocalDir = [3]float32{dir[0]*c - dir[2]*s, dir[1], dir[0]*s + dir[2]*c}
+	res.Part = box.Part
+	res.Bounds = box.Bounds
 	return res
 }
 
-// dummyArmorForFace is the nominal armour of the hull face the shell met.
-func dummyArmorForFace(face int, localNormal [3]float32) float32 {
+// armorForFace is the nominal armour of the face the shell met.
+func (b hitBox) armorForFace(face int, localNormal [3]float32) float32 {
 	switch face {
 	case 0:
-		return dummyArmorSide
+		return b.Armor[1]
 	case 1:
-		return dummyArmorTop
+		return b.Armor[3]
 	case 2:
 		if localNormal[2] > 0 {
-			return dummyArmorFront
+			return b.Armor[0]
 		}
-		return dummyArmorRear
+		return b.Armor[2]
 	}
-	return dummyArmorSide
+	return b.Armor[1]
 }
 
-// dummyBox is the dummy's hull box at its spawn, in world space.
-func dummyBox(pos [3]float32, yaw float32) hitBox {
-	min, max := dummyHullBounds[0], dummyHullBounds[1]
-	return hitBox{
-		// The trace volume in the vehicle frame: the part frame's box lifted by
-		// the hull's own offset.
-		Center: [3]float32{
-			pos[0] + (min[0]+max[0])/2,
-			pos[1] + dummyHullPositionY + (min[1]+max[1])/2,
-			pos[2] + (min[2]+max[2])/2,
-		},
-		Half: [3]float32{(max[0] - min[0]) / 2, (max[1] - min[1]) / 2, (max[2] - min[2]) / 2},
-		Yaw:  yaw,
-		// The hull part's origin: the frame the hit point is encoded in.
-		Origin: [3]float32{pos[0], pos[1] + dummyHullPositionY, pos[2]},
+// dummyBoxes is the dummy's parts at its spawn, in world space.
+func dummyBoxes(pos [3]float32, yaw float32) []hitBox {
+	out := make([]hitBox, 0, len(dummyParts))
+	c, s := cos32(yaw), sin32(yaw)
+	for _, p := range dummyParts {
+		min, max := p.Bounds[0], p.Bounds[1]
+		// The part frame's origin in the world.
+		origin := [3]float32{
+			pos[0] + p.Offset[0]*c + p.Offset[2]*s,
+			pos[1] + p.Offset[1],
+			pos[2] - p.Offset[0]*s + p.Offset[2]*c,
+		}
+		// The trace volume: the part frame's box centre, lifted by the part's
+		// offset and turned with the hull.
+		cx, cy, cz := (min[0]+max[0])/2, (min[1]+max[1])/2, (min[2]+max[2])/2
+		out = append(out, hitBox{
+			Center: [3]float32{
+				origin[0] + cx*c + cz*s,
+				origin[1] + cy,
+				origin[2] - cx*s + cz*c,
+			},
+			Half:   [3]float32{(max[0] - min[0]) / 2, (max[1] - min[1]) / 2, (max[2] - min[2]) / 2},
+			Yaw:    yaw,
+			Origin: origin,
+			Part:   p.Part,
+			Bounds: p.Bounds,
+			Armor:  [4]float32{p.Front, p.Side, p.Rear, p.Top},
+		})
 	}
+	return out
+}
+
+// dummyBox is the hull part at its spawn, in world space.
+func dummyBox(pos [3]float32, yaw float32) hitBox {
+	return dummyBoxes(pos, yaw)[0]
 }
 
 // dummyBounds is the hull box in the HULL PART's frame, the bounds the
@@ -487,7 +548,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		return
 	}
 	dir := [3]float32{v[0] / length, v[1] / length, v[2] / length}
-	res := resolveShot(sh, marker.Position, dir, dummyBox(dummyPos, dummyYaw))
+	res := resolveShot(sh, marker.Position, dir, dummyBoxes(dummyPos, dummyYaw))
 	if !res.Hit {
 		return
 	}
@@ -513,7 +574,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if newHealth == 0 && damage > 0 {
 		flags |= hitFlagVehicleKilled
 	}
-	segment := encodeHitSegment(dummyBounds(), res.Local, res.LocalDir, 1, res.Effect)
+	segment := encodeHitSegment(res.Bounds, res.Local, res.LocalDir, res.Part, res.Effect)
 	point := hitPointValue(segment, hitParams(sh, res.Effect))
 
 	// Two packets, one per selected entity: the client's selection applies to
@@ -531,7 +592,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	// property), one `VEHICLE_HIT_POINT` per pierced hit whose segment
 	// context is the sticker id. The client's `addDamageSticker` draws it.
 	if res.Pierced && sh.HasPiercedSticker {
-		sticker := hitPointValue(encodeHitSegment(dummyBounds(), res.Local, res.LocalDir, 1, sh.PiercedSticker), hitParams(sh, hitEffectPierced))
+		sticker := hitPointValue(encodeHitSegment(res.Bounds, res.Local, res.LocalDir, res.Part, sh.PiercedSticker), hitParams(sh, hitEffectPierced))
 		s.mu.Lock()
 		st.dummyStickers = append(st.dummyStickers, sticker)
 		stickers := append([]entdef.Value(nil), st.dummyStickers...)
