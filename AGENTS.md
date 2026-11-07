@@ -1284,8 +1284,13 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   **saved layout** — one `VEHICLE_AMMO` entry per `cd,count` pair from
   `player_state.garage[].shells`, `index` = its position — because the client
   shows exactly this list: sending only the gun's default shell made a
-  16/10/10 loadout read as 30 of the default. `CURRENT_SHELLS` is the gun's
-  default shell, which is the layout's first entry, so `shellInAmmo` finds it.
+  16/10/10 loadout read as 30 of the default. `CURRENT_SHELLS` is the first
+  shell of that layout with ammo left (`loadedShellFor`, the reference's
+  `Gun::new` / `first_left`), and `NEXT_SHELLS` is the SAME shell at entry —
+  the reference constructs its gun with `next_shell: loaded` and only
+  `select_next` moves it on the player's first pick. Sending the first OTHER
+  shell pre-highlights it: the ammo panel opens one press into the cycle and
+  the two presses that should reach the third shell only reach the second.
   Shell CD is
   `(id << 8) + 10 + (nation << 4)` — `items.makeIntCompactDescrByID('shell',
   …)`, nation index from `nations.NAMES`, `id` from

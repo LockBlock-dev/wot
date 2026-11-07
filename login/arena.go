@@ -836,10 +836,12 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	overrides := ownVehicleOverrides(vehicle.ID, h.Player.VehicleCompDescr, savedShells)
 	// Keep the ammo list so a shot can decrement it. The value is the same
 	// one the OwnVehicle component is created with, so the first re-send
-	// differs from the client's copy only by the fired shell.
+	// differs from the client's copy only by the fired shell. The loaded and
+	// next shell come from the SAME helper the component used, so the
+	// server's idea of the loaded shell cannot drift from the client's.
 	s.mu.Lock()
 	st.ammoList = overrides["vehicleAmmoList"]
-	st.loadedShell = st.gunSpec.Dispersion.ShellCD
+	st.loadedShell = loadedShellFor(st.gunSpec.Dispersion, savedShells)
 	st.nextShell = st.loadedShell
 	s.mu.Unlock()
 
@@ -1163,6 +1165,24 @@ var OwnVehicleNrlID uint16 = func() uint16 {
 	return 53
 }()
 
+// loadedShellFor is the shell the gun starts loaded with: the first shell of
+// the saved loadout that has ammo left, which is what the reference's
+// `Gun::new` does (`first_left`), falling back to the gun's default shell when
+// the garage holds no layout.
+//
+// The ammo list and `vehicleSettings` must agree on it. `CURRENT_SHELLS` is
+// only applied when the client already has an ammo entry for the shell
+// (`Avatar.__updateVehicleSetting` returns early otherwise), so a loaded shell
+// outside the list leaves the gun with no shell and `canShoot` at WAITING.
+func loadedShellFor(disp dispersionSpec, savedShells []int64) int32 {
+	for i := 0; i+1 < len(savedShells); i += 2 {
+		if savedShells[i] != 0 && savedShells[i+1] > 0 {
+			return int32(savedShells[i])
+		}
+	}
+	return disp.ShellCD
+}
+
 // ownVehicleOverrides is the `OwnVehicle` property values this server sets,
 // keyed by property name; anything absent keeps the alias's zero value.
 //
@@ -1270,7 +1290,7 @@ func ownVehicleOverrides(vehicleID uint32, compDescr []byte, savedShells []int64
 	// `vehicleGunReloadTime` is the loaded state: `timeLeft` 0 means ready,
 	// and `baseTime` is the gun's own `reloadTime`, which the client uses as
 	// the reload's length once a shot starts it.
-	if disp.ShellCD != 0 {
+	if loaded := loadedShellFor(disp, savedShells); loaded != 0 {
 		// One entry per shell in the SAVED layout, in its order: the client
 		// shows exactly this list, so sending only the gun's default shell
 		// makes a 16/10/10 loadout read as 30 of the default.
@@ -1286,7 +1306,7 @@ func ownVehicleOverrides(vehicleID uint32, compDescr []byte, savedShells []int64
 			entries = append(entries, ammoEntry{savedShells[i], uint64(savedShells[i+1])})
 		}
 		if len(entries) == 0 {
-			entries = []ammoEntry{{int64(disp.ShellCD), 30}}
+			entries = []ammoEntry{{int64(loaded), 30}}
 		}
 		if t := entdef.Alias("VEHICLE_AMMO_LIST"); t != nil {
 			seq := make([]entdef.Value, 0, len(entries))
@@ -1308,16 +1328,16 @@ func ownVehicleOverrides(vehicleID uint32, compDescr []byte, savedShells []int64
 		}
 		if t := entdef.Alias("VEHICLE_SETTINGS"); t != nil {
 			// `CURRENT_SHELLS` (0) is the loaded shell and `NEXT_SHELLS` (1)
-			// the one the client will load: the reference sends both, and
-			// the ammo panel's next-shell slot reads the second.
-			nextShell := disp.ShellCD
-			for _, e := range entries {
-				if e.cd != int64(disp.ShellCD) {
-					nextShell = int32(e.cd)
-					break
-				}
-			}
-			overrides["vehicleSettings"] = vehicleSettingsValue(vehicleID, disp.ShellCD, nextShell)
+			// the one the gun loads once its magazine is empty. BOTH are the
+			// loaded shell at entry, and that is not cosmetic: the reference
+			// constructs its gun with `next_shell: loaded` and only
+			// `select_next` moves it when the player picks a shell ONCE
+			// (`change_loaded` is the twice-picked one). Sending the first
+			// OTHER shell here pre-highlights it in the ammo panel — the
+			// player enters the battle with the next-shell marker already one
+			// press in, and the two presses that should reach the third shell
+			// only reach the second.
+			overrides["vehicleSettings"] = vehicleSettingsValue(vehicleID, loaded, loaded)
 		}
 	}
 	if t := entdef.Alias("VEHICLE_GUN_RELOAD_TIME"); t != nil {

@@ -515,3 +515,60 @@ func baseMethodNames(ms []entdef.MethodDef) []string {
 	}
 	return out
 }
+
+// TestLoadedShellIsTheFirstLoadoutShell pins the shell the gun starts with: the
+// first one in the saved loadout that has ammo left, as the reference's
+// `Gun::new` does, and the gun's default only when the garage holds no layout.
+func TestLoadedShellIsTheFirstLoadoutShell(t *testing.T) {
+	disp := dispersionSpec{ShellCD: 999}
+	if got := loadedShellFor(disp, []int64{111, 10, 222, 10}); got != 111 {
+		t.Fatalf("loaded = %d, want the first loadout shell 111", got)
+	}
+	if got := loadedShellFor(disp, []int64{0, 10, 222, 5}); got != 222 {
+		t.Fatalf("loaded = %d, want the first shell with ammo 222", got)
+	}
+	if got := loadedShellFor(disp, []int64{111, 0, 222, 5}); got != 222 {
+		t.Fatalf("loaded = %d, want the first shell with ammo 222", got)
+	}
+	if got := loadedShellFor(disp, nil); got != 999 {
+		t.Fatalf("loaded = %d, want the gun default 999", got)
+	}
+}
+
+// TestEntryShellSettingsDoNotPreSelectTheNextShell pins the ammo panel's entry
+// state: CURRENT_SHELLS and NEXT_SHELLS are BOTH the loaded shell, so the
+// next-shell marker starts on it. Sending the first OTHER shell pre-highlights
+// that one — the player enters the battle already one press into the cycle,
+// and the two presses that should reach the third shell only reach the second.
+func TestEntryShellSettingsDoNotPreSelectTheNextShell(t *testing.T) {
+	// Loads the defs and with them the alias table `ownVehicleOverrides`
+	// resolves its types through.
+	tokenTestServer(t, nil)
+	compDescr := lobby.AllOwnableVehicles[0].CompDescr
+	saved := []int64{111, 10, 222, 10, 333, 10}
+	ov := ownVehicleOverrides(0x1234, compDescr, saved)
+	vs, ok := ov["vehicleSettings"]
+	if !ok || vs.Kind != entdef.VSeq || len(vs.Seq) != 2 {
+		t.Fatalf("vehicleSettings = %+v, want the two settings", vs)
+	}
+	setting := func(i int) (code, value int64) {
+		for _, f := range vs.Seq[i].Dict {
+			switch f.Name {
+			case "code":
+				// `code` is UINT8, so the number is in Uint.
+				code = int64(f.Value.Uint)
+			case "value":
+				value = f.Value.Int
+			}
+		}
+		return code, value
+	}
+	curCode, cur := setting(0)
+	nextCode, next := setting(1)
+	if curCode != int64(settingCurrentShell) || nextCode != int64(settingNextShell) {
+		t.Fatalf("codes = %d/%d, want %d/%d", curCode, nextCode, settingCurrentShell, settingNextShell)
+	}
+	if cur != 111 || next != 111 {
+		t.Fatalf("current/next = %d/%d, want 111/111 (next must not be pre-selected)", cur, next)
+	}
+}
