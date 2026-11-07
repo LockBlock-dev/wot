@@ -1187,7 +1187,9 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `OwnVehicle.vehicleAmmoList` with the fired shell's `quantity` decremented;
   the list is the garage's saved layout, kept per session. The loaded shell
   follows `vehicle_changeSetting` codes 0/1 (`CURRENT_SHELLS`/`NEXT_SHELLS`),
-  which re-send `vehicleSettings`.
+  which re-send `vehicleSettings`; a `CURRENT_SHELLS` change also restarts
+  the FULL reload, and `reloadGen` stops the previous completion timer from
+  closing it.
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the

@@ -358,6 +358,10 @@ type clientState struct {
 	dummyMaxHealth int
 	// shotID numbers the tracers this session fires.
 	shotID int32
+	// reloadGen numbers the reloads this session starts, so a completion
+	// timer from an older reload does not close a newer one (a shell switch
+	// restarts the full reload).
+	reloadGen uint64
 	// gunSpec is the mounted gun's rotation limits and yaw arc, read from
 	// the vehicle's item defs when the arena is entered. It is what
 	// `gunAnglesPacked` is clamped to.
@@ -1958,10 +1962,16 @@ func applyShellSetting(st *clientState, code uint8, value int32) {
 // `vehicle_shoot` consumes the shell the client shows as loaded.
 func (s *BaseAppServer) answerShellSetting(conn Transport, from *net.UDPAddr, st *clientState, code uint8, value int32) error {
 	s.mu.Lock()
+	oldLoaded := st.loadedShell
 	applyShellSetting(st, code, value)
 	comp := st.ownVehicle
 	loaded, next := st.loadedShell, st.nextShell
 	vehicle := st.vehicle
+	reload := st.gunSpec.Dispersion.ReloadTime
+	arenaID := uint64(0)
+	if st.arena != nil {
+		arenaID = st.arena.ArenaID
+	}
 	s.mu.Unlock()
 	if comp.TypeID == 0 || vehicle == nil {
 		return nil
@@ -1989,6 +1999,15 @@ func (s *BaseAppServer) answerShellSetting(conn Transport, from *net.UDPAddr, st
 		return nil
 	}
 	s.logf("shell setting %d = %d (loaded %d, next %d)", code, value, loaded, next)
+	// A new loaded shell starts the gun's FULL reload, even mid-reload: the
+	// client's `AmmoController.changeCurrentShell` sets its own reload state
+	// and waits for the server's `vehicleGunReloadTime`, so without this the
+	// gun stays "reloading" forever.
+	if code == settingCurrentShell && value != oldLoaded && reload > 0 {
+		if err := s.sendReloadStart(conn, from, st, comp, arenaID, reload); err != nil {
+			s.logf("shell setting: reload start: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -2126,6 +2145,46 @@ func (s *BaseAppServer) sendSiegeState(conn Transport, from *net.UDPAddr, st *cl
 	return err
 }
 
+// sendReloadStart starts the gun's full reload and schedules its completion.
+// Every start bumps `reloadGen`; the completion only closes the reload whose
+// generation is still current, so a shell switch that restarts the reload is
+// not cut short by the previous timer.
+func (s *BaseAppServer) sendReloadStart(conn Transport, from *net.UDPAddr, st *clientState, comp nrlComponent, arenaID uint64, reload float64) error {
+	s.mu.Lock()
+	tick := st.tick
+	st.reloadGen++
+	gen := st.reloadGen
+	s.mu.Unlock()
+	dt := entdef.Alias("VEHICLE_GUN_RELOAD_TIME")
+	if dt == nil {
+		return nil
+	}
+	value := entdef.Value{Kind: entdef.VDict, Dict: []entdef.DictField{
+		{Name: "endTime", Value: entdef.Value{Kind: entdef.VFloat, Float: float64(tick)/10 + reload}},
+		{Name: "baseTime", Value: entdef.Value{Kind: entdef.VFloat, Float: reload}},
+		{Name: "timeLeft", Value: entdef.Value{Kind: entdef.VFloat, Float: reload}},
+		{Name: "clipTime", Value: entdef.Value{Kind: entdef.VFloat}},
+	}}
+	var buf bytes.Buffer
+	if err := entdef.NewCodec().Write(&buf, dt, value); err != nil {
+		return err
+	}
+	el, err := EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("vehicleGunReloadTime"), buf.Bytes())
+	if err != nil {
+		return err
+	}
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.logf("arena %d: reload %.2fs started (seq %d, %dB)", arenaID, reload, seq, len(el))
+	go s.finishReload(conn, from, st, arenaID, reload, gen)
+	return nil
+}
+
 // answerShoot starts the gun's reload.
 //
 // `Avatar.vehicle_shoot` is a CELL method on the Avatar with **no arguments**
@@ -2146,7 +2205,6 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	s.mu.Lock()
 	comp := st.ownVehicle
 	reload := st.gunSpec.Dispersion.ReloadTime
-	tick := st.tick
 	arenaID := uint64(0)
 	if st.arena != nil {
 		arenaID = st.arena.ArenaID
@@ -2158,45 +2216,9 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	// The shot consumes a shell. This goes out before the reload so the
 	// panel's count drops as the reload starts.
 	s.decrementAmmo(conn, from, st, comp)
-	dt := entdef.Alias("VEHICLE_GUN_RELOAD_TIME")
-	if dt == nil {
-		return nil
+	if err := s.sendReloadStart(conn, from, st, comp, arenaID, reload); err != nil {
+		s.logf("arena %d: shoot: reload start failed: %v", arenaID, err)
 	}
-	value := entdef.Value{Kind: entdef.VDict, Dict: []entdef.DictField{
-		{Name: "endTime", Value: entdef.Value{Kind: entdef.VFloat, Float: float64(tick)/10 + reload}},
-		{Name: "baseTime", Value: entdef.Value{Kind: entdef.VFloat, Float: reload}},
-		{Name: "timeLeft", Value: entdef.Value{Kind: entdef.VFloat, Float: reload}},
-		{Name: "clipTime", Value: entdef.Value{Kind: entdef.VFloat}},
-	}}
-	var buf bytes.Buffer
-	if err := entdef.NewCodec().Write(&buf, dt, value); err != nil {
-		s.logf("arena %d: shoot: encode reload (%v)", arenaID, err)
-		return nil
-	}
-	el, err := EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("vehicleGunReloadTime"), buf.Bytes())
-	if err != nil {
-		s.logf("arena %d: shoot: reload element (%v)", arenaID, err)
-		return nil
-	}
-	st.sendMu.Lock()
-	seq, cumul := s.nextSeq(st)
-	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
-	st.sendMu.Unlock()
-	if err != nil {
-		s.logf("arena %d: shoot: reload send failed: %v", arenaID, err)
-		return nil
-	}
-	s.logf("arena %d: shoot → reload %.2fs (seq %d, %dB)", arenaID, reload, seq, len(el))
-	// The reload has to be CLOSED by the server as well as started.
-	//
-	// `ReloadingTimeState.setTimes` stores `_actualTime` verbatim and nothing
-	// counts it down: `isReloadingFinished()` is `self._actualTime == 0`, and
-	// `AmmoController.isGunReloading` is its negation. So a single update with
-	// `timeLeft = reload` leaves the gun "reloading" forever — measured, one
-	// shot fired and every later shot was refused with RELOADING. The
-	// completion is a second update with `timeLeft` 0, which also clears
-	// `_waitReloadingStartResponse` via `stopPredicateReloading`.
-	go s.finishReload(conn, from, st, arenaID, reload)
 	// The shell itself: trace it against the synthetic opponent and stream
 	// the damage. A miss sends nothing, the client having drawn its own shot.
 	s.applyShot(conn, from, st, arenaID)
@@ -2271,11 +2293,11 @@ func (s *BaseAppServer) decrementAmmo(conn Transport, from *net.UDPAddr, st *cli
 }
 
 // finishReload sends the zeroed `vehicleGunReloadTime` once the reload is over.
-func (s *BaseAppServer) finishReload(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, reload float64) {
+func (s *BaseAppServer) finishReload(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, reload float64, gen uint64) {
 	time.Sleep(time.Duration(reload * float64(time.Second)))
 	s.mu.Lock()
 	comp := st.ownVehicle
-	still := st.arena != nil && st.arena.ArenaID == arenaID
+	still := st.arena != nil && st.arena.ArenaID == arenaID && st.reloadGen == gen
 	s.mu.Unlock()
 	if !still || comp.TypeID == 0 {
 		return

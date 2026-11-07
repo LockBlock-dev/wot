@@ -3,7 +3,9 @@ package login
 import (
 	"bytes"
 	"math"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/LockBlock-dev/wot/entdef"
 )
@@ -356,5 +358,56 @@ func TestShellSettingTracksTheLoadedShell(t *testing.T) {
 	}
 	if val, _ := v.Seq[1].Get("value"); val.Int != 400 {
 		t.Fatalf("entry 1 value = %d, want 400", val.Int)
+	}
+}
+
+// TestShellSwitchRestartsTheReload pins the shell-change reload: switching
+// the loaded shell sends the new vehicleSettings AND starts a full reload,
+// and a completion timer from the old reload cannot close the new one.
+func TestShellSwitchRestartsTheReload(t *testing.T) {
+	d := testDispatch(t)
+	s := &BaseAppServer{
+		cfg:        BaseAppConfig{Dispatch: d},
+		resend:     newResendQueue(400*time.Millisecond, 20*time.Second),
+		pending:    map[uint32]*clientState{},
+		byStageKey: map[uint32]*clientState{},
+		byAddr:     map[string]*clientState{},
+	}
+	st := &clientState{
+		blockKey:    "0123456789abcdef",
+		resendKey:   "test",
+		vehicle:     NewEntity(7, d.Entity("Vehicle")),
+		ownVehicle:  nrlComponent{TypeID: 53, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
+		gunSpec:     gunSpec{Dispersion: dispersionSpec{ReloadTime: 10, ShellCD: 100}},
+		loadedShell: 100,
+		nextShell:   100,
+		tick:        100,
+		arena:       &ArenaHandoff{ArenaID: 1},
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	tr := &fakeTransport{}
+	if err := s.answerShellSetting(tr, addr, st, settingCurrentShell, 200); err != nil {
+		t.Fatalf("answerShellSetting: %v", err)
+	}
+	if st.loadedShell != 200 {
+		t.Fatalf("loaded = %d, want 200", st.loadedShell)
+	}
+	if st.reloadGen != 1 {
+		t.Fatalf("reloadGen = %d, want 1", st.reloadGen)
+	}
+	if len(tr.writes) != 2 {
+		t.Fatalf("%d packets, want 2 (vehicleSettings + reload start)", len(tr.writes))
+	}
+	// An old completion must not close the reload the switch just started.
+	before := len(tr.writes)
+	st.reloadGen = 2
+	s.finishReload(tr, addr, st, 1, 0.001, 1)
+	if len(tr.writes) != before {
+		t.Fatal("an old reload completion sent a packet")
+	}
+	// The current generation still closes it.
+	s.finishReload(tr, addr, st, 1, 0.001, 2)
+	if len(tr.writes) != before+1 {
+		t.Fatalf("%d packets after the current completion, want %d", len(tr.writes), before+1)
 	}
 }
