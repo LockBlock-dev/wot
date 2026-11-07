@@ -496,6 +496,15 @@ type clientState struct {
 	// properties start from there: sending them during loading leaves the
 	// client stuck on the loading screen with `isOnArena` false, measured.
 	battleStarted bool
+	// readyCh is closed when the client calls `Avatar.setClientReady` on its
+	// base, which is the only signal that it has finished its init steps and
+	// registered its `onPeriodChange` handler. The battle period waits for it
+	// instead of for a timer: `setClientReady` registers the handler AFTER its
+	// `period == BATTLE` check, so a BATTLE that lands earlier is dropped and
+	// the client never enters the arena. `readyDone` guards the close, and
+	// both are re-armed per battle by `enterArena`.
+	readyCh   chan struct{}
+	readyDone bool
 	// lastMarker is the gun marker last sent, so an unchanged one goes out as
 	// the 8-byte "unchanged" form instead of a full 39-byte payload — which
 	// is what the captured server does for 408 of 7591 ticks.
@@ -1730,13 +1739,18 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 		for _, name := range []string{"Account", "Avatar"} {
 			if acct := s.cfg.Dispatch.Entity(name); acct != nil {
 				if m := acct.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
-					// The defs say how long the call is; a mismatch means the
-					// model and the wire disagree, which is worth refusing
-					// rather than decoding garbage.
+					// The defs say how long the call is; a mismatch means this
+					// entity's method at that slot is not the one the client
+					// called. Keep looking instead of refusing: Account and
+					// Avatar share the base slot space, and `setClientReady`
+					// is Avatar slot 1 while Account slot 1 is
+					// `onStreamComplete` (3 B) — refusing on the Account
+					// mismatch dropped the battle's ready signal, and with it
+					// the period sequence.
 					if m.Length.Fixed && m.Length.Size != argLen {
 						s.logf("post-flood %s: element %#02x carries %d B, the defs say %d",
 							m.Name, elemID, argLen, m.Length.Size)
-						return postCall{}, false
+						continue
 					}
 					args, err := m.ReadArgs(bytes.NewReader(body))
 					if err != nil {
@@ -2870,10 +2884,12 @@ func (s *BaseAppServer) decodeBaseCall(elemID byte, body []byte) (postCall, bool
 		for _, name := range []string{"Account", "Avatar"} {
 			if acct := s.cfg.Dispatch.Entity(name); acct != nil {
 				if m := acct.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
+					// Same slot collision as `postDoCmd`: try the other
+					// entity instead of refusing when the length disagrees.
 					if m.Length.Fixed && m.Length.Size != len(body) {
 						s.logf("post-flood %s: element %#02x carries %d B, the defs say %d",
 							m.Name, elemID, len(body), m.Length.Size)
-						return postCall{}, false
+						continue
 					}
 					args, err := m.ReadArgs(bytes.NewReader(body))
 					if err != nil {
@@ -3061,6 +3077,14 @@ func (s *BaseAppServer) answerPostCall(conn Transport, from *net.UDPAddr, st *cl
 			return s.answerRequestToken(conn, from, st, call)
 		case "leaveArena", "leaveArenaByAccount":
 			return s.answerLeaveArena(conn, from, st)
+		case "setClientReady":
+			// The client has finished its init steps and registered its
+			// `onPeriodChange` handler. This is the signal the arena entry
+			// waits for before it sends PREBATTLE/BATTLE: a period update that
+			// lands earlier is dropped, and the client then sits in the battle
+			// with `isOnArena` false and no gun.
+			s.markClientReady(st)
+			return nil
 		case "trackRelativePointWithGun", "vehicle_trackWorldPointWithGun",
 			"stopTrackingWithGun", "vehicle_stopTrackingWithGun":
 			return s.answerGunTrack(conn, from, st, call)

@@ -19,7 +19,7 @@ func tokenTestServer(t *testing.T, mint func(int64) string) *BaseAppServer {
 		t.Skipf("defs unavailable: %v", err)
 	}
 	l := &entdef.Loader{Dir: defs}
-	d, err := entdef.NewDispatch(l, []string{"Account", "Avatar", "AvatarInfo", "Vehicle"})
+	d, err := entdef.NewDispatch(l, []string{"Account", "Avatar", "AvatarInfo", "Vehicle", "TeamInfo"})
 	if err != nil {
 		t.Fatalf("NewDispatch: %v", err)
 	}

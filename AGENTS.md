@@ -171,11 +171,13 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `entdef/` — entity-def reader (packed-section `.def` parser) + login
   digest computation over `../World_of_Tanks_EU/res/scripts`
   (entities/interfaces/alias) plus external game-data trees kept as
-  uncommitted siblings of this repo (`../wotdefs-2.4.0/`: space defs,
-  339 component defs, 10 mode entities, 17 extension manifests;
-  `../wotdefs-2.4.1/` + `../scripts-2.4.1/`: 2.4.1.0 defs extracted
+  uncommitted siblings of this repo. The 2.4.1 trees are the ones in
+  use: `../wotdefs-2.4.1/` + `../scripts-2.4.1/` (2.4.1.0 defs extracted
   from live `res/packages/scripts.pkg` + 19 mode pkgs; 403-entry walk,
-  18 fails via `Skip241`): `components.go`, `digest.go`
+  18 fails via `Skip241`). The old `../wotdefs-2.4.0/` tree has been
+  removed from the workspace, so the live-walk tests now pin the 2.4.1
+  run (`ce/walkfinal_241_RUN.txt`) and the 2.4.0-only r8 tag oracle and
+  digest oracle skip when it is absent: `components.go`, `digest.go`
   (`ComputeDigestFull`, 318-entry map walk for 2.4.0; `DigestVersion`
   version-aware wrapper + `Truth240`/`Truth241` + `ResetAliases`
   for multi-version use), `defs.go`, `packed.go`, `types.go`.
@@ -1043,16 +1045,21 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   BATTLE 3, AFTERBATTLE 4`). Announcing 2 leaves the client in PREBATTLE
   with `isOnArena` False, and `Avatar.moveVehicle` then returns before it
   sends `vehicle_moveWith` — the tank does not drive and nothing on the wire
-  says why. `ClientArena` fires `onPeriodChange` on a *change*, so the server
-  sends PREBATTLE at entry and BATTLE after the delay, repeated
-  (`arenaPeriodDelays`) because a BATTLE that lands before
-  `Avatar.setClientReady` is dropped, AND sends BATTLE at the entry too:
-  the client's `MapActivities` period listener throws on the missing
-  `sectorComponent` and can take the Avatar listener with it, so the
-  `setClientReady` period check is the reliable path. **The announcement must mint its seq
-  under `st.sendMu`** (`nextSeq` + `sendReliableLocked`): reading `postSeq`
-  and letting `sendReliable` take the lock afterwards races the 100 ms ticker
-  and the client drops the packet as a duplicate.
+  says why. The period is driven by the CLIENT, not a timer: the entry sends
+  WAITING, and the goroutine waits for the client's `Avatar.setClientReady`
+  base call (element `0x89`) before sending PREBATTLE and then BATTLE 3 s
+  later. `setClientReady` registers `onPeriodChange` only AFTER its
+  `period == BATTLE` check, so a BATTLE that lands earlier is dropped and the
+  client sits frozen — the old "cannot move for 30 s" bug. The ready call is
+  released through `st.readyCh` (`markClientReady`, idempotent, re-armed per
+  battle); a 12 s timeout starts the battle anyway if the call never comes.
+  **`setClientReady` is Avatar base slot 1, and Account slot 1 is
+  `onStreamComplete` (3 B)** — the decoder must fall through to the Avatar on
+  a length mismatch (`decodeBaseCall`/`postDoCmd`), or the ready signal is
+  dropped. **The announcement must mint its seq under `st.sendMu`**
+  (`nextSeq` + `sendReliableLocked`): reading `postSeq` and letting
+  `sendReliable` take the lock afterwards races the 100 ms ticker and the
+  client drops the packet as a duplicate.
 - **Turret rotation speeds come from the item defs** (`login/vehiclespec.go`:
   turret `rotationSpeed` under `turrets0/<Turret>`, gun in
   `components/guns.xml`), and the server steps its own yaw at the turret's rate
@@ -1216,6 +1223,33 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   which re-send `vehicleSettings`; a `CURRENT_SHELLS` change also restarts
   the FULL reload, and `reloadGen` stops the previous completion timer from
   closing it.
+- **The entity property runs are DELTAS.** `createEntity`/`updateEntity` carry
+  `[u8 count]` + `[u8 propID][value]` pairs, so the server writes only the
+  properties it has a value for and the client keeps its own default for the
+  rest (a 2.4.0 replay's Vehicle creation carries nine). The four unmodelled
+  PYTHON properties (`setups`, `setupsIndexes`, `enhancements`, `vehPerks`)
+  are therefore left out (`vehicleDeltaSkip`): their zero value is the
+  empty-dict pickle, which is NOT "no value" to the client —
+  `Vehicle.set_setupsIndexes` runs `updateInvInstalled` over it and raises
+  `KeyError: 'eqsLayout'` because `set_setups` never filled the layouts. The
+  official server does not send them either in a battle without
+  switch-setups, so the prebattle setups controller stays IDLE.
+- **An `AllowNone` dynamic-component property must be `None`, not its zero
+  dict.** `OwnVehicleBase.__set` runs the `update_*` handler only for a
+  non-None value (`if prop is not None or getattr(func,
+  '__isNoneAccepted', False)`), so None is how a handler is kept from running.
+  The zero dict runs it: `update_dualGunState` indexes an empty `gunStates`
+  (`IndexError: Array index out of range`) and `update_welcomeToSector` calls
+  `ClientArenaComponentSystem.sectorComponent`, which only Frontline has
+  (`AttributeError`). `ownVehicleOverrides` sets every unmodelled
+  `entdef.AllowsNone` alias to `VNone`.
+- **`arena.teamInfo` is the `TeamInfo` entity, not the `AvatarInfo`.** The
+  client registers it in `TeamInfo.onEnterWorld`; with no TeamInfo entity
+  `ClientArena.teamInfo` stays None and
+  `prebattle_highlights/controller.__start` raises
+  `AttributeError: 'NoneType' object has no attribute 'components'` on every
+  entry. The entry creates one `TeamInfo` (VehicleID+3) with `teamID` = the
+  player's team; the client defaults the static components' properties.
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the

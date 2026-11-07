@@ -191,12 +191,13 @@ func TestEnterArenaSequence(t *testing.T) {
 	}
 	// space, cell, Vehicle create/select/update/enter, AvatarInfo
 	// create/enter/NRL, OwnVehicle, selectEntity(Avatar), the hull attitude,
-	// the update frequency, then WAITING and the BATTLE-at-entry period.
-	if seq != 26 {
-		t.Fatalf("seq = %d, want 26 (fifteen more frames)", seq)
+	// the update frequency, WAITING, then the TeamInfo create/enter pair.
+	// BATTLE is NOT here: it waits for the client's `setClientReady`.
+	if seq != 27 {
+		t.Fatalf("seq = %d, want 27 (sixteen more frames)", seq)
 	}
-	if len(tr3.writes) != 15 {
-		t.Fatalf("%d writes, want 15 (space, cell, Vehicle x4, AvatarInfo x3, OwnVehicle, select, auxPhysics, frequency, WAITING, BATTLE)", len(tr3.writes))
+	if len(tr3.writes) != 16 {
+		t.Fatalf("%d writes, want 16 (space, cell, Vehicle x4, AvatarInfo x3, OwnVehicle, select, auxPhysics, frequency, WAITING, TeamInfo x2)", len(tr3.writes))
 	}
 	// The period call is an Avatar method, so the Avatar must be the selected
 	// entity when it goes out: an entity method applies to whatever
@@ -404,4 +405,113 @@ func TestArenaGameTimeIsTheRawTick(t *testing.T) {
 				length, start, serverTime, d)
 		}
 	}
+}
+
+// TestSetClientReadyStartsTheBattlePeriod pins the ready handshake: the entry
+// arms a channel, the client's `Avatar.setClientReady` base call closes it, and
+// the period sequence waits on it instead of on a timer. A BATTLE sent before
+// that call is dropped by the client (`setClientReady` registers its
+// `onPeriodChange` handler AFTER the period check), which is the "loaded but
+// frozen" bug the timers used to work around.
+func TestSetClientReadyStartsTheBattlePeriod(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	av := s.cfg.Dispatch.Entity("Avatar")
+	if av == nil {
+		t.Fatal("no Avatar entity")
+	}
+	m := av.MethodByName(entdef.CompBase, "setClientReady")
+	if m == nil {
+		t.Fatal("no setClientReady base method")
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	st := &clientState{
+		accountID: 2, name: "admin", blockKey: "0123456789abcdef", entityID: 0x1234,
+		stage2Addr: addr,
+		readyCh:    make(chan struct{}),
+	}
+	tr := &fakeTransport{}
+	if err := s.answerPostCall(tr, addr, st, postCall{Method: m, Elem: 0x89}); err != nil {
+		t.Fatalf("answerPostCall: %v", err)
+	}
+	select {
+	case <-st.readyCh:
+	default:
+		t.Fatal("setClientReady did not release the entry")
+	}
+	// A second call in the same battle is a no-op, not a double close.
+	if err := s.answerPostCall(tr, addr, st, postCall{Method: m, Elem: 0x89}); err != nil {
+		t.Fatalf("second answerPostCall: %v", err)
+	}
+	// Re-arming per battle is what makes the second call safe again.
+	st.readyCh = make(chan struct{})
+	st.readyDone = false
+	s.markClientReady(st)
+	select {
+	case <-st.readyCh:
+	default:
+		t.Fatal("the re-armed entry was not released")
+	}
+}
+
+// TestOwnVehicleAllowsNonePropsAreNone pins the two component handlers that
+// throw with a zeroed dict. `OwnVehicleBase.__set` runs an `update_*` handler
+// only for a NON-None value, so None is how the official server keeps them from
+// running: `update_dualGunState` indexes an empty `gunStates` (`IndexError`) and
+// `update_welcomeToSector` reaches a `sectorComponent` that only Frontline has
+// (`AttributeError`). Both were in the client's log on every battle entry.
+func TestOwnVehicleAllowsNonePropsAreNone(t *testing.T) {
+	compDescr := lobby.AllOwnableVehicles[0].CompDescr
+	ov := ownVehicleOverrides(0x1234, compDescr, nil)
+	for _, name := range []string{"dualGunState", "welcomeToSector", "siegeStateStatus", "targetVehicleID"} {
+		v, ok := ov[name]
+		if !ok || v.Kind != entdef.VNone {
+			t.Fatalf("%s = %+v, want None", name, v)
+		}
+	}
+	// The properties the gun needs must stay dicts: a None there skips the
+	// handler and the client keeps its zeroed default, which is a frozen gun.
+	for _, name := range []string{"targetingInfo", "vehicleHealthInfo", "vehicleGunReloadTime", "syncVehicleAttrs"} {
+		v, ok := ov[name]
+		if !ok || v.Kind != entdef.VDict {
+			t.Fatalf("%s = %+v, want a dict", name, v)
+		}
+	}
+}
+
+// TestSetClientReadyDecodesPastTheAccountSlot pins the base-slot collision that
+// silently ate the ready signal: Account and Avatar share the base element
+// space, Account's slot 1 is `onStreamComplete` (3 B) and Avatar's is
+// `setClientReady` (0 B). Refusing on the Account length mismatch dropped the
+// call, so the decoder has to fall through to the Avatar.
+func TestSetClientReadyDecodesPastTheAccountSlot(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	acct := s.cfg.Dispatch.Entity("Account")
+	av := s.cfg.Dispatch.Entity("Avatar")
+	if acct == nil || av == nil {
+		t.Fatal("no Account/Avatar entity in the defs")
+	}
+	slot := -1
+	for i := 0; i < len(acct.BaseMethods) && i < len(av.BaseMethods); i++ {
+		if acct.BaseMethods[i].Name == "onStreamComplete" && av.BaseMethods[i].Name == "setClientReady" {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		t.Fatalf("the Account/Avatar base slot collision moved: account=%v avatar=%v",
+			baseMethodNames(acct.BaseMethods), baseMethodNames(av.BaseMethods))
+	}
+	call, ok := s.decodeBaseCall(byte(baseMethodElementID+slot), nil)
+	if !ok || call.Method == nil || call.Method.Name != "setClientReady" {
+		t.Fatalf("decodeBaseCall(slot %d) = %+v, %v; want setClientReady", slot, call.Method, ok)
+	}
+}
+
+// baseMethodNames is a test helper for the failure message above.
+func baseMethodNames(ms []entdef.MethodDef) []string {
+	out := make([]string, 0, len(ms))
+	for i := range ms {
+		out = append(out, ms[i].Name)
+	}
+	return out
 }

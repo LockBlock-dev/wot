@@ -202,3 +202,25 @@ func TestPythonBlobUsesTheUnsafeLength(t *testing.T) {
 		t.Fatalf("short blob = % x, want 03 61 62 63", got)
 	}
 }
+
+// TestAllowsNoneReportsTheFlag pins the predicate the battle entry uses to
+// decide which dynamic-component properties to send as None: only an AllowNone
+// FIXED_DICT has a "no value" form, and the client's own setter is what makes
+// that form meaningful (it skips the `update_*` handler for None).
+func TestAllowsNoneReportsTheFlag(t *testing.T) {
+	fields := []fixedDictField{{name: "a", typ: &intType{size: 1}}}
+	plain := &fixedDictType{fields: fields}
+	opt := &fixedDictType{allowNone: true, fields: fields}
+	if AllowsNone(plain) {
+		t.Fatal("a plain FIXED_DICT reported AllowNone")
+	}
+	if !AllowsNone(opt) {
+		t.Fatal("an AllowNone FIXED_DICT was not reported")
+	}
+	if AllowsNone(&stringType{tag: "String"}) {
+		t.Fatal("a String reported AllowNone")
+	}
+	if AllowsNone(nil) {
+		t.Fatal("nil reported AllowNone")
+	}
+}

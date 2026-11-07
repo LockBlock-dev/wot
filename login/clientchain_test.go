@@ -110,9 +110,10 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	}
 	// space, cell, Vehicle create/select/update/enter, AvatarInfo
 	// create/enter/NRL, OwnVehicle, selectEntity(Avatar), the hull attitude,
-	// the update frequency, then WAITING and the BATTLE-at-entry period.
-	if len(tr3.writes) != 15 {
-		t.Fatalf("%d packets, want 15", len(tr3.writes))
+	// the update frequency, WAITING, then the TeamInfo create/enter pair.
+	// BATTLE is not here: it waits for the client's `setClientReady`.
+	if len(tr3.writes) != 16 {
+		t.Fatalf("%d packets, want 16", len(tr3.writes))
 	}
 	avatar := parseClientPacket(t, d, tr2.writes[0], st.blockKey)
 	avatar = withoutTick(avatar)
@@ -167,10 +168,16 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	}
 	// updateEntity carries no entity id: it applies to the selected entity.
 	// It carries the detail-level half of the table, not all of it — the
-	// outer half rode createEntityDetailed.
+	// outer half rode createEntityDetailed — and it is a DELTA, so the
+	// properties `vehicleDeltaSkip` names (the unmodelled PYTHON ones) are
+	// left out and the client keeps its own default for them.
+	skip := map[string]bool{}
+	for _, n := range vehicleDeltaSkip {
+		skip[n] = true
+	}
 	wantInner := 0
 	for _, p := range d.Entity("Vehicle").Properties {
-		if p.DetailLevel != "" {
+		if p.DetailLevel != "" && !skip[p.Name] {
 			wantInner++
 		}
 	}

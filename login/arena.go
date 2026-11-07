@@ -193,6 +193,28 @@ func (s *BaseAppServer) arenaVehicleApp(st *clientState, h *ArenaHandoff) (*Enti
 	return s.arenaVehicleFor(st, h, h.Player, id, true)
 }
 
+// vehicleDeltaSkip are the Vehicle properties the entry's `updateEntity` run
+// leaves out.
+//
+// The run is a DELTA, not a full dump: the official server writes only the
+// properties it has a value for (a 2.4.0 replay's Vehicle creation carries
+// nine, and none of them is a setup), and the client keeps its own default
+// for the rest. The four PYTHON ones have no value here, and their zero value
+// is the empty-dict pickle — which is NOT "no value" to the client:
+// `Vehicle.set_setupsIndexes` runs `updateInvInstalled` over the empty dict
+// and raises `KeyError: 'eqsLayout'`, because `set_setups` never filled the
+// layouts. Leaving them out is also what the official server does in a battle
+// without switch-setups, so the prebattle setups controller stays IDLE
+// instead of throwing on every entry.
+var vehicleDeltaSkip = []string{
+	// Already in the creation run, right before `selectEntity`: the client
+	// builds its type descriptor from `publicInfo` there.
+	"publicInfo", "health", "isCrewActive", "avatarID", "dogTag", "physicsMode",
+	// PYTHON, and unmodelled: the garage's setups/enhancements/perks are not
+	// part of the battle handoff.
+	"setups", "setupsIndexes", "enhancements", "vehPerks",
+}
+
 // arenaVehicleFor builds one Vehicle entity for the given player slot. `own`
 // marks the client's own tank, which is the one the camera and the player panel
 // bind to.
@@ -351,6 +373,11 @@ func (s *BaseAppServer) enterArena(conn Transport, from *net.UDPAddr, st *client
 	st.arena = h
 	st.entered = false // the reset cleared the client's entities
 	st.resetSent = true
+	// Arm the ready signal for this battle. The client calls
+	// `Avatar.setClientReady` once its init steps are done, and that is when
+	// the period moves on to PREBATTLE/BATTLE.
+	st.readyCh = make(chan struct{})
+	st.readyDone = false
 	s.mu.Unlock()
 	s.logf("stage2 %s: arena %d entry — onArenaCreated + resetEntities (space %d, %s)",
 		from, h.ArenaID, h.SpaceID, h.Map)
@@ -607,7 +634,7 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 			Uint: packGunAngles(0, 0, spec.PitchMin, spec.PitchMax),
 		}
 	}
-	update, err := EncodeUpdateEntityExcept(vehicle, true, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag", "physicsMode")
+	update, err := EncodeUpdateEntityExcept(vehicle, true, vehicleDeltaSkip...)
 	if err != nil {
 		return seq, err
 	}
@@ -711,7 +738,7 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 				}
 				seq++
 			}
-			if dupdate, err := EncodeUpdateEntityExcept(dv, true, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag"); err == nil {
+			if dupdate, err := EncodeUpdateEntityExcept(dv, true, vehicleDeltaSkip...); err == nil {
 				if err := s.sendReliableEntity(conn, from, st, dupdate, seq, cumul); err != nil {
 					return seq, err
 				}
@@ -986,94 +1013,127 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	seq++
 	s.logf("stage2 %s: arena %d period → WAITING (%dB)", from, h.ArenaID, len(period))
 
-	// Send BATTLE at the entry as well. `Avatar.setClientReady` sets
-	// `isOnArena` only when the period is ALREADY BATTLE at that moment, and
-	// its `onPeriodChange` listener chain is fragile: the `MapActivities`
-	// listener throws `'ClientArenaComponentSystem' object has no attribute
-	// 'sectorComponent'` (the private server has no sector component) and can
-	// take the Avatar listener with it. A `setClientReady` that runs before
-	// the delayed BATTLE then still sees BATTLE and enters the arena directly,
-	// instead of waiting for a period change that never lands.
-	if battle, err := arenaPeriodUpdateFull(st.avatar, ArenaPeriodBattle, arenaPeriodEnd(st.tick, 1500), 1500, []float64{10, 10}); err == nil {
-		if sel, serr := EncodeSelectEntity(st.entityID); serr == nil {
-			battle = append(sel, battle...)
+	// The player's TEAM entity. `ClientArena.teamInfo` is not the AvatarInfo:
+	// it is whatever `TeamInfo.onEnterWorld` registers, and with no TeamInfo
+	// entity it stays None. `prebattle_highlights/controller.__start` then
+	// raises `AttributeError: 'NoneType' object has no attribute 'components'`
+	// on every entry, and the chat's spam-protection lookup silently loses its
+	// component. The official server creates one TeamInfo per team the client
+	// sees — a replay's create table has exactly one, carrying `teamID` equal
+	// to the player's — and only that one property is modelled here; the
+	// client defaults the static components' properties.
+	if tt := s.cfg.Dispatch.Entity("TeamInfo"); tt != nil {
+		teamID := h.VehicleID + 3
+		te := NewEntity(teamID, tt)
+		for _, p := range tt.Properties {
+			te.Set(p.Name, entdef.ZeroValue(p.Type))
 		}
-		if err := s.sendReliableEntity(conn, from, st, battle, seq, cumul); err == nil {
+		te.SetInt("teamID", int64(h.Player.Team))
+		tprops, terr := EntityPropertyRunNames(te, "teamID")
+		if terr != nil {
+			s.logf("stage2 %s: arena %d: TeamInfo properties (%v)", from, h.ArenaID, terr)
+		} else if tcreate, terr := EncodeCreateEntity(teamID, uint16(tt.TypeID), VolatilePackerType,
+			[3]float32{0, 0, 0}, 0, 0, 0, tprops); terr != nil {
+			s.logf("stage2 %s: arena %d: TeamInfo element (%v)", from, h.ArenaID, terr)
+		} else if err := s.sendReliableEntity(conn, from, st, tcreate, seq, cumul); err != nil {
+			return seq, err
+		} else {
 			seq++
-			s.mu.Lock()
-			st.battleStarted = true
-			s.mu.Unlock()
-			s.logf("stage2 %s: arena %d period → BATTLE at entry (%dB)", from, h.ArenaID, len(battle))
+			if tenter, terr := EncodeEnterAoI(teamID, 0); terr == nil {
+				if err := s.sendReliableEntity(conn, from, st, tenter, seq, cumul); err != nil {
+					return seq, err
+				}
+				seq++
+			}
+			s.logf("stage2 %s: TeamInfo %d created (team %d, %dB)", from, teamID, h.Player.Team, len(tcreate))
 		}
 	}
 
-	// Then BATTLE, once the client has had time to finish loading and register
-	// its `onPeriodChange` handler.
+	// Then the battle itself, but only once the CLIENT is ready.
 	//
-	// It is repeated: the client only takes the period once its `ClientArena`
-	// exists and `Avatar.setClientReady` has run, and a BATTLE that lands
-	// before that is dropped. Re-sending the same period is harmless — the
-	// client's `__setIsOnArena` returns early when it is already on the arena
-	// — so a few attempts cover a slow load without needing to know when the
-	// client is ready.
+	// `Avatar.setClientReady` is a base method the client calls when its init
+	// steps are done, and it registers its `onPeriodChange` handler only
+	// AFTER the `period == BATTLE` check at the top of the same function. So
+	// a BATTLE that lands before that call is dropped and the client never
+	// enters the arena: loaded, in the battle, and frozen — the "cannot move
+	// for 30 s" bug. Waiting for the call instead of for a timer is what the
+	// official server does, and it is the only signal that cannot race the
+	// load.
+	//
+	// PREBATTLE first and BATTLE three seconds later, the capture's own 3.0 s
+	// prebattle: the countdown the player sees is then real, and `isOnArena`
+	// flips exactly once.
 	go func() {
-		for i, delay := range arenaPeriodDelays {
-			time.Sleep(delay)
-			s.mu.Lock()
-			// The client may have left the battle in the meantime. Sending an
-			// entity method to a destroyed Avatar is `MF_ASSERT_DEV FAILED:
-			// pEntity` in BWEntities::getEntityMethodStreamSize, which crashes
-			// the client — so the arena has to still be the one we entered.
-			if st.arena == nil || st.arena.ArenaID != h.ArenaID {
-				s.mu.Unlock()
-				return
+		s.mu.Lock()
+		ready := st.readyCh
+		s.mu.Unlock()
+		if ready != nil {
+			select {
+			case <-ready:
+			case <-time.After(arenaReadyTimeout):
+				s.logf("stage2 %s: arena %d: no setClientReady after %s; starting anyway",
+					from, h.ArenaID, arenaReadyTimeout)
 			}
-			s.mu.Unlock()
-			// PREBATTLE first, then BATTLE, as the capture does: 8.4 s of
-			// WAITING, 3.0 s of PREBATTLE, then BATTLE for 1500 s.
-			// Each period's length is how long it actually lasts, so the
-			// countdown and the transition agree.
-			nextPeriod, nextAdd := ArenaPeriodPrebattle, []float64{10, 10}
-			nextLen := uint32(arenaPeriodDelays[1] / time.Second)
-			if i > 0 {
-				nextPeriod, nextLen, nextAdd = ArenaPeriodBattle, 1500, []float64{10, 10}
-			}
-			again, err := arenaPeriodUpdateFull(st.avatar, nextPeriod, arenaPeriodEnd(st.tick, nextLen), nextLen, nextAdd)
-			if err != nil {
-				return
-			}
-			// `updateArena` is an Avatar client method, and an entity method
-			// applies to whatever `selectEntity` last selected. The entry
-			// selects the Avatar before its own period update, but this one
-			// goes out seconds later, after the tick and after whatever
-			// answers the client's own calls — and any of those can move the
-			// selection. Measured: PREBATTLE (sent inside the entry, right
-			// after the select) applied and BATTLE (sent 6 s later) did not,
-			// leaving `arena.period` at 2 and `isOnArena` false. Re-selecting
-			// costs 5 B and makes the update land wherever the selection is.
-			if sel, err := EncodeSelectEntity(st.entityID); err == nil {
-				again = append(sel, again...)
-			}
-			// The sequence number has to be minted under `sendMu`, in the same
-			// order it is sent: the ticker is sending every 100 ms, and a
-			// number read before it ran is a duplicate the client drops — which
-			// is what left the period at PREBATTLE and the client out of the
-			// arena, unable to move.
-			st.sendMu.Lock()
-			seq, cumul := s.nextSeq(st)
-			err = s.sendReliableLocked(conn, from, st, again, seq, cumul)
-			st.sendMu.Unlock()
-			if err != nil {
-				s.logf("stage2 %s: arena %d period → BATTLE send failed: %v", from, h.ArenaID, err)
-				return
-			}
-			s.mu.Lock()
-			st.battleStarted = true
-			s.mu.Unlock()
-			s.logf("stage2 %s: arena %d period → BATTLE after %s (seq %d, cumul %d, %dB)", from, h.ArenaID, delay, seq, cumul, len(again))
+		}
+		preLen := uint32(arenaPeriodDelays[1] / time.Second)
+		if err := s.sendArenaPeriod(conn, from, st, h, ArenaPeriodPrebattle, preLen, []float64{10, 10}); err != nil {
+			return
+		}
+		time.Sleep(arenaPeriodDelays[1])
+		if err := s.sendArenaPeriod(conn, from, st, h, ArenaPeriodBattle, 1500, []float64{10, 10}); err != nil {
+			return
 		}
 	}()
 	return seq, nil
+}
+
+// sendArenaPeriod sends one `updateArena(PERIOD, ...)` to the client's Avatar.
+//
+// `updateArena` is an Avatar client method, and an entity method applies to
+// whatever `selectEntity` last selected — the tick and the answers to the
+// client's own calls move that selection, so the Avatar is re-selected first.
+// Measured: a period update sent without the select did not apply, leaving
+// `arena.period` where it was and `isOnArena` false.
+//
+// The sequence number is minted under `sendMu` in the same order it is sent:
+// the ticker sends every 100 ms, and a number read before it ran is a
+// duplicate the client drops.
+func (s *BaseAppServer) sendArenaPeriod(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, period uint8, length uint32, additional []float64) error {
+	s.mu.Lock()
+	// The client may have left the battle in the meantime. Sending an entity
+	// method to a destroyed Avatar is `MF_ASSERT_DEV FAILED: pEntity` in
+	// BWEntities::getEntityMethodStreamSize, which crashes the client — so
+	// the arena has to still be the one we entered.
+	if st.arena == nil || st.arena.ArenaID != h.ArenaID || st.avatar == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	avatar := st.avatar
+	tick := st.tick
+	s.mu.Unlock()
+	el, err := arenaPeriodUpdateFull(avatar, period, arenaPeriodEnd(tick, length), length, additional)
+	if err != nil {
+		return err
+	}
+	if sel, err := EncodeSelectEntity(st.entityID); err == nil {
+		el = append(sel, el...)
+	}
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		s.logf("stage2 %s: arena %d period → %d send failed: %v", from, h.ArenaID, period, err)
+		return err
+	}
+	if period == ArenaPeriodBattle {
+		s.mu.Lock()
+		st.battleStarted = true
+		s.mu.Unlock()
+	}
+	s.logf("stage2 %s: arena %d period → %d (len %d, seq %d, cumul %d, %dB)",
+		from, h.ArenaID, period, length, seq, cumul, len(el))
+	return nil
 }
 
 // AvatarVehiclesInfoNrlID is the NRL type id of the `AvatarVehiclesInfo`
@@ -1280,6 +1340,32 @@ func ownVehicleOverrides(vehicleID uint32, compDescr []byte, savedShells []int64
 		sa = dictSet(sa, "gunShotsSpeed", entdef.Value{Kind: entdef.VFloat, Float: disp.ShotSpeed})
 		overrides["syncVehicleAttrs"] = sa
 	}
+	// Every remaining `AllowNone` property is None, not its zero dict.
+	//
+	// `OwnVehicleBase.__set` runs an `update_*` handler only for a NON-None
+	// value (`if prop is not None or getattr(func, '__isNoneAccepted', False)`),
+	// so None is how the official server keeps a handler from running at all.
+	// The zero dict is not None and does run it, and two of them throw on
+	// every entry:
+	//
+	//   - `update_dualGunState` indexes `gunStates[activeGun]` and raises
+	//     `IndexError: Array index out of range` on a tank without a dual gun
+	//     (the zero `gunStates` is an empty array);
+	//   - `update_welcomeToSector` calls
+	//     `ClientArenaComponentSystem.sectorComponent`, which only exists in
+	//     Frontline, and raises `AttributeError` in every random battle.
+	//
+	// Both were in the client's `game.log` on every battle entry. The rest of
+	// the None ones are the handlers the official server also leaves unset
+	// (siege state, burnout, target, battle events summary, ...).
+	for _, p := range ownVehicleProps {
+		if _, ok := overrides[p.Name]; ok {
+			continue
+		}
+		if dt := entdef.Alias(p.Type); dt != nil && entdef.AllowsNone(dt) {
+			overrides[p.Name] = entdef.Value{Kind: entdef.VNone}
+		}
+	}
 	return overrides
 }
 
@@ -1440,16 +1526,23 @@ const (
 	ArenaPeriodBattle    uint8 = 3
 )
 
-// arenaPeriodDelays are the waits before each BATTLE announcement: long enough
-// for the client to finish loading and register its `onPeriodChange` handler,
-// and repeated because a BATTLE that lands before `Avatar.setClientReady` is
-// dropped and the client then never enters the arena.
+// arenaPeriodDelays are the waits the period sequence uses: the WAITING length
+// the loading screen counts down with, and the PREBATTLE length before BATTLE.
+// Both come from the capture (8.4 s and 3.0 s).
+//
+// They are LENGTHS now, not send timers: the transition to PREBATTLE is
+// triggered by the client's own `Avatar.setClientReady`, which is the only
+// signal that its `onPeriodChange` handler is registered.
 var arenaPeriodDelays = []time.Duration{
-	8400 * time.Millisecond, // WAITING -> PREBATTLE, the capture's 8.4 s
-	3000 * time.Millisecond, // PREBATTLE -> BATTLE, the capture's 3.0 s
-	3000 * time.Millisecond, // repeats, in case the client was not ready
-	3000 * time.Millisecond,
+	8400 * time.Millisecond, // WAITING, the capture's 8.4 s
+	3000 * time.Millisecond, // PREBATTLE, the capture's 3.0 s
 }
+
+// arenaReadyTimeout is how long the entry waits for `Avatar.setClientReady`
+// before starting the battle anyway. The client's load took 4.4 s in the
+// measured run; the fallback exists for a rejoin path that skips the call, and
+// it must stay well under the 30 s the old timer-based entry parked for.
+const arenaReadyTimeout = 12 * time.Second
 
 // vehicleInfoValue builds one `VEHICLES_INFO` entry.
 //
@@ -1675,6 +1768,24 @@ func publicInfoOnlyRun(e *Entity, withFixed bool) ([]byte, error) {
 		}
 	}
 	return body.Bytes(), nil
+}
+
+// markClientReady releases the arena entry's period sequence.
+//
+// `Avatar.setClientReady` is a base method the client calls once its init steps
+// are done; the entry's goroutine waits on the channel this closes before it
+// announces PREBATTLE and then BATTLE. Guarded by the server mutex, and
+// re-armed per battle by `enterArena`, so a second call in the same battle is
+// a no-op rather than a double close.
+func (s *BaseAppServer) markClientReady(st *clientState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st.readyCh == nil || st.readyDone {
+		return
+	}
+	st.readyDone = true
+	close(st.readyCh)
+	s.logf("stage2 %s: client ready — starting the battle period", st.stage2Addr)
 }
 
 // answerLeaveArena takes a client out of its battle and back to the lobby.

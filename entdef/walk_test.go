@@ -2,12 +2,12 @@ package entdef
 
 // Live-walk regression tests: the model's predicted visit stream must
 // match the game's digest walk exactly (names, order, FullIndex/legacy,
-// flags, volatile; and the r8 datatype tag stream against the 2.4.0
-// oracle). The run file is a paste from ce/walkfinal.lua
-// (walkfinal_RUN.txt), which supersedes the walkprobe/walkprobe2/
-// walkprobe3 runs (same visits plus entry pass/fail, gate85, varlen,
-// descriptor pointers). Skips when absent; the digest oracle test
-// below covers CI.
+// flags, volatile). The run file is a paste from ce/walkfinal_241.lua
+// (walkfinal_241_RUN.txt) and pins the 2.4.1 build the client runs; it
+// supersedes the 2.4.0 walkfinal_RUN.txt, whose external defs are gone.
+// The r8 datatype tag oracle is still the 2.4.0 archive and skips when
+// that defs tree is absent. Skips when the fixture is absent; the digest
+// oracle tests below cover CI.
 
 import (
 	"encoding/hex"
@@ -17,7 +17,22 @@ import (
 	"testing"
 )
 
-const testWotdefsDir = "../../wotdefs-2.4.0"
+// The walk fixtures are the 2.4.1 build (the one the client runs). The
+// 2.4.0 trees are gone from the workspace, so nothing here may depend on
+// them except the r8 tag oracle, which skips.
+const (
+	walkWotdefsDir = "../../wotdefs-2.4.1"
+	walkDefsDir    = "../../scripts-2.4.1/entity_defs"
+	walkRunFile    = "../../ce/walkfinal_241_RUN.txt"
+)
+
+// wotdefs240Dir is the external 2.4.0 tree the r8 tag oracle was recorded
+// against (ce/r8probe_20260920_10000.txt). It is optional.
+const wotdefs240Dir = "../../wotdefs-2.4.0"
+
+// testWotdefsDir is the tree the 2.4.0 digest oracle reads; it skips when
+// absent.
+const testWotdefsDir = wotdefs240Dir
 
 type walkVisit struct {
 	kind  string // "prop" | "meth"
@@ -60,7 +75,10 @@ type modelVisit struct {
 // (same traversal the digest hashes).
 func predictWalk(t *testing.T) []modelVisit {
 	t.Helper()
-	entries, err := BuildMapOrder(testWotdefsDir, testDefsDir)
+	if _, err := os.Stat(walkWotdefsDir); err != nil {
+		t.Skipf("external 2.4.1 defs unavailable: %v", err)
+	}
+	entries, err := BuildMapOrder(walkWotdefsDir, walkDefsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +167,7 @@ func predictWalk(t *testing.T) []modelVisit {
 // TestWalkMatchesProbe pins the model's walk (kind, name, FullIndex or
 // legacy) against the live walkfinal run: 1242/1242, zero mismatches.
 func TestWalkMatchesProbe(t *testing.T) {
-	obs := parseWalkFile(t, "../../ce/walkfinal_RUN.txt", false)
+	obs := parseWalkFile(t, walkRunFile, false)
 	exp := predictWalk(t)
 	if len(exp) != len(obs) {
 		t.Fatalf("model visits=%d observed=%d", len(exp), len(obs))
@@ -164,7 +182,7 @@ func TestWalkMatchesProbe(t *testing.T) {
 // TestWalkFlagsMatchProbe pins per-visit flags (&0x5F for props, full u8
 // for methods) and volatile against the live walkfinal run.
 func TestWalkFlagsMatchProbe(t *testing.T) {
-	obs := parseWalkFile(t, "../../ce/walkfinal_RUN.txt", true)
+	obs := parseWalkFile(t, walkRunFile, true)
 	exp := predictWalk(t)
 	if len(exp) != len(obs) {
 		t.Fatalf("model visits=%d observed=%d", len(exp), len(obs))

@@ -572,3 +572,17 @@ func BuildDataType(sec *Section) (DataType, error) {
 func Alias(name string) DataType {
 	return aliases[name]
 }
+
+// AllowsNone reports whether dt is an `AllowNone` FIXED_DICT: the type whose
+// wire form carries a leading "has value" flag and whose absent value is
+// None, not a zeroed dict.
+//
+// It matters on the CLIENT side, not just on the wire: a dynamic component's
+// property setter skips its `update_*` handler for a None value
+// (`OwnVehicleBase.__set`: `if prop is not None or getattr(func,
+// '__isNoneAccepted', False)`), so None is how a server says "this does not
+// apply here". A zeroed dict is not None and runs the handler.
+func AllowsNone(dt DataType) bool {
+	fd, ok := dt.(*fixedDictType)
+	return ok && fd.allowNone
+}
