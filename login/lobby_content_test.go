@@ -657,3 +657,45 @@ func TestFullSyncClanless(t *testing.T) {
 		t.Fatalf("stats.clanInfo = %+v, want absent", got)
 	}
 }
+
+// TestShopDocCarriesARecertificationForm pins the one goodie the client's own
+// notification listeners index without a guard.
+//
+// `RecertificationFormStateListener._getState` does
+// `goodiesCache.getRecertificationForm(currency='credits').enabled`, and
+// `getRecertificationForm` returns None when the shop holds no
+// RECERTIFICATION_FORM (variety 3) with a credits resource (20) — the listener
+// is started on every hangar load, so an empty table logs
+// `AttributeError: 'NoneType' object has no attribute 'enabled'` each time.
+func TestShopDocCarriesARecertificationForm(t *testing.T) {
+	doc, err := ShopDoc(nil)
+	if err != nil {
+		t.Fatalf("ShopDoc: %v", err)
+	}
+	goodies := doc.Get("goodies")
+	if goodies == nil {
+		t.Fatal("shop has no goodies node")
+	}
+	forms := goodies.Get("goodies")
+	if forms == nil || forms.Kind != lobby.FDict || len(forms.Items) == 0 {
+		t.Fatalf("shop.goodies.goodies = %+v, want at least one goodie", forms)
+	}
+	// The client reads the tuple as (variety, target, enabled, lifetime,
+	// useby, limit, autostart, condition, resource, expireAfter,
+	// roundToEndOfGameDay); variety 3 is RECERTIFICATION_FORM and the
+	// resource's first field 20 is CREDITS.
+	entry := forms.Items[0]
+	if entry.Kind != lobby.FTuple || len(entry.Items) != 11 {
+		t.Fatalf("goodie = %+v, want an 11-tuple", entry)
+	}
+	if got := entry.Items[0].I; got != 3 {
+		t.Fatalf("variety = %d, want 3 (RECERTIFICATION_FORM)", got)
+	}
+	if entry.Items[2].Kind != lobby.FBool || entry.Items[2].B {
+		t.Fatalf("enabled = %+v, want false (the form is not on sale)", entry.Items[2])
+	}
+	res := entry.Items[8]
+	if res.Kind != lobby.FTuple || len(res.Items) != 3 || res.Items[0].I != 20 {
+		t.Fatalf("resource = %+v, want (20, value, isPercentage)", res)
+	}
+}

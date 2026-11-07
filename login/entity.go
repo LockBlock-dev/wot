@@ -48,6 +48,8 @@ const (
 	elTickSync                  = 0x13 // FIXED 1
 	elSelectPlayerEntity        = 0x1A // FIXED 0
 	elEnableEntities            = 0x0B // FIXED 0
+	elRequestEntityUpdate       = 0x06 // VAR 2 (client -> server)
+	elNrlMsgToCell              = 0x07 // VAR 2 (client -> server)
 
 	entityMethodBase   = 0x4E // 0x4E..0xA6
 	entityPropertyBase = 0xA7 // 0xA7..0xFE

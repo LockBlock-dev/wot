@@ -1229,3 +1229,33 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		t.Fatalf("%d packets queued for resend, want 0", got)
 	}
 }
+
+// TestPostCallsSkipsRequestEntityUpdate pins the walk over a session-control
+// element.
+//
+// The client sends `requestEntityUpdate` (0x06, VAR 2, the entity id) once per
+// battle entity right after its lobby sync, in the SAME bundle as the base
+// calls. It is not a method, so the walk has to skip it by its own length and
+// keep going — breaking on it dropped every call after it.
+func TestPostCallsSkipsRequestEntityUpdate(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	k2 := uint32(0x03185b5a)
+	app := lobby.BuildLobbyBundle(k2, lobby.DoCmdInt3(224, lobby.CmdSyncData, 88, 0x699a133b, 0))
+	// Two entity-update requests, then the shop sync.
+	for _, id := range []uint32{100003, 100004} {
+		app = append(app, 0x06, 0x04, 0x00)
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], id)
+		app = append(app, b[:]...)
+	}
+	app = append(app, lobby.DoCmdInt3(225, lobby.CmdReqServerStats, 0, 0, 0)...)
+	clear := append([]byte{0x58, 0x04}, app...)
+	clear = append(clear, make([]byte, 8)...)
+	calls := s.postCalls(clear, k2)
+	if len(calls) != 2 {
+		t.Fatalf("%d calls, want 2 (the syncs before and after the requestEntityUpdate run)", len(calls))
+	}
+	if calls[0].Cmd != 100 || calls[1].Cmd != 501 {
+		t.Fatalf("cmds = %d, %d, want 100 then 501", calls[0].Cmd, calls[1].Cmd)
+	}
+}

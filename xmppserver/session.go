@@ -129,6 +129,7 @@ func (s *session) negotiate() error {
 	if err := s.write(features); err != nil {
 		return err
 	}
+	ignored := 0
 	for {
 		start, err = nextElement(s.dec)
 		if err != nil {
@@ -146,7 +147,18 @@ func (s *session) negotiate() error {
 			// advertises it, so treat it as a protocol error.
 			return fmt.Errorf("xmpp: unexpected starttls")
 		default:
-			return fmt.Errorf("xmpp: unexpected <%s> before auth", start.Name.Local)
+			// The client's XMPP stack sends a presence right after the
+			// stream open, before SASL. It is harmless and the real
+			// service ignores it, so read and drop it instead of tearing
+			// the stream down — erroring here cost the client its chat
+			// connection every login.
+			if _, err := readElement(s.dec, start); err != nil {
+				return err
+			}
+			ignored++
+			if ignored > 8 {
+				return fmt.Errorf("xmpp: no auth after %d pre-auth elements", ignored)
+			}
 		}
 	}
 }

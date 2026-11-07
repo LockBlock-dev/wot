@@ -1848,6 +1848,16 @@ func (s *BaseAppServer) postCalls(clear []byte, key2 uint32) []postCall {
 			off += 3 + argLen
 			continue
 		}
+		if elemID == elRequestEntityUpdate || elemID == elNrlMsgToCell {
+			// Session-control elements, not methods: `requestEntityUpdate`
+			// (the client asking for an entity's properties) and the NRL
+			// message to the cell both carry their own u16 length. They
+			// ride the same bundle as the calls — the client sends one
+			// `requestEntityUpdate` per battle entity right after its lobby
+			// sync — and breaking on one dropped every call after it.
+			off += 3 + argLen
+			continue
+		}
 		// Client -> server cell methods share the 0x10..0x4D element space with
 		// the server -> client ones; the direction tells them apart, so there
 		// is no collision. Only the gun-tracking calls are decoded — they are

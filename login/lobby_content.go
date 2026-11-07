@@ -775,7 +775,7 @@ func ShopDoc(prices map[int64]map[string]int64) (*lobby.FNode, error) {
 			Set("goodies", lobby.NewDict().Set("prices", lobby.NewDict())).
 			Set("items", lobby.NewDict())).
 		Set("goodies", lobby.NewDict().
-			Set("goodies", lobby.NewDict()).
+			Set("goodies", RecertificationFormsNode()).
 			Set("notInShop", lobby.NewList()).
 			Set("prices", lobby.NewDict())).
 		Set("specialPrices", lobby.NewDict()).
@@ -783,6 +783,41 @@ func ShopDoc(prices map[int64]map[string]int64) (*lobby.FNode, error) {
 			Set("markTargetAreaEnabled", lobby.NewBool(true)).
 			Set("stunEnabled", lobby.NewBool(true))).
 		Set("items", ShopItemsNode(prices)), nil
+}
+
+// RecertificationFormsNode is `shop.goodies.goodies`: the one goodie the
+// client's own listeners index without a guard.
+//
+// `RecertificationFormStateListener._getState` (notification/listeners.py) does
+// `goodiesCache.getRecertificationForm(currency='credits').enabled`, and
+// `getRecertificationForm` returns None when the shop holds no
+// `GOODIE_VARIETY.RECERTIFICATION_FORM` (3) with a credits resource (20). The
+// listener is started by `NotificationsModel.setup` on every hangar load, so
+// an empty table raises
+//
+//	AttributeError: 'NoneType' object has no attribute 'enabled'
+//
+// into the log each time. The form is DISABLED (`enabled` false), which is
+// what `_getState` needs to report DISABLED and skip the popup.
+//
+// The tuple is the client's `loadDefinitions` / `_NamedGoodieData` order:
+// variety, target, enabled, lifetime, useby, limit, autostart, condition,
+// resource, expireAfter, roundToEndOfGameDay.
+func RecertificationFormsNode() *lobby.FNode {
+	return lobby.NewDict().SetNode(lobby.NewInt(1), lobby.NewTuple(
+		lobby.NewInt(3),      // GOODIE_VARIETY.RECERTIFICATION_FORM
+		lobby.NewNone(),      // target
+		lobby.NewBool(false), // enabled
+		lobby.NewInt(0),      // lifetime
+		lobby.NewInt(0),      // useby
+		lobby.NewInt(0),      // limit
+		lobby.NewBool(false), // autostart
+		lobby.NewNone(),      // condition
+		// resource: (GOODIE_RESOURCE_TYPE.CREDITS, value, isPercentage)
+		lobby.NewTuple(lobby.NewInt(20), lobby.NewInt(0), lobby.NewBool(false)),
+		lobby.NewNone(),     // expireAfter
+		lobby.NewBool(true), // roundToEndOfGameDay
+	))
 }
 
 // TankmanCostNode is `shop.tankmanCost`: one entry per recruit tier, read
