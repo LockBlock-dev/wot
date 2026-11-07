@@ -67,3 +67,5 @@ wotkeys.txt
 # (sibling dirs wotdefs-2.4.0/, wotdefs-2.4.1/, scripts-2.4.1/);
 # never vendor them under testdata/ again.
 /testdata/
+
+reference/

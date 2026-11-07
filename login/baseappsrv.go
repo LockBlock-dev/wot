@@ -347,6 +347,17 @@ type clientState struct {
 	// Avatar so the battle app has something to attach the camera and the
 	// player panel to.
 	vehicle *Entity
+	// dummy is the synthetic opponent's Vehicle entity, when the battle has
+	// one, and the server's copy of its spawn and health. The client only
+	// learns the health from the updates `applyShot` sends.
+	dummy          *Entity
+	dummyID        uint32
+	dummyPos       [3]float32
+	dummyYaw       float32
+	dummyHealth    int
+	dummyMaxHealth int
+	// shotID numbers the tracers this session fires.
+	shotID int32
 	// gunSpec is the mounted gun's rotation limits and yaw arc, read from
 	// the vehicle's item defs when the arena is entered. It is what
 	// `gunAnglesPacked` is clamped to.
@@ -2128,6 +2139,9 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	// completion is a second update with `timeLeft` 0, which also clears
 	// `_waitReloadingStartResponse` via `stopPredicateReloading`.
 	go s.finishReload(conn, from, st, arenaID, reload)
+	// The shell itself: trace it against the synthetic opponent and stream
+	// the damage. A miss sends nothing, the client having drawn its own shot.
+	s.applyShot(conn, from, st, arenaID)
 	return nil
 }
 

@@ -789,6 +789,8 @@ func arenaHandoff(a *server.Arena, p *server.ArenaPlayer) *login.ArenaHandoff {
 			Name:             "Dummy",
 			Team:             (p.Team + 1) ^ 3, // the other side: 1 <-> 2
 			VehicleCompDescr: []byte{0x51, 0xd2, 0x3f, 0x00, 0x36, 0x00, 0xcd, 0x00, 0x02, 0x00, 0x3c, 0x00, 0x24, 0x00, 0x00},
+			// The TOG II's own `hull/maxHealth` from its item defs.
+			MaxHealth: 1248,
 		}
 	}
 	for _, id := range a.Order {

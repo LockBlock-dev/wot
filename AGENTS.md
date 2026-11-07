@@ -1168,6 +1168,13 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   vector and the tank slides (the drift); it still brakes, and a stationary
   hull cannot pivot. Ignoring the bit leaves the tank driving straight through
   the handbrake.
+- **Shooting the dummy is server-side.** `Avatar.vehicle_shoot()` has no
+  arguments; `login/damage.go` resolves the shell from the gun marker against
+  the dummy's hull box (TOG II: 76.2/50.8/25.4 mm), rolls penetration ±25% and
+  damage ±25%, and streams `Vehicle.showDamageFromShot`/`health`/
+  `onHealthChanged` plus `Avatar.showShotResults`/`showTracer`/`stopTracer`.
+  The exposed ids are the defs' indexes; `selectEntity(dummy)` must precede the
+  Vehicle calls and `selectPlayerEntity` the Avatar's.
 - **`ENTITY_PROPERTY_BASE` is `0xA7` for every entity**, so a bare property
   element is `0xa7 + FullIndex` where `FullIndex` is
   `entdef.Entity.CSPropsOrdered` (fixed sizes first and ascending, then the

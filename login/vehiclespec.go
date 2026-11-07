@@ -55,6 +55,22 @@ type gunSpec struct {
 	Dispersion dispersionSpec
 }
 
+// shellSpec is the default shell's damage model: the gun's mounted `shots`
+// entry gives its speed, penetration and ballistics; the shell's own def
+// gives its damage, kind, caliber and the hit effect the client plays.
+type shellSpec struct {
+	Name         string
+	Damage       float64
+	Pen          float64
+	Kind         string
+	KindIndex    uint8
+	Caliber      float64
+	Speed        float64
+	Gravity      float64
+	MaxDistance  float64
+	EffectsIndex uint8
+}
+
 // dispersionSpec is the client's own dispersion model, read from the defs the
 // way `common/items/vehicles.py` reads them.
 //
@@ -126,6 +142,9 @@ type dispersionSpec struct {
 	// wheel and `WoT.unpackWheelScroll` turns it into that wheel's angular
 	// speed, so the count and the radii are what the scroll is computed from.
 	WheelRadii []float64
+	// Shell is the default shell's damage model, from the gun's `shots` entry
+	// and the shell's own def.
+	Shell shellSpec
 }
 
 // gunSpeedCache is keyed by "<nation>/<vehicle>/<turret>/<gun>": the same
@@ -643,7 +662,7 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 	if err != nil {
 		return dispersionSpec{}, fmt.Errorf("vehiclespec: %s/%s: %w", gunsName, gun, err)
 	}
-	speed, piercing, shellName, err := defaultShell(gs)
+	shell, err := defaultShell(gs)
 	if err != nil {
 		return dispersionSpec{}, fmt.Errorf("vehiclespec: %s/%s: %w", gunsName, gun, err)
 	}
@@ -682,9 +701,16 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 			siegeOff = v
 		}
 	}
+	if data, derr := shellDataIn(pkg, nation, shell.Name); derr == nil {
+		shell.Damage = data.Damage
+		shell.Kind = data.Kind
+		shell.KindIndex = data.KindIndex
+		shell.Caliber = data.Caliber
+		shell.EffectsIndex = data.EffectsIndex
+	}
 	shellCD := int32(0)
 	if nation != "" {
-		if id, serr := shellIDIn(pkg, nation, shellName); serr == nil {
+		if id, serr := shellIDIn(pkg, nation, shell.Name); serr == nil {
 			for idx, n := range nationNames {
 				if n == nation {
 					shellCD = shellCompactDescr(idx, id)
@@ -703,9 +729,10 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 		Movement:       move / 3.6,
 		Rotation:       rot * math.Pi / 180,
 		TurretRotation: turretRot * math.Pi / 180,
-		ShotSpeed:      speed,
+		ShotSpeed:      shell.Speed,
 		AfterShot:      afterShot,
-		Piercing:       piercing,
+		Piercing:       shell.Pen,
+		Shell:          shell,
 		ShellCD:        shellCD,
 		ReloadTime:     reload,
 		SiegeOn:        siegeOn,
@@ -718,19 +745,21 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 }
 
 // defaultShell is the gun's default shell — the one with the largest
-// `defaultPortion` — as its muzzle velocity and its penetration at 100 m.
-func defaultShell(gs *entdef.Section) (speed, piercing float64, name string, err error) {
+// `defaultPortion` — as its muzzle velocity, penetration at 100 m and
+// ballistics, from the gun's mounted `shots` entry.
+func defaultShell(gs *entdef.Section) (shellSpec, error) {
 	shots := gs.Child("shots")
 	if shots == nil {
-		return 0, 0, "", fmt.Errorf("no shots")
+		return shellSpec{}, fmt.Errorf("no shots")
 	}
 	bestPortion := -1.0
+	var best shellSpec
 	for _, sh := range shots.Children {
 		portion := 0.0
 		if p := sh.Child("defaultPortion"); p != nil {
 			v, perr := strconv.ParseFloat(strings.TrimSpace(p.AsString()), 64)
 			if perr != nil {
-				return 0, 0, "", fmt.Errorf("shell %s defaultPortion %q: %w", sh.Name, p.AsString(), perr)
+				return shellSpec{}, fmt.Errorf("shell %s defaultPortion %q: %w", sh.Name, p.AsString(), perr)
 			}
 			portion = v
 		}
@@ -739,8 +768,10 @@ func defaultShell(gs *entdef.Section) (speed, piercing float64, name string, err
 		}
 		v, serr := floatChild(sh, "speed")
 		if serr != nil {
-			return 0, 0, "", fmt.Errorf("shell %s: %w", sh.Name, serr)
+			return shellSpec{}, fmt.Errorf("shell %s: %w", sh.Name, serr)
 		}
+		gravity, _ := floatChild(sh, "gravity")
+		maxDist, _ := floatChild(sh, "maxDistance")
 		// `piercingPower` is two values, at 100 m and at 500 m.
 		pen := 0.0
 		if pp := sh.Child("piercingPower"); pp != nil {
@@ -748,12 +779,105 @@ func defaultShell(gs *entdef.Section) (speed, piercing float64, name string, err
 				pen = lo
 			}
 		}
-		speed, piercing, name, bestPortion = v, pen, sh.Name, portion
+		best = shellSpec{Name: sh.Name, Pen: pen, Speed: v, Gravity: gravity, MaxDistance: maxDist}
+		bestPortion = portion
 	}
 	if bestPortion < 0 {
-		return 0, 0, "", fmt.Errorf("no shells")
+		return shellSpec{}, fmt.Errorf("no shells")
 	}
-	return speed, piercing, name, nil
+	return best, nil
+}
+
+// shellDataIn reads the shell's own def: its damage, kind, caliber and the
+// `shot_effects.xml` index the client plays the hit effect from.
+func shellDataIn(pkg, nation, name string) (shellSpec, error) {
+	if nation == "" {
+		return shellSpec{}, fmt.Errorf("no nation")
+	}
+	raw, err := readFromZip(pkg, "scripts/item_defs/vehicles/"+nation+"/components/shells.xml")
+	if err != nil {
+		return shellSpec{}, err
+	}
+	f, err := entdef.ParseFile(raw)
+	if err != nil {
+		return shellSpec{}, fmt.Errorf("shells.xml: %w", err)
+	}
+	if f.Root == nil {
+		return shellSpec{}, fmt.Errorf("shells.xml: no root")
+	}
+	sh := findSection(f.Root, name)
+	if sh == nil {
+		return shellSpec{}, fmt.Errorf("no shell %q", name)
+	}
+	kind := ""
+	if k := sh.Child("kind"); k != nil {
+		kind = strings.TrimSpace(k.AsString())
+	}
+	caliber, _ := floatChild(sh, "caliber")
+	damage := 0.0
+	if d := sh.Child("damage"); d != nil {
+		if v, derr := floatChild(d, "armor"); derr == nil {
+			damage = v
+		}
+	}
+	effects := ""
+	if e := sh.Child("effects"); e != nil {
+		effects = strings.TrimSpace(e.AsString())
+	}
+	return shellSpec{
+		Name:         name,
+		Damage:       damage,
+		Kind:         kind,
+		KindIndex:    shellKindIndex(kind),
+		Caliber:      caliber,
+		EffectsIndex: shotEffectsIndex(pkg, effects),
+	}, nil
+}
+
+// shellKindIndex is the shell kind's index in the client's
+// `SHELL_TYPES_LIST` (the `kind` byte the tracer and the hit point carry).
+func shellKindIndex(kind string) uint8 {
+	switch kind {
+	case "HOLLOW_CHARGE":
+		return 0
+	case "HIGH_EXPLOSIVE":
+		return 1
+	case "ARMOR_PIERCING":
+		return 2
+	case "ARMOR_PIERCING_HE":
+		return 3
+	case "ARMOR_PIERCING_CR":
+		return 4
+	}
+	return 2
+}
+
+// shotEffectsIndex is the position of the shell's `effects` name in
+// `common/shot_effects.xml`: the index the client's
+// `vehicles.g_cache.shotEffects` is keyed by.
+func shotEffectsIndex(pkg, effects string) uint8 {
+	if effects == "" {
+		return 0
+	}
+	raw, err := readFromZip(pkg, "scripts/item_defs/vehicles/common/shot_effects.xml")
+	if err != nil {
+		return 0
+	}
+	f, err := entdef.ParseFile(raw)
+	if err != nil || f.Root == nil {
+		return 0
+	}
+	idx := 0
+	for _, c := range f.Root.Children {
+		if strings.HasPrefix(c.Name, "xmlns:") {
+			continue
+		}
+		if c.Name == effects {
+			return uint8(idx)
+		}
+		idx++
+	}
+	return 0
 }
 
 // wheelRadiiIn collects the radius of every wheel the client's wheel animator

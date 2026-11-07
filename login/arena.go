@@ -67,6 +67,8 @@ type ArenaPlayerDoc struct {
 	// and the scoreboard.
 	ClanAbbrev string
 	ClanDBID   int64
+	// MaxHealth is the vehicle's hit points; zero means the default 1000.
+	MaxHealth int
 }
 
 // ArenaHandoff is everything needed to put a client into a battle.
@@ -209,12 +211,15 @@ func (s *BaseAppServer) arenaVehicleFor(st *clientState, h *ArenaHandoff, doc Ar
 	// `_splitVehicleCompactDescr` indexes it as a string. A zeroed
 	// publicInfo leaves it empty and the client raises
 	// "IndexError: string index out of range" in `Vehicle.onEnterWorld`.
-	const maxHealth = 1000
+	maxHealth := doc.MaxHealth
+	if maxHealth <= 0 {
+		maxHealth = 1000
+	}
 	pi := entdef.ZeroValue(publicInfoType(typ))
 	pi = dictSet(pi, "name", entdef.Value{Kind: entdef.VString, Str: doc.Name})
 	pi = dictSet(pi, "compDescr", entdef.Value{Kind: entdef.VString, Str: string(doc.VehicleCompDescr)})
 	pi = dictSet(pi, "team", entdef.Value{Kind: entdef.VUint, Uint: uint64(doc.Team)})
-	pi = dictSet(pi, "maxHealth", entdef.Value{Kind: entdef.VUint, Uint: maxHealth})
+	pi = dictSet(pi, "maxHealth", entdef.Value{Kind: entdef.VUint, Uint: uint64(maxHealth)})
 	// Its slot in the team, 1-based.
 	pi = dictSet(pi, "index", entdef.Value{Kind: entdef.VUint, Uint: 1})
 	// The crew panel is built from this list: one entry per crew slot, each a
@@ -225,7 +230,7 @@ func (s *BaseAppServer) arenaVehicleFor(st *clientState, h *ArenaHandoff, doc Ar
 	}
 	pi = dictSet(pi, "crewGroups", entdef.Value{Kind: entdef.VSeq, Seq: crew})
 	e.Set("publicInfo", pi)
-	e.SetInt("health", maxHealth)
+	e.SetInt("health", int64(maxHealth))
 	// Without this the client treats the whole crew as incapacitated, which
 	// greys out every module in the damage panel.
 	e.SetUint("isCrewActive", 1)
@@ -718,6 +723,19 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 				}
 				seq++
 			}
+			// The server's copy of the dummy: where it stands and how much
+			// health it has left. `applyShot` updates the health and sends
+			// the client the difference.
+			s.mu.Lock()
+			st.dummy = dv
+			st.dummyID = dummyID
+			st.dummyPos = enemy
+			st.dummyYaw = 0
+			if hv, ok := dv.Props["health"]; ok {
+				st.dummyHealth = int(hv.Int)
+			}
+			st.dummyMaxHealth = st.dummyHealth
+			s.mu.Unlock()
 			vehicles = append(vehicles, vehicleInfoValue(infoType, *h.Dummy, dummyID, 1, enemyX, enemyZ))
 			s.logf("stage2 %s: dummy Vehicle %d created (team %d, %d B)", from, dummyID, h.Dummy.Team, len(dcreate))
 		}
