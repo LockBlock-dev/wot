@@ -286,3 +286,40 @@ func TestHealthIsABareProperty(t *testing.T) {
 		t.Fatalf("elVehicleHealth = %#x, want 0xB5 (0xA7 + 14)", elVehicleHealth)
 	}
 }
+
+// TestTakeAmmoDecrementsTheFiredShell pins the ammo count: only the fired
+// shell's entry drops, and it never goes below zero.
+func TestTakeAmmoDecrementsTheFiredShell(t *testing.T) {
+	entry := func(cd int64, qty uint64) entdef.Value {
+		return entdef.Value{Kind: entdef.VDict, Dict: []entdef.DictField{
+			{Name: "compactDescr", Value: entdef.Value{Kind: entdef.VInt, Int: cd}},
+			{Name: "quantity", Value: entdef.Value{Kind: entdef.VUint, Uint: qty}},
+			{Name: "quantityInClip", Value: entdef.Value{Kind: entdef.VUint, Uint: 1}},
+		}}
+	}
+	list := entdef.Value{Kind: entdef.VSeq, Seq: []entdef.Value{entry(100, 10), entry(200, 5)}}
+
+	got, remaining, ok := takeAmmo(list, 100)
+	if !ok || remaining != 9 {
+		t.Fatalf("takeAmmo(100) = %d, %v; want 9, true", remaining, ok)
+	}
+	if q, _ := got.Seq[0].Get("quantity"); q.Uint != 9 {
+		t.Fatalf("shell 100 quantity = %d, want 9", q.Uint)
+	}
+	if q, _ := got.Seq[1].Get("quantity"); q.Uint != 5 {
+		t.Fatalf("shell 200 quantity = %d, want 5 (untouched)", q.Uint)
+	}
+	if _, _, ok := takeAmmo(got, 300); ok {
+		t.Fatal("takeAmmo(300) succeeded for a shell not in the list")
+	}
+	// Drain shell 100: the last shell leaves 0, the next call refuses.
+	for i := 0; i < 9; i++ {
+		got, _, _ = takeAmmo(got, 100)
+	}
+	if q, _ := got.Seq[0].Get("quantity"); q.Uint != 0 {
+		t.Fatalf("shell 100 quantity = %d, want 0", q.Uint)
+	}
+	if _, _, ok := takeAmmo(got, 100); ok {
+		t.Fatal("takeAmmo succeeded with no shells left")
+	}
+}

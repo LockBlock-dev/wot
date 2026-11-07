@@ -362,6 +362,11 @@ type clientState struct {
 	// the vehicle's item defs when the arena is entered. It is what
 	// `gunAnglesPacked` is clamped to.
 	gunSpec gunSpec
+	// ammoList is the `OwnVehicle.vehicleAmmoList` value sent at arena
+	// entry. Every shot decrements the fired shell's `quantity` here and
+	// re-sends it: the client's ammo panel reads the count from this
+	// property and nothing else updates it.
+	ammoList entdef.Value
 	// gunYaw is the turret angle this server reports, and gunTarget the one
 	// the client is aiming at. `trackTurret` walks one toward the other.
 	gunYaw    float64
@@ -2071,6 +2076,9 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	if comp.TypeID == 0 || reload <= 0 {
 		return nil
 	}
+	// The shot consumes a shell. This goes out before the reload so the
+	// panel's count drops as the reload starts.
+	s.decrementAmmo(conn, from, st, comp)
 	dt := entdef.Alias("VEHICLE_GUN_RELOAD_TIME")
 	if dt == nil {
 		return nil
@@ -2114,6 +2122,73 @@ func (s *BaseAppServer) answerShoot(conn Transport, from *net.UDPAddr, st *clien
 	// the damage. A miss sends nothing, the client having drawn its own shot.
 	s.applyShot(conn, from, st, arenaID)
 	return nil
+}
+
+// takeAmmo removes one shell of `shell` from a `vehicleAmmoList` value and
+// returns the new list and the remaining count. It reports false when the
+// shell is not in the list or its count is already zero.
+func takeAmmo(ammo entdef.Value, shell int32) (entdef.Value, uint64, bool) {
+	if ammo.Kind != entdef.VSeq || len(ammo.Seq) == 0 || shell == 0 {
+		return ammo, 0, false
+	}
+	for i := range ammo.Seq {
+		cd, ok := ammo.Seq[i].Get("compactDescr")
+		if !ok || cd.Int != int64(shell) {
+			continue
+		}
+		q, ok := ammo.Seq[i].Get("quantity")
+		if !ok || q.Uint == 0 {
+			return ammo, 0, false
+		}
+		remaining := q.Uint - 1
+		ammo.Seq[i] = dictSet(ammo.Seq[i], "quantity", entdef.Value{Kind: entdef.VUint, Uint: remaining})
+		return ammo, remaining, true
+	}
+	return ammo, 0, false
+}
+
+// decrementAmmo takes one shell of the loaded round out of the session's
+// `vehicleAmmoList` and re-sends the property. The list is the one
+// `ownVehicleOverrides` built from the garage's saved layout; the client's
+// ammo panel reads `quantity` from it and nothing else updates it.
+func (s *BaseAppServer) decrementAmmo(conn Transport, from *net.UDPAddr, st *clientState, comp nrlComponent) {
+	s.mu.Lock()
+	ammo := st.ammoList
+	shell := st.gunSpec.Dispersion.ShellCD
+	s.mu.Unlock()
+	if ammo.Kind != entdef.VSeq || len(ammo.Seq) == 0 || shell == 0 {
+		return
+	}
+	ammo, remaining, changed := takeAmmo(ammo, shell)
+	if !changed {
+		return
+	}
+	dt := entdef.Alias("VEHICLE_AMMO_LIST")
+	if dt == nil {
+		return
+	}
+	var buf bytes.Buffer
+	if err := entdef.NewCodec().Write(&buf, dt, ammo); err != nil {
+		s.logf("shoot: ammo list encode: %v", err)
+		return
+	}
+	el, err := EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("vehicleAmmoList"), buf.Bytes())
+	if err != nil {
+		s.logf("shoot: ammo list element: %v", err)
+		return
+	}
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, el, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		s.logf("shoot: ammo list send: %v", err)
+		return
+	}
+	s.mu.Lock()
+	st.ammoList = ammo
+	s.mu.Unlock()
+	s.logf("shoot: consumed a shell of %d (now %d)", shell, remaining)
 }
 
 // finishReload sends the zeroed `vehicleGunReloadTime` once the reload is over.

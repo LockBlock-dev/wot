@@ -799,6 +799,12 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	}
 	s.mu.Unlock()
 	overrides := ownVehicleOverrides(vehicle.ID, h.Player.VehicleCompDescr, savedShells)
+	// Keep the ammo list so a shot can decrement it. The value is the same
+	// one the OwnVehicle component is created with, so the first re-send
+	// differs from the client's copy only by the fired shell.
+	s.mu.Lock()
+	st.ammoList = overrides["vehicleAmmoList"]
+	s.mu.Unlock()
 
 	// WOT_ARENA_PROBE=5 sweeps a range of NRL component ids onto the vehicle.
 	// The client logs `createDynamicComponent: <Name> failed to load` for every
