@@ -1230,6 +1230,21 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   `<turretPositions><turret>0 0.704143 1.81585`, which is relative to the
   HULL, so the turret sits at 2.059 m and rises to 3.058 m). A centred guess
   put every hole a few tenths of a metre off the aim point.
+- **Modules and crew take damage.** `login/modules.go` holds the TOG II's
+  module/crew table with the client's `typeDescr.extras` indices (the common
+  `item_defs/vehicles/common/vehicle.xml` `<extras>` list, index 0 the
+  `_NoneExtra`: engine 62, ammo bay 63, fuel tank 64, radio 65, tracks 66/67,
+  gun 68, turret rotator 69, surveying device 70, the six crewmen 71-78) and
+  the item defs' own HP (engine 247, ammo 220, fuel 200, radio 160, tracks
+  170, gun 144, rotator 140, optics 90, crew 100). A penetrating hit rolls
+  the module behind the face it met (the hull's front holds the driver, radio
+  and ammo bay, its sides/rear the engine and fuel tanks, a low side hit a
+  track, the turret the gun/rotator/optics/crew, the barrel only the gun) and
+  takes `moduleDamageShare` (half) the shell's damage off it. The client is
+  told with `Vehicle.onExtraHitted(extraIndex, hitPoint)`; a wrecked track
+  also gets `Vehicle.startOrUpdateExtraFromOutside("leftTrack0Health", …)`,
+  whose `TrackHealth._start` breaks the track visual. All crew dead kills the
+  tank whatever its hit points.
 - **The dummy has hull, turret AND gun hit parts.** `dummyParts` carries the
   boxes with their own frames and armour (hull 76.2/76.2/50.8/25.4, turret
   114.3/76.2/53.3/19 from the item defs' per-material table, gun 25.4), the

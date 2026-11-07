@@ -211,11 +211,15 @@ type shotResult struct {
 	Distance float32
 	Part     uint8         // TankPartIndexes
 	Bounds   [2][3]float32 // the hit part's box, for the segment
-	Armor    float32       // effective, after the impact angle
-	Pierced  bool
-	Damage   int
-	Effect   uint8
-	Flags    uint32
+	// Face is the box face the shell met (0 ±X, 1 ±Y, 2 ±Z) and LocalNormal
+	// its outward normal in the part's frame; both pick the module behind it.
+	Face        int
+	LocalNormal [3]float32
+	Armor       float32 // effective, after the impact angle
+	Pierced     bool
+	Damage      int
+	Effect      uint8
+	Flags       uint32
 }
 
 // resolveShot traces one shell against every part of the dummy and rolls its
@@ -291,6 +295,8 @@ func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3
 	res.LocalDir = [3]float32{dir[0]*c - dir[2]*s, dir[1], dir[0]*s + dir[2]*c}
 	res.Part = box.Part
 	res.Bounds = box.Bounds
+	res.Face = face
+	res.LocalNormal = localNormal
 	return res
 }
 
@@ -586,6 +592,15 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if !res.Hit {
 		return
 	}
+	// The module or crewman behind the armour: a penetrating hit damages one,
+	// and the client is told which one (`onExtraHitted`) and, for a wrecked
+	// track, to break its visual (`startOrUpdateExtraFromOutside`).
+	var moduleEls []byte
+	if res.Pierced {
+		// The shell's own damage, not the HP damage: a device hit (the gun)
+		// deals no HP damage but still wrecks the device.
+		moduleEls = s.damageModule(st, dummy, arenaID, res, int(sh.Damage))
+	}
 	if maxHealth <= 0 {
 		maxHealth = 1000
 	}
@@ -595,6 +610,10 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	}
 	newHealth := oldHealth - damage
 	if newHealth < 0 {
+		newHealth = 0
+	}
+	// A tank whose crew is all dead is dead, whatever its hit points.
+	if newHealth > 0 && s.allCrewDead(st) {
 		newHealth = 0
 	}
 	damageFactor := 0
@@ -618,6 +637,9 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	if el, err := EncodeSelectEntity(dummyID); err == nil {
 		dummyApp = append(dummyApp, el...)
 	}
+	// The module/crew calls are Vehicle client methods, so they ride behind
+	// the dummy's selection.
+	dummyApp = append(dummyApp, moduleEls...)
 	if el, err := showDamageFromShotElement(dummy, attacker, point, sh.EffectsIndex, damage, uint8(damageFactor), sh.Speed); err == nil {
 		dummyApp = append(dummyApp, el...)
 	}

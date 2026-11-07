@@ -375,6 +375,9 @@ type clientState struct {
 	// what `OwnVehicle.battleEventsSummary` carries: the personal efficiency
 	// panel's damage counter reads it and nothing else.
 	damageDealt uint32
+	// modules is the dummy's module and crew damage, one entry per
+	// dummyModules entry; nil until the first module hit.
+	modules []moduleState
 	// postHold stops the login phase's 10 Hz ticks until the client speaks
 	// again. It is set when a login reply goes out (the leave's Account
 	// re-entry) and cleared by the client's own next datagram: the client's
