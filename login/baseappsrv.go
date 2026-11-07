@@ -389,6 +389,12 @@ type clientState struct {
 	// it is dropped as "unexpected packet on external interface" and the
 	// client reports REASON_GENERAL_NETWORK and disconnects.
 	postHold bool
+	// accountDue, when non-zero, is when a leave's login reply is due: the
+	// client is still tearing down the battle's space (its NRL hub is
+	// destroyed about a second after leaveArena), and creating the Account
+	// in the middle of that teardown is what killed the session. The reply
+	// waits until the teardown is over.
+	accountDue time.Time
 	// postHoldAt is when the login reply went out. The filter stays armed for
 	// about a second after it — the client is still loading the hangar — so
 	// the ticks also wait out postHoldWindow from here, whatever the client
@@ -2687,6 +2693,12 @@ func (s *BaseAppServer) tickEpoch() uint32 {
 // works because its reliable channel carries nothing else. Ours now carries
 // nothing else either, so the tick rides the same stream; the unreliable form
 // is the fallback for a deep backlog (see `arenaTickReliableBacklog`).
+// leaveReplyDelay is how long after a leave's enableEntities the Account is
+// created. The client's battle space teardown (its NRL hub destruction) lands
+// about 1.1 s after leaveArena; creating the Account before it finishes is
+// what made the client destroy it and report DISCONNECTED.
+const leaveReplyDelay = 1500 * time.Millisecond
+
 // postHoldWindow is how long after a login reply the client's
 // `LoginReplyFilter` is still armed. Measured live: the client created the
 // Account and then dropped a tick 511 ms later, while the hangar was still
@@ -3138,6 +3150,17 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		// already created it, which is why this used to be false.
 		s.mu.Lock()
 		needCreate := st.resetSent
+		if needCreate {
+			// A leave: the client is tearing the battle's space down (its
+			// NRL hub goes about a second after leaveArena, measured), and
+			// the Account created in the middle of that teardown is
+			// destroyed with it — the client then reports DISCONNECTED.
+			// Wait for the teardown to finish, then create the Account.
+			st.accountDue = time.Now().Add(leaveReplyDelay)
+			s.mu.Unlock()
+			s.logf("stage2 %s: leave reply deferred %s (battle space teardown)", from, leaveReplyDelay)
+			return nil
+		}
 		s.mu.Unlock()
 		next, err := s.enterAccount(conn, from, st, seq, cumul, needCreate)
 		if err != nil {
@@ -3812,6 +3835,24 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		// behind the gap, which is how the BATTLE period update was lost and
 		// the client stayed at PREBATTLE with `isOnArena` false — unable to
 		// move or aim.
+		if !st.accountDue.IsZero() && !now.Before(st.accountDue) {
+			st.accountDue = time.Time{}
+			seq, cumul := st.postSeq, st.postCumul
+			addr := st.stage2Addr
+			s.mu.Unlock()
+			next, err := s.enterAccount(conn, addr, st, seq, cumul, true)
+			if err != nil {
+				s.logf("stage2 %s: deferred enterAccount: %v", addr, err)
+			} else {
+				s.mu.Lock()
+				if next > st.postSeq {
+					st.postSeq = next
+				}
+				s.mu.Unlock()
+			}
+			s.mu.Lock()
+			continue
+		}
 		if st.arena != nil {
 			continue
 		}

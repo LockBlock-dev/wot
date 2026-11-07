@@ -252,3 +252,49 @@ func TestLoginReplyHoldsTheTicksUntilTheClientSpeaks(t *testing.T) {
 		t.Fatal("the ticks did not resume after the client spoke")
 	}
 }
+
+// TestLeaveReplyWaitsForTheSpaceTeardown pins the leave's deferred login
+// reply: the client is tearing the battle's space down (its NRL hub is
+// destroyed ~1.1 s after leaveArena), and an Account created in the middle of
+// that teardown is destroyed with it — the client then reports DISCONNECTED.
+// So the reply waits leaveReplyDelay past the enableEntities.
+func TestLeaveReplyWaitsForTheSpaceTeardown(t *testing.T) {
+	s := enterTestServer(t)
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	st := &clientState{
+		entityID: 0x1234, name: "playerone", blockKey: "0123456789abcdef",
+		stage2Addr: addr, resetSent: true, tickPeriod: PostTickPeriod,
+	}
+	s.mu.Lock()
+	s.byAddr[addr.String()] = st
+	s.mu.Unlock()
+	tr := &fakeTransport{}
+	// enableEntities: `[flags][02][key][0b][00][trailer]`.
+	clear := []byte{0x48, 0x14, 0x02, 0, 0, 0, 0, 0x0b, 0x00}
+	clear = append(clear, make([]byte, 12)...)
+	if err := s.servePostFlood(tr, addr, st, clear); err != nil {
+		t.Fatalf("servePostFlood: %v", err)
+	}
+	if len(tr.writes) != 0 {
+		t.Fatalf("%d packets on enableEntities, want none (the reply is deferred)", len(tr.writes))
+	}
+	if st.accountDue.IsZero() {
+		t.Fatal("the leave reply was not deferred")
+	}
+	// Still inside the window: nothing.
+	s.sweepStage2(tr, time.Now())
+	if len(tr.writes) != 0 {
+		t.Fatalf("%d packets inside the teardown window, want none", len(tr.writes))
+	}
+	// Past it: the login reply goes out.
+	s.mu.Lock()
+	st.accountDue = time.Now().Add(-time.Second)
+	s.mu.Unlock()
+	s.sweepStage2(tr, time.Now())
+	if len(tr.writes) != 1 {
+		t.Fatalf("%d packets after the window, want 1 (the login reply)", len(tr.writes))
+	}
+	if !st.postHold {
+		t.Fatal("the deferred reply did not hold the ticks")
+	}
+}
