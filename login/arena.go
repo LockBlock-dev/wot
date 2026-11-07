@@ -1955,6 +1955,7 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	// packet receiver per address, and the battle's watermark would reject
 	// the fresh login's sequence numbers on the same one.
 	st.reentry = true
+	st.leaveAddr = from.String()
 	s.mu.Unlock()
 	s.logf("stage2 %s: left arena %d — switchBaseApp %v, the client re-enters on stage-1", from, arena.ArenaID, s.cfg.Stage1)
 	return nil

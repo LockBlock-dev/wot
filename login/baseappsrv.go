@@ -370,8 +370,14 @@ type clientState struct {
 	// answer must go back out of the socket the client is talking to.
 	conn Transport
 	// reentry marks a session that came back through stage-1 after a leave,
-	// so the redirect names the second BaseApp endpoint.
+	// so the redirect names the second BaseApp endpoint. It stays set until
+	// the new stage-2 handshake lands, so a retried stage-1 22B is redirected
+	// to the same place.
 	reentry bool
+	// leaveAddr is the battle connection's address. Datagrams from it are
+	// ignored until the session binds its new one: the client closes that
+	// socket, and a straggler must not drag `stage2Addr` back to it.
+	leaveAddr string
 	// targets are the synthetic tanks the player's shells can hit: the dummy
 	// first, then the bots. Each carries its own entity, spawn, health,
 	// shell-hole list and module state, so a shot resolves against whichever
@@ -1263,6 +1269,8 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 		}
 		s.mu.Lock()
 		st.conn = conn
+		st.leaveAddr = ""
+		st.reentry = false
 		if st.stage2Key == 0 {
 			nk, err := mintRotationKey(rq.sessionKey)
 			if err != nil {
@@ -1332,6 +1340,13 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 		if st.stage2Addr != nil {
 			reboundFrom = st.stage2Addr.String()
 		}
+	}
+	if st.leaveAddr != "" && st.leaveAddr == from.String() {
+		// A straggler from the battle connection the client just left. It is
+		// not the new session's, and rebinding to it would send every answer
+		// to a closed port.
+		s.mu.Unlock()
+		return nil
 	}
 	flooded := st.flooded
 	// Follow the client when it rebinds its socket: the battle entry does
