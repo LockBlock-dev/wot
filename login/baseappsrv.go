@@ -1704,6 +1704,20 @@ func (s *BaseAppServer) nextSeq(st *clientState) (seq, cumul uint32) {
 	return seq, cumul
 }
 
+// nextSeqN mints n consecutive reliable sequence numbers for this session.
+//
+// It is the form for a multi-packet element that must stay contiguous. The
+// caller holds `st.sendMu` across the mint and the sends, exactly as nextSeq
+// documents; if it ends up sending fewer than n, it must give the unused
+// numbers back (see the bot sweep) or the stream gets a hole.
+func (s *BaseAppServer) nextSeqN(st *clientState, n uint32) (seq, cumul uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq, cumul = st.postSeq, st.postCumul
+	st.postSeq += n
+	return seq, cumul
+}
+
 // sendReliableLocked is sendReliable for a caller that already holds
 // `st.sendMu` because it is sending a sequence that must not be interleaved.
 func (s *BaseAppServer) sendReliableLocked(conn Transport, to *net.UDPAddr, st *clientState, app []byte, seq, cumul uint32) error {

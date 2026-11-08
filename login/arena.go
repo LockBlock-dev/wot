@@ -797,7 +797,10 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		dummyID := h.VehicleID + 1
 		// The dummy is the enemy team's first tank: it faces the player's side.
 		dummyYaw := float32(math.Atan2(float64(spawn[0]-enemy[0]), float64(spawn[2]-enemy[2])))
-		dv, infoValue, dummySent, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, dummyYaw, 1, seq, cumul)
+		dv, infoValue, dummySent, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, dummyYaw, 1, seq, cumul,
+			func(app []byte, seq, cumul uint32) error {
+				return s.sendReliableEntity(conn, from, st, app, seq, cumul)
+			})
 		if err != nil {
 			s.logf("stage2 %s: arena %d: no dummy Vehicle (%v)", from, h.ArenaID, err)
 		} else {
@@ -2166,20 +2169,34 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 	st.pendingBots = st.pendingBots[n:]
 	h := st.arena
 	addr := st.stage2Addr
-	seq, cumul := st.postSeq, st.postCumul
 	s.mu.Unlock()
 	if addr == nil {
 		return 0
 	}
 	created := 0
 	for _, b := range batch {
-		e, _, botSent, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.yaw, b.index, seq, cumul)
+		// Mint and send under st.sendMu, the way nextSeq documents it: two
+		// goroutines that mint outside it hand out the same number and the
+		// client drops the duplicate. Holding it across the three packets also
+		// keeps them consecutive in the stream.
+		st.sendMu.Lock()
+		seq, cumul := s.nextSeqN(st, 3)
+		e, _, botSent, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.yaw, b.index, seq, cumul,
+			func(app []byte, seq, cumul uint32) error {
+				return s.sendReliableLocked(conn, addr, st, app, seq, cumul)
+			})
+		if botSent < 3 {
+			// A send failed part-way. The numbers it did not use were never on
+			// the wire, so hand them back rather than leave a hole.
+			s.mu.Lock()
+			if st.postSeq > seq+botSent {
+				st.postSeq = seq + botSent
+			}
+			s.mu.Unlock()
+		}
+		st.sendMu.Unlock()
 		if err != nil {
 			s.logf("arena %d: bot %s: %v", h.ArenaID, b.doc.Name, err)
-			// Whatever went out before the failure still consumed sequence
-			// numbers; leaving them out of the count would put a hole in the
-			// reliable stream, which is what stalls the whole battle.
-			seq = nextSeqAfter(seq, botSent)
 			continue
 		}
 		health := 0
@@ -2201,13 +2218,9 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 			infoIndex: b.index,
 		})
 		s.mu.Unlock()
-		seq = nextSeqAfter(seq, botSent)
 		created++
 	}
 	s.mu.Lock()
-	if seq > st.postSeq {
-		st.postSeq = seq
-	}
 	left := len(st.pendingBots)
 	s.mu.Unlock()
 	s.logf("arena %d: %d bots created, %d left", h.ArenaID, created, left)
@@ -2228,7 +2241,7 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 // encode leaves a sequence number that was never on the wire, and the client's
 // cumulative ack then stops in front of the hole for the whole battle — which
 // is exactly how the measured run lost its AvatarInfo, its team and its period.
-func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, yaw float32, infoIndex int, seq, cumul uint32) (*Entity, entdef.Value, uint32, error) {
+func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, yaw float32, infoIndex int, seq, cumul uint32, send func(app []byte, seq, cumul uint32) error) (*Entity, entdef.Value, uint32, error) {
 	var sent uint32
 	infoType := entdef.Alias("VEHICLES_INFO")
 	if infoType == nil {
@@ -2249,24 +2262,24 @@ func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr
 	if err != nil {
 		return nil, entdef.Value{}, 0, err
 	}
+	// Encode all three before sending any. A skip in the middle of the run
+	// would leave a sequence number unused, and the caller cannot tell how
+	// many it may advance by: the whole point is that the count on the wire
+	// and the count the stream advances by are the same number.
 	create, err := EncodeCreateEntity(e.ID, uint16(e.Type.TypeID), VolatilePackerType, pos, yaw, 0, 0, props)
 	if err != nil {
 		return nil, entdef.Value{}, 0, err
 	}
-	if err := s.sendReliableEntity(conn, from, st, create, seq, cumul); err != nil {
+	sel, err := EncodeSelectEntity(e.ID)
+	if err != nil {
 		return nil, entdef.Value{}, 0, err
 	}
-	seq++
-	sent++
-	if sel, err := EncodeSelectEntity(e.ID); err == nil {
-		if err := s.sendReliableEntity(conn, from, st, sel, seq, cumul); err != nil {
-			return nil, entdef.Value{}, sent, err
-		}
-		seq++
-		sent++
+	upd, err := EncodeUpdateEntityExcept(e, true, vehicleDeltaSkip...)
+	if err != nil {
+		return nil, entdef.Value{}, 0, err
 	}
-	if upd, err := EncodeUpdateEntityExcept(e, true, vehicleDeltaSkip...); err == nil {
-		if err := s.sendReliableEntity(conn, from, st, upd, seq, cumul); err != nil {
+	for _, app := range [][]byte{create, sel, upd} {
+		if err := send(app, seq, cumul); err != nil {
 			return nil, entdef.Value{}, sent, err
 		}
 		seq++
