@@ -136,7 +136,14 @@ func (s *BaseAppServer) arenaAvatarApp(st *clientState, h *ArenaHandoff) (*Entit
 	if acct == nil {
 		return nil, nil, fmt.Errorf("wotserver: no Avatar entity in the defs")
 	}
-	e := NewEntity(st.entityID, acct)
+	// The battle's Avatar MUST be the entity the client already has: the
+	// stage-1 createBasePlayer named it, and a different id leaves the client
+	// with two player entities (bw_entities.cpp:1103 asserts `pEntity`).
+	id := st.entityID
+	if st.stage1ID != 0 {
+		id = st.stage1ID
+	}
+	e := NewEntity(id, acct)
 	for _, p := range acct.BaseProps {
 		e.Set(p.Name, entdef.ZeroValue(p.Type))
 	}

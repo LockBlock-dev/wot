@@ -616,6 +616,9 @@ type clientState struct {
 	// clientTotal is the client's channel send counter (its trailer's `seq`),
 	// which an unreliable packet's last four bytes must echo minus one.
 	clientTotal uint32
+	// stage1ID is the player entity id the stage-1 createBasePlayer told the
+	// client about. The battle reuses it.
+	stage1ID uint32
 	// unrelSeq is the arena tick's UNRELIABLE sequence, its own counter
 	// starting at 1. The client tracks the unreliable stream separately from
 	// the reliable one and drops a packet whose sequence does not advance, so
@@ -1061,6 +1064,11 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 		// the client asserts `pEntity` on the next entity message.
 		s.mu.Lock()
 		acct, name, ent := j.st.accountID, j.st.name, j.st.entityID
+		// The client adopts THIS id as its player entity. The battle's
+		// CreateBasePlayer must reuse it, or the client keeps this one and the
+		// battle's Avatar is a second entity it never adopts — every battle
+		// message then goes to an entity the client does not have.
+		j.st.stage1ID = ent
 		s.mu.Unlock()
 		info, err := buildChannelPacket(j.blockKey, flagsRel, stage1InfoApp(ent, accountIDFor(acct, name)), nil, 1, 1)
 		if err != nil {
