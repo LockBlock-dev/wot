@@ -101,6 +101,15 @@ func (s *BaseAppServer) repeatBattlePeriod(conn Transport, from *net.UDPAddr, st
 	wait := time.Since(st.battlePeriodAt)
 	elapsed := time.Since(st.battlePeriodAt)
 	avatar := st.avatar
+	// Never run ahead of the client's cumulative ack. Re-sending the period
+	// while the client is still behind pushes the server past its receive
+	// window; the client then drops the EARLIEST unacknowledged packet (the
+	// entry's own) as out of window, and the ack stalls on a hole the replays
+	// cannot fill either.
+	if st.postSeq-st.postCumul > 24 {
+		s.mu.Unlock()
+		return
+	}
 	s.mu.Unlock()
 	if avatar == nil || wait < 2*time.Second || elapsed > 30*time.Second {
 		return
