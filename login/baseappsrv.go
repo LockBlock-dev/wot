@@ -50,6 +50,7 @@ import (
 
 	"github.com/LockBlock-dev/wot/entdef"
 	"github.com/LockBlock-dev/wot/lobby"
+	"strings"
 )
 
 // Manager port window every genuine [44] redirect target lands in
@@ -3498,6 +3499,20 @@ func (s *BaseAppServer) answerPostCall(conn Transport, from *net.UDPAddr, st *cl
 			"accountUnitClient_doCmd", "accountUnitClient_sendInvites",
 			"accountUnitClient_setRosterSlots":
 			return s.answerUnitCall(conn, from, st, call)
+		case "logStreamCorruption":
+			// The client's stream (the NRL's `vehiclesInfo` above all) failed
+			// its CRC or its length: it dropped the stream, so whatever it
+			// carried never landed.
+			s.logf("stage2 %s: the client reports a CORRUPTED STREAM: %v", from, call.Args)
+			return nil
+		}
+		// A method call this server does not handle is NOT an account
+		// command: falling through to the command switch made every such call
+		// answer as `doCmdInt3`, which sent a queue-info pickle to a client
+		// that had reported a corrupt stream. The `doCmd*` family IS the
+		// command switch's own entry, so it still falls through.
+		if !strings.HasPrefix(call.Method.Name, "doCmd") {
+			return nil
 		}
 	}
 	switch cmd {
