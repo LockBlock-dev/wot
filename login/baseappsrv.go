@@ -1537,14 +1537,19 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// stale one.
 	// `seq + 1` is the client's next expected sequence, which is what it
 	// compares our ack against.
+	//
+	// A frame whose trailer we mis-sliced must not move it: a garbage seq
+	// once pushed the ack to 0xFF8D0039, and the client rejected every packet
+	// carrying it as "ACK for packets not yet sent". Steps larger than a
+	// window are ignored; a seq far BELOW the watermark is a fresh channel
+	// (the client builds one for the battle app) and restarts both counters.
 	wm := seq + 1
-	if wm < st.postCumul && st.postCumul-wm > 256 {
-		// A fresh channel: the client builds one for the battle app, so its
-		// counter restarts.
+	switch {
+	case wm > st.postCumul && wm-st.postCumul <= 256:
+		st.postCumul = wm
+	case wm < st.postCumul && st.postCumul-wm > 256:
 		st.postCumul = wm
 		st.unrelSeq = 1
-	} else if wm > st.postCumul {
-		st.postCumul = wm
 	}
 	s.mu.Unlock()
 }
