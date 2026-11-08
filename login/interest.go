@@ -144,10 +144,15 @@ func (s *BaseAppServer) refreshInterest(conn Transport, from *net.UDPAddr, st *c
 	if len(enter) == 0 && len(leave) == 0 {
 		return nil
 	}
-	var app []byte
+	// One entity per packet. A single enterAoI for an entity the client does
+	// not know makes it drop the WHOLE packet, so bundling the batch meant one
+	// bad id cost every other enter with it — and the sequence it carried was
+	// never acknowledged, which stalled the reliable channel for the entire
+	// battle.
+	var apps [][]byte
 	for _, id := range leave {
 		if el, err := EncodeLeaveAoI(id); err == nil {
-			app = append(app, el...)
+			apps = append(apps, el)
 		}
 	}
 	for _, id := range enter {
@@ -158,18 +163,20 @@ func (s *BaseAppServer) refreshInterest(conn Transport, from *net.UDPAddr, st *c
 		}
 		s.mu.Unlock()
 		if el, err := EncodeEnterAoI(id, alias); err == nil {
-			app = append(app, el...)
+			apps = append(apps, el)
 		}
 	}
-	if len(app) == 0 {
+	if len(apps) == 0 {
 		return nil
 	}
-	st.sendMu.Lock()
-	seq, cumul := s.nextSeq(st)
-	err := s.sendReliableLocked(conn, from, st, app, seq, cumul)
-	st.sendMu.Unlock()
-	if err != nil {
-		return err
+	for _, app := range apps {
+		st.sendMu.Lock()
+		seq, cumul := s.nextSeq(st)
+		err := s.sendReliableLocked(conn, from, st, app, seq, cumul)
+		st.sendMu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	s.logf("stage2 %s: interest: %d entered, %d left (%d held)", from, len(enter), len(leave), len(in.known))
 	return nil
