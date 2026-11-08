@@ -106,11 +106,16 @@ func (s *BaseAppServer) repeatBattlePeriod(conn Transport, from *net.UDPAddr, st
 	// window; the client then drops the EARLIEST unacknowledged packet (the
 	// entry's own) as out of window, and the ack stalls on a hole the replays
 	// cannot fill either.
-	if st.postSeq-st.postCumul > 24 {
-		s.mu.Unlock()
+	//
+	// The measure is the resend queue's outstanding count, not
+	// `postSeq - postCumul`: postCumul is the CLIENT's own reliable-out counter
+	// (the value our packets carry as their cumul field), so that difference
+	// grows with the client's traffic and never shrinks with its acks.
+	resendKey := st.resendKey
+	s.mu.Unlock()
+	if s.resend.outstanding(resendKey) > 24 {
 		return
 	}
-	s.mu.Unlock()
 	if avatar == nil || wait < 2*time.Second || elapsed > 30*time.Second {
 		return
 	}
