@@ -69,10 +69,9 @@ func TestBuildFramesCarriesRange(t *testing.T) {
 		if flags != bulkFlags {
 			t.Errorf("frame %d flags = %#04x, want %#04x", i, flags, bulkFlags)
 		}
-		// 16 B trailer: [first][last][seq][cumul].
-		first := uint32(clear[n-16]) | uint32(clear[n-15])<<8 | uint32(clear[n-14])<<16 | uint32(clear[n-13])<<24
-		last := uint32(clear[n-12]) | uint32(clear[n-11])<<8 | uint32(clear[n-10])<<16 | uint32(clear[n-9])<<24
-		seq := uint32(clear[n-8]) | uint32(clear[n-7])<<8 | uint32(clear[n-6])<<16 | uint32(clear[n-5])<<24
+		first := uint32(clear[n-12]) | uint32(clear[n-11])<<8 | uint32(clear[n-10])<<16 | uint32(clear[n-9])<<24
+		last := uint32(clear[n-8]) | uint32(clear[n-7])<<8 | uint32(clear[n-6])<<16 | uint32(clear[n-5])<<24
+		seq := uint32(clear[n-4]) | uint32(clear[n-3])<<8 | uint32(clear[n-2])<<16 | uint32(clear[n-1])<<24
 		if first != 100 || last != 102 {
 			t.Errorf("frame %d range = %d..%d, want 100..102", i, first, last)
 		}
