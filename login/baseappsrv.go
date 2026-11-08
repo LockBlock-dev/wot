@@ -4611,7 +4611,25 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 		}
 	}
 	lastSeq := floodFirstSeq + uint32(len(frames)) - 1
+	// The FIRST frame goes twice.
+	//
+	// The client discards a fragment that is not the chain's first
+	// (`processOrderedPacket`: "Bundle (#%u,#%u) is missing packets before
+	// #%u" → RETURN_FOR_CORRUPTED_PACKET), so losing frame 1 loses the entire
+	// burst — and on the re-entry it is lost routinely, because the client
+	// stalls for about a second tearing the battle app down right as the burst
+	// arrives. Measured three times: "Bundle (#1,#5) is missing packets before
+	// #2" and then `MF_ASSERT_DEV FAILED: pEntity` from the `1a 76` that
+	// followed it.
+	//
+	// A duplicate is harmless — the client drops an already-seen sequence —
+	// and it means the chain can still be created if the first copy dies.
 	for i, frame := range frames {
+		if i == 0 {
+			if _, err := conn.WriteToUDP(frame, from); err != nil {
+				return err
+			}
+		}
 		if _, err := conn.WriteToUDP(frame, from); err != nil {
 			return err
 		}
