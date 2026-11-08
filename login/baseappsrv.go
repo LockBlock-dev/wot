@@ -1722,6 +1722,12 @@ func (s *BaseAppServer) sendReliableLocked(conn Transport, to *net.UDPAddr, st *
 		return err
 	}
 	s.resend.track(st.resendKey, to.String(), seq, pkt)
+	// Every reliable send is logged with its sequence: the battle's element
+	// sequence is the one thing that has to match the client's expectations
+	// exactly, and without this the only evidence is the client's ack.
+	if len(app) > 0 && app[0] >= 0x04 {
+		s.logf("stage2 %s: reliable seq %d (%dB) elem %#02x cumul %d", to, seq, len(app), app[0], cumul)
+	}
 	return nil
 }
 
@@ -4039,6 +4045,12 @@ func (s *BaseAppServer) mintPost(conn Transport, to *net.UDPAddr, st *clientStat
 		return err
 	}
 	s.resend.track(st.resendKey, to.String(), seq, pkt)
+	// Every reliable send is logged with its sequence: the battle's element
+	// sequence is the one thing that has to match the client's expectations
+	// exactly, and without this the only evidence is the client's ack.
+	if len(app) > 0 && app[0] >= 0x04 {
+		s.logf("stage2 %s: reliable seq %d (%dB) elem %#02x cumul %d", to, seq, len(app), app[0], cumul)
+	}
 	return nil
 }
 
