@@ -1728,16 +1728,14 @@ func (s *BaseAppServer) sendUnreliableLocked(conn Transport, to *net.UDPAddr, st
 	seq := st.unrelSeq
 	st.unrelSeq++
 	relSent := st.postSeq
-	// The last four bytes echo the CLIENT's reliable counter minus one: its
-	// `processFilteredPacket` compares them to `(channel->0x194 - 1) &
-	// 0x0FFFFFFF`, and 0x194 is the counter its send path increments once per
-	// RELIABLE packet (0x14005050b) — the same counter its
-	// `handleCumulativeAck` checks against (`0x154`, 0x142d34d40). Our
-	// `postCumul` counts exactly those packets, so the echo is one less.
-	cumul := uint32(0)
-	if st.postCumul > 0 {
-		cumul = (st.postCumul - 1) & 0x0FFFFFFF
-	}
+	// The last four bytes are the FILTERED channel's own sequence: the
+	// client's `processFilteredPacket` compares them to `(channel->0x194 - 1)
+	// & 0x0FFFFFFF` (0x142d4c9c7..d7) and drops the packet otherwise, and
+	// 0x194 is the filtered channel's ACCEPTED counter — it starts at 1 and
+	// advances once per packet it takes. So the server's side is a plain
+	// monotonic counter of the unreliable packets it sends, one less than the
+	// count: 0, 1, 2, … — which is `unrelSeq - 1`.
+	cumul := (seq - 1) & 0x0FFFFFFF
 	s.mu.Unlock()
 	pkt, err := buildChannelPacket(st.blockKey, flagsUnrel, app, auxFor(relSent), seq, cumul)
 	if err != nil {

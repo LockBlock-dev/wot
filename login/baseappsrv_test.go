@@ -1207,13 +1207,13 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		if seq := binary.LittleEndian.Uint32(clear[n-8 : n-4]); seq != uint32(1+i) {
 			t.Fatalf("frame %d seq %d, want %d (the unreliable counter, not the reliable one)", i, seq, 1+i)
 		}
-		// The last four bytes of an UNRELIABLE packet echo the CLIENT's
-		// reliable counter minus one: its `processFilteredPacket` compares
-		// them to `(channel->0x194 - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7) and
-		// drops the packet otherwise. Our count of its reliable packets is 7
-		// here, so the echo is 6.
-		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != 6 {
-			t.Fatalf("frame %d cumul %d, want the client's counter minus one (6)", i, cumul)
+		// The last four bytes are the FILTERED channel's own sequence: the
+		// client's `processFilteredPacket` compares them to
+		// `(channel->0x194 - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7), where 0x194
+		// is the filtered channel's accepted counter. Ours counts the packets
+		// we send, so the echo is that count minus one: 0, 1, 2, …
+		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != uint32(i) {
+			t.Fatalf("frame %d cumul %d, want the filtered sequence %d", i, cumul, i)
 		}
 		body := clear[2 : n-12]
 		if len(body) != len(app) {
