@@ -378,6 +378,10 @@ type clientState struct {
 	// ignored until the session binds its new one: the client closes that
 	// socket, and a straggler must not drag `stage2Addr` back to it.
 	leaveAddr string
+	// clientMoveAt is when the client last reported its own position, and
+	// clientMoveTimeout is how long the server trusts that report before it
+	// takes the hull back.
+	clientMoveAt time.Time
 	// overturned is set once the player's hull has ended up on its side or its
 	// roof, so the death is only sent once.
 	overturned bool
@@ -3003,7 +3007,16 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		if terrain != nil {
 			ground = terrain.GroundAt(st.hull.Position[0], st.hull.Position[2])
 		}
-		moved := st.hull.step(float32(dt), ground)
+		// The client's own report wins: the official model is the client
+		// simulating its tank, the server accepting it and correcting only
+		// what the client cannot be trusted with. The server's simulation
+		// runs only when no report has arrived for a while (a client that
+		// stopped, or one that never had control).
+		clientDriving := time.Since(st.clientMoveAt) < clientMoveTimeout
+		moved := false
+		if !clientDriving {
+			moved = st.hull.step(float32(dt), ground)
+		}
 		// The static models: buildings and rocks push the hull out.
 		if statics != nil {
 			st.hull.pushOut(statics, hullCollisionBounds)
@@ -3386,6 +3399,12 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		// invisible from the app alone.
 		s.logf("stage2 %s: post-flood %d B flags=%#06x tr=%d app %d B: % x | clear: % x",
 			from, len(clear), binary.LittleEndian.Uint16(clear[0:2]), tr, len(app), app, clear)
+	}
+	// The client's own position report: it simulates its tank and this is
+	// where it says where it is. Accepted as the hull's authority.
+	if pos, yaw, pitch, roll, onGround, ok := parseAvatarUpdate(clear, st.stage2Key); ok {
+		s.acceptClientMove(st, pos, yaw, pitch, roll, onGround)
+		return nil
 	}
 	calls := s.postCalls(clear, st.stage2Key)
 	if len(calls) == 0 {
