@@ -880,8 +880,8 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		}
 		seq++
 	}
-	s.logf("stage2 %s: AvatarInfo %d created (createEntity %dB % x, NRL %dB, %d vehicles)",
-		from, info.ID, len(icreate), icreate, len(infoApp), len(vehicles))
+	s.logf("stage2 %s: AvatarInfo %d created (createEntity %dB, NRL %dB, %d vehicles) hex=% x",
+		from, info.ID, len(icreate), len(infoApp), len(vehicles), icreate)
 	// Everything is created; what the client HOLDS is the interest's call.
 	// The tanks around the player enter now, the rest as it drives.
 	if err := s.refreshInterest(conn, from, st); err != nil {
