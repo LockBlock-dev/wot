@@ -756,6 +756,7 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	st.battleStarted = false
 	st.hadGround = false
 	st.lastMarkerSet = false
+	st.markerBaseTicks = 0
 	s.mu.Unlock()
 	// The hull and the turret are simulated here, not echoed: see
 	// `trackTurret`. The terrain is what the hull rests on, so it is resolved

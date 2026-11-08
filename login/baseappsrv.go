@@ -594,6 +594,10 @@ type clientState struct {
 	// tree holds it, so its properties and client methods can be updated
 	// through the `0x26`/`0x25` stream after it is created.
 	ownVehicle nrlComponent
+	// markerBaseTicks counts the gun markers sent this battle, so the first
+	// nrlBaseMarkerTicks of them can carry the base snapshot (see
+	// nrlMarkerElement).
+	markerBaseTicks int
 	// battleStarted is set once the BATTLE period has gone out, which is after
 	// the client has finished loading. The aux word and the Vehicle's own
 	// properties start from there: sending them during loading leaves the
@@ -2809,7 +2813,7 @@ var controlEntityOn = os.Getenv("WOT_NO_CONTROL_ENTITY") == ""
 // property elements at the end of the tick.
 var vehiclePropsOn = os.Getenv("WOT_NO_VEHICLE_PROPS") == ""
 
-func arenaTickApp(tick uint32, pos, dir [3]float32, idA, idB uint32, marker, last nrlGunMarker, haveLast bool, avatarID, vehicleID uint32, aux uint64, gunAngles uint16, engineMode uint16, wheels []byte, battleStarted bool) []byte {
+func arenaTickApp(tick uint32, pos, dir [3]float32, idA, idB uint32, marker, last nrlGunMarker, haveLast, forceBase bool, avatarID, vehicleID uint32, aux uint64, gunAngles uint16, engineMode uint16, wheels []byte, battleStarted bool) []byte {
 	// The captured server's tick datagram, element for element and in its
 	// order. A steady-state sample (14:17:26.241, 81 B) walks as
 	//
@@ -2888,7 +2892,7 @@ func arenaTickApp(tick uint32, pos, dir [3]float32, idA, idB uint32, marker, las
 		}
 	}
 	if !noGunMarker {
-		if el, err := nrlMarkerElement(idA, idB, tick, marker, last, haveLast); err == nil {
+		if el, err := nrlMarkerElement(idA, idB, tick, marker, last, haveLast, forceBase); err == nil {
 			app = append(app, el...)
 		}
 	}
@@ -3240,7 +3244,13 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		}
 		marker := gunMarkerFor(hullNow, cur, pitch, spec, dispFactor)
 		mode := hullNow.engineMode()
-		posApp := arenaTickApp(tick, pos, dir, idA, idB, marker, lastMarker, lastMarkerSet,
+		s.mu.Lock()
+		forceBase := st.markerBaseTicks < nrlBaseMarkerTicks
+		if forceBase {
+			st.markerBaseTicks++
+		}
+		s.mu.Unlock()
+		posApp := arenaTickApp(tick, pos, dir, idA, idB, marker, lastMarker, lastMarkerSet, forceBase,
 			st.entityID, vehicle.ID, hullNow.auxPhysicsData(),
 			uint16(packGunAngles(cur, pitch, spec.PitchMin, spec.PitchMax)),
 			uint16(mode[0])|uint16(mode[1])<<8, hullNow.wheelsScroll(spec.Dispersion.WheelRadii), st.battleStarted)

@@ -604,7 +604,7 @@ func TestArenaTickAppMatchesTheCapturedShape(t *testing.T) {
 		Dispersion: 0.0036,
 	}
 	tick := uint32(1126474)
-	app := arenaTickApp(tick, pos, dir, 0xC96A7E0B, 0x871958D0, marker, nrlGunMarker{}, false,
+	app := arenaTickApp(tick, pos, dir, 0xC96A7E0B, 0x871958D0, marker, nrlGunMarker{}, false, false,
 		100003, 100004, 0x55558004004000, 0x6be7, 0x0103, nil, true)
 
 	// The fixed sizes the client's element table gives these ids. The bare
@@ -661,8 +661,8 @@ func TestArenaTickAppSendsTheUnchangedMarkerWhenNothingMoved(t *testing.T) {
 	pos := [3]float32{1, 2, 3}
 	dir := [3]float32{0, 0, 0}
 	marker := nrlGunMarker{Position: [3]float32{1, 4.3, 3}, Velocity: [3]float32{0, 0, 792}, Dispersion: 0.0036}
-	full := arenaTickApp(10, pos, dir, 1, 2, marker, nrlGunMarker{}, false, 100003, 100004, 0, 0, 0, nil, false)
-	same := arenaTickApp(11, pos, dir, 1, 2, marker, marker, true, 100003, 100004, 0, 0, 0, nil, false)
+	full := arenaTickApp(10, pos, dir, 1, 2, marker, nrlGunMarker{}, false, false, 100003, 100004, 0, 0, 0, nil, false)
+	same := arenaTickApp(11, pos, dir, 1, 2, marker, marker, true, false, 100003, 100004, 0, 0, 0, nil, false)
 	if len(full)-len(same) != 31 {
 		t.Fatalf("unchanged form is %d B shorter, want 31", len(full)-len(same))
 	}
@@ -859,7 +859,7 @@ func TestArenaTickAppCarriesWheelsScroll(t *testing.T) {
 	pos := [3]float32{1, 2, 3}
 	dir := [3]float32{0, 0, 0}
 	wheels := []byte{0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87}
-	app := arenaTickApp(10, pos, dir, 1, 2, nrlGunMarker{}, nrlGunMarker{}, false,
+	app := arenaTickApp(10, pos, dir, 1, 2, nrlGunMarker{}, nrlGunMarker{}, false, false,
 		100003, 100004, 0, 0x6be7, 0x0103, wheels, true)
 
 	size := map[byte]int{0x13: 2, 0x1a: 1, 0xba: 9, 0x16: 13, 0x1e: 26, 0x1d: 27, 0xb4: 3, 0xb6: 3}
@@ -965,5 +965,40 @@ func TestSiegeStateStatusUpdateIsWellFormed(t *testing.T) {
 	}
 	if el[len(el)-1] != elNrlUpdateNodeFlag {
 		t.Fatalf("trailing flag %#02x, want %#02x", el[len(el)-1], elNrlUpdateNodeFlag)
+	}
+}
+
+// TestNrlMarkerBaseIsRepeated pins the fix for a lost base snapshot.
+//
+// The unreliable stream has no retransmission, and the client drops a packet
+// whose "last reliable sequence number" footer does not equal its own counter
+// at that instant — a race it cannot avoid. Measured, the first tick of a
+// battle was dropped that way, it carried the only base, and every later delta
+// then failed with "no base snapshot found". The first few markers therefore
+// carry the "first" form (prev_tick 0, flags 0) even when the marker has not
+// moved, so one lost packet costs nothing.
+func TestNrlMarkerBaseIsRepeated(t *testing.T) {
+	m := nrlGunMarker{Position: [3]float32{1, 2, 3}, Dispersion: 0.1}
+	short, err := nrlMarkerElement(1, 2, 100, m, m, true, false)
+	if err != nil {
+		t.Fatalf("unchanged: %v", err)
+	}
+	full, err := nrlMarkerElement(1, 2, 100, m, m, true, true)
+	if err != nil {
+		t.Fatalf("forced base: %v", err)
+	}
+	if len(full) <= len(short) {
+		t.Fatalf("forced base is %d B, the unchanged form %d B: the base was not resent", len(full), len(short))
+	}
+	// Body: [06 00 01][idA][idB][tick][prev][kind][class tag 6][flags][00][len][payload]
+	if prev := binary.LittleEndian.Uint32(full[3+15 : 3+19]); prev != 0 {
+		t.Fatalf("prev_tick = %d, want 0 (a base snapshot)", prev)
+	}
+	if flags := full[3+26]; flags != 0 {
+		t.Fatalf("flags = %#x, want 0 (a base snapshot)", flags)
+	}
+	// The unchanged form keeps the previous-tick flag.
+	if flags := short[3+26]; flags != nrlUnrelFlagsPrev {
+		t.Fatalf("unchanged flags = %#x, want %#x", flags, nrlUnrelFlagsPrev)
 	}
 }

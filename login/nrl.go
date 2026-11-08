@@ -381,13 +381,30 @@ func gunMarkerFor(h hull, yaw, pitch float64, spec gunSpec, dispFactor float64) 
 	}
 }
 
+// nrlBaseMarkerTicks is how many of a battle's first markers carry the
+// "first" form — prev_tick 0, flags 0 — which is the full snapshot the client's
+// UnreliableSnapshotBufferReceiver builds its base from.
+//
+// One is not enough. The unreliable stream has no retransmission, and the
+// client drops a packet whose "last reliable sequence number" footer does not
+// equal its own counter at that instant — a race it cannot avoid, because its
+// counter moves when it sends and our footer is what we had received. Measured:
+// the very first tick of a battle was dropped that way, it carried the only
+// base, and every later delta then failed with "no base snapshot found" (1541
+// of them in one battle) — the gun marker never applied at all.
+//
+// Repeating the base for the first few ticks costs a few hundred bytes once per
+// battle and makes a single lost packet harmless.
+const nrlBaseMarkerTicks = 5
+
 // nrlMarkerElement encodes the tick's `0x28`: the full gun marker when it moved
-// since the last one, the 8-byte "unchanged" form when it did not.
-func nrlMarkerElement(idA, idB, tick uint32, m, last nrlGunMarker, haveLast bool) ([]byte, error) {
-	if haveLast && m == last {
+// since the last one, the 8-byte "unchanged" form when it did not. forceBase
+// makes it a base snapshot whatever the marker says.
+func nrlMarkerElement(idA, idB, tick uint32, m, last nrlGunMarker, haveLast, forceBase bool) ([]byte, error) {
+	if haveLast && m == last && !forceBase {
 		return EncodeNrlUnreliableUnchanged(idA, idB, tick, false)
 	}
-	return EncodeNrlUnreliableGunMarker(idA, idB, tick, !haveLast, m)
+	return EncodeNrlUnreliableGunMarker(idA, idB, tick, !haveLast || forceBase, m)
 }
 
 // stepDispersion advances the dispersion factor by dt seconds, on the client's
