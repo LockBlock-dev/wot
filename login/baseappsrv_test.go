@@ -536,11 +536,16 @@ func TestBaseAppStageLoopback(t *testing.T) {
 			t.Fatalf("burst frame after %d: unexpected %dB %x", got, len(pkt), clear[:min(len(clear), 12)])
 		}
 	}
-	ackPkt, err := buildChannelPacket(blockKey, flagsUnrel, nil, auxFor(1), 1, last+1)
+	// A lobby base call, not a bare ack: the client's `LoginReplyFilter`
+	// passes only the login-reply packet and is disarmed by its first lobby
+	// call, so the chain that follows the burst waits for THIS. The call also
+	// carries the cumulative ack that retires the burst.
+	callApp := []byte{0x02, 0, 0, 0, 0, 0x95, 0x04, 0x00, 0, 0, 0, 0}
+	callPkt, err := buildChannelPacket(blockKey, flagsRel, callApp, nil, 1, last+1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c2.WriteToUDP(ackPkt, udpLocal(s2)); err != nil {
+	if _, err := c2.WriteToUDP(callPkt, udpLocal(s2)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -677,8 +682,9 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(clearTailTick[4:8]); got != dictSeq+2 {
 		t.Fatalf("post-flood tick seq %d, want %d (after the stats frame)", got, dictSeq+2)
 	}
-	if got := binary.LittleEndian.Uint32(clearTailTick[8:12]); got != 1 {
-		t.Fatalf("post-flood tick cumul %d, want 1", got)
+	// The lobby call above carried seq 1, so the client's next expected is 2.
+	if got := binary.LittleEndian.Uint32(clearTailTick[8:12]); got != 2 {
+		t.Fatalf("post-flood tick cumul %d, want 2 (the lobby call's seq 1 + 1)", got)
 	}
 	// The client re-syncs once: 84B [02][key2] bundle with the doCmdInt3
 	// A1 tag (genuine idx 1010: DoCmdInt3(224, 100, 88, 0x699a133b, 0)

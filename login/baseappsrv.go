@@ -1503,7 +1503,29 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 			s.logf("stage2 %s: lobby call after the login reply — ticks resume", from)
 		}
 		st.postHold = false
+		// The same call is what disarms the client's `LoginReplyFilter`: it
+		// passes only the packet carrying the login-reply flag and is gone
+		// from the first lobby call on. What follows the flood burst — the
+		// session dict (`1a 76`, which IS `showGUI`), the stats small and the
+		// Account's entry — therefore waits for THIS, not for the burst's
+		// acknowledgement: released on the ack it arrived while the filter was
+		// still armed, the client dropped it, and the hangar never appeared
+		// (measured: `databaseID` stayed None and the client sat on the
+		// waiting screen).
+		runPost := st.postFloodPending
+		if runPost {
+			st.postFloodPending = false
+		}
+		conn := st.conn
 		s.mu.Unlock()
+		if runPost {
+			if conn == nil {
+				conn = s.stage2
+			}
+			if err := s.sendPostFlood(conn, from, st); err != nil {
+				s.logf("stage2 %s: post-flood chain: %v", from, err)
+			}
+		}
 	}
 	// The trailer is [seq][cumul] (8B), [first][last][seq][cumul] (16B),
 	// [seq] alone (4B) or [cumul] alone (4B). `seq` is the CLIENT's own
@@ -1532,24 +1554,6 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// channel exactly while the client is entering the battle.
 	if cumul > 0 {
 		s.resend.ack(st.resendKey, cumul)
-		// The flood burst's acknowledgement releases what follows it. The
-		// client acks in UNRELIABLE datagrams, so this cannot live behind the
-		// RELIABLE check below.
-		s.mu.Lock()
-		runPost := st.postFloodPending && cumul > st.postFloodAckSeq
-		if runPost {
-			st.postFloodPending = false
-		}
-		conn := st.conn
-		s.mu.Unlock()
-		if runPost {
-			if conn == nil {
-				conn = s.stage2
-			}
-			if err := s.sendPostFlood(conn, from, st); err != nil {
-				s.logf("stage2 %s: post-flood chain: %v", from, err)
-			}
-		}
 	}
 	if !hasSeq || clear[0]&0x10 == 0 {
 		return
