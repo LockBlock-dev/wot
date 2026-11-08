@@ -553,6 +553,18 @@ func (s *LoginAppServer) processLogin(from, listen *net.UDPAddr, req *loginAppLo
 	token2 := token2Of(params.Username)
 	var accountID int64
 	if s.cfg.VerifyCredentials != nil {
+		// A token2 the server has stored IS the credential: the client's
+		// "remember me" presents it WITH the account's name and a bogus
+		// password, so the password check must not run. A nameless token
+		// login is the other shape — a Steam client with no stored tail,
+		// which lands on the operator's account below.
+		if token2 != "" && name != "" && s.cfg.TokenLogin != nil {
+			if id, err := s.cfg.TokenLogin(name, token2); err == nil {
+				s.logf("%s: login rid=%d remember-me token accepted", from, req.rid)
+				return s.loggedOn(from, listen, req.rid, req.version, params, id, name)
+			}
+			s.logf("%s: login rid=%d remember-me token rejected, trying the password", from, req.rid)
+		}
 		if name != userNameOf(params.Username) && s.cfg.TokenLogin != nil {
 			// The token is the credential; there is no password to check.
 			id, err := s.cfg.TokenLogin(name, token2)

@@ -279,10 +279,17 @@ func main() {
 		// fall back to the operator's token account.
 		TokenLogin: func(name, token2 string) (int64, error) {
 			if token2 != "" {
-				if acct, err := store.AccountByRememberToken(context.Background(), token2); err == nil {
-					return acct.ID, nil
+				// A presented token is the credential: it must match a
+				// stored one, never fall back to the name — that would let
+				// any token log in as the account it names.
+				acct, err := store.AccountByRememberToken(context.Background(), token2)
+				if err != nil {
+					return 0, err
 				}
+				return acct.ID, nil
 			}
+			// A first token login carries none (a Steam client with no
+			// stored tail): land it on the operator's account.
 			acct, err := store.AccountByName(context.Background(), name)
 			if err != nil {
 				return 0, err

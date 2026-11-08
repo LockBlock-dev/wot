@@ -736,6 +736,30 @@ func TestAccountIDFor(t *testing.T) {
 // tokenLoginDatagram builds the client's login#2 bytes for a Steam-style
 // token2 login: auth_method=token2, a token2, and an EMPTY login name —
 // the document the live client sends.
+// tokenLoginDatagramNamed is tokenLoginDatagram with an account name and a
+// token2: the client's "remember me" shape.
+func tokenLoginDatagramNamed(t *testing.T, rid uint32, ch Challenge, digest [16]byte, name, token2 string) []byte {
+	t.Helper()
+	key, nonces, err := solveChallengeFor(t, ch)
+	if err != nil {
+		t.Fatalf("solve: %v", err)
+	}
+	priv := testRSAKey(t)
+	cfg := testClientConfig(&RSAPublicKey{key: &priv.PublicKey}, true)
+	cfg.AuthMethod = "token2"
+	cfg.Login = name
+	cfg.Password = "bogus"
+	cfg.Token2 = token2
+	cfg.Digest = digest
+	params, err := encryptLogOnParamsWithProvider(cfg, ProviderForConfig(cfg), &RSAPublicKey{key: &priv.PublicKey})
+	if err != nil {
+		t.Fatalf("params: %v", err)
+	}
+	respMsg := buildChallengeResponseMsg(250*time.Millisecond, key, nonces)
+	msg := buildLoginMsg(rid, [4]byte{verSub, verPatch, verMinor, verMajor}, params, true)
+	return buildLoginPacket(testPrefix(t), 0, respMsg, msg)
+}
+
 func tokenLoginDatagram(t *testing.T, rid uint32, ch Challenge, digest [16]byte) []byte {
 	t.Helper()
 	key, nonces, err := solveChallengeFor(t, ch)
@@ -863,5 +887,58 @@ func TestLoginAppTokenLoginUnmapped(t *testing.T) {
 	// the Account entity's `name`.
 	if gotUser != "" {
 		t.Fatalf("VerifyCredentials saw %q, want \"\" (the document has no login)", gotUser)
+	}
+}
+
+// TestLoginAppRememberMeToken pins the "remember me" login: the client
+// presents the stored token2 WITH the account's name and a bogus password, so
+// the token must be the credential and the password check must not run.
+func TestLoginAppRememberMeToken(t *testing.T) {
+	var gotName, gotToken2 string
+	var verifyCalls int
+	srv, err := NewLoginAppServer(ServerConfig{
+		MaxNonce: serverTestMaxNonce,
+		Versions: testVersions(),
+		VerifyCredentials: func(user, pass string) (int64, error) {
+			verifyCalls++
+			return 0, errors.New(textBadPassword)
+		},
+		TokenLogin: func(name, token2 string) (int64, error) {
+			gotName, gotToken2 = name, token2
+			if name != "admin" || token2 != "123:456:789" {
+				return 0, errors.New("no such token")
+			}
+			return 7, nil
+		},
+	}, testRSAKey(t))
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	from := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40008}
+	listen := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 20016}
+	pkt, err := srv.handlePacket(loginOneDatagram(t, 60, true), from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#1: %v", err)
+	}
+	ch := challengeOf(t, pkt, 60)
+	// A remember-me login: the name is present, the password is bogus and the
+	// token2 is the credential.
+	dg := tokenLoginDatagramNamed(t, 61, ch, testDigestA, "admin", "123:456:789")
+	pkt, err = srv.handlePacket(dg, from, listen)
+	if err != nil {
+		t.Fatalf("handlePacket#2: %v", err)
+	}
+	_, status, _, err := parseReply(pkt)
+	if err != nil {
+		t.Fatalf("reply parse: %v", err)
+	}
+	if status != statusLoggedOn {
+		t.Fatalf("status=%d, want LOGGED_ON: the token is the credential", status)
+	}
+	if gotName != "admin" || gotToken2 != "123:456:789" {
+		t.Fatalf("TokenLogin saw %q/%q, want the name and the token", gotName, gotToken2)
+	}
+	if verifyCalls != 0 {
+		t.Fatalf("VerifyCredentials called %d times, want 0 (the token is the credential)", verifyCalls)
 	}
 }
