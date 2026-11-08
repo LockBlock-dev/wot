@@ -63,8 +63,10 @@ type botTarget struct {
 	// client's own. nil when the game's files are not available, and the
 	// target cannot be hit.
 	collision *vehicleCollision
-	// dead is set when the health reaches 0, so a flight does not have to read
-	// the health from another goroutine.
+	// team is the wire team (1 or 2) the tank is on, and dead is set when the
+	// health reaches 0, so a flight does not have to read the health from
+	// another goroutine.
+	team      uint8
 	dead      atomic.Bool
 	health    int
 	maxHealth int

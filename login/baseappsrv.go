@@ -382,6 +382,8 @@ type clientState struct {
 	// clientMoveTimeout is how long the server trusts that report before it
 	// takes the hull back.
 	clientMoveAt time.Time
+	// battleEnded is set once the AFTERBATTLE period has gone out.
+	battleEnded bool
 	// overturned is set once the player's hull has ended up on its side or its
 	// roof, so the death is only sent once.
 	overturned bool
@@ -3063,6 +3065,8 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		s.ramTick(conn, from, st, arenaID, float32(dt))
 		// A hull on its side or its roof is out of the battle.
 		s.checkOverturn(conn, from, st, arenaID)
+		// One side wiped out, or the timer up, ends the battle.
+		s.checkBattleEnd(conn, from, st, arenaID)
 
 		// A failed write is one lost update, not the end of the battle: the
 		// next tick carries the position again.

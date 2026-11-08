@@ -1,0 +1,88 @@
+package login
+
+import (
+	"net"
+)
+
+// The battle's end: one side wiped out, or the timer running out, sends the
+// AFTERBATTLE period with the win status. The client's
+// `Avatar.onArenaPeriodChange` then shows the end screen, and its
+// `battleResults` request asks for the results document.
+//
+// The win status the period carries is the client's own convention: 1 for the
+// player's team winning, 0 for losing (the client's `battleCtx` reads it out of
+// the period's additional info and shows "victory"/"defeat").
+
+const (
+	// ArenaPeriodAfter is `ARENA_PERIOD.AFTERBATTLE`.
+	ArenaPeriodAfter uint8 = 4
+	// winStatusVictory and winStatusDefeat are the values the client reads.
+	winStatusVictory = 1
+	winStatusDefeat  = 0
+)
+
+// checkBattleEnd ends the battle when one side has nothing left, or the BATTLE
+// period's length has run out. It runs once.
+func (s *BaseAppServer) checkBattleEnd(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64) {
+	s.mu.Lock()
+	if st.battleEnded || !st.battleStarted || st.arena == nil {
+		s.mu.Unlock()
+		return
+	}
+	playerTeam := st.arena.Player.Team
+	targets := append([]*botTarget(nil), st.targets...)
+	playerAlive := !st.overturned
+	elapsed := st.arenaTime
+	s.mu.Unlock()
+
+	alive := map[uint8]int{playerTeam: 0, playerTeam ^ 3: 0}
+	if playerAlive {
+		alive[playerTeam] = 1
+	}
+	for _, t := range targets {
+		if t == nil || t.health <= 0 {
+			continue
+		}
+		alive[t.team]++
+	}
+	// The battle ends when a side has none left, or when its length is up.
+	wiped := alive[playerTeam] == 0 || alive[playerTeam^3] == 0
+	timedOut := elapsed >= battleLength
+	if !wiped && !timedOut {
+		return
+	}
+	win := winStatusDefeat
+	if alive[playerTeam] > 0 && (alive[playerTeam^3] == 0 || alive[playerTeam] > alive[playerTeam^3]) {
+		win = winStatusVictory
+	}
+	s.mu.Lock()
+	st.battleEnded = true
+	avatar := st.avatar
+	s.mu.Unlock()
+	if avatar == nil {
+		return
+	}
+	s.logf("arena %d: battle over (%d vs %d alive, %.0f s): win=%d",
+		arenaID, alive[playerTeam], alive[playerTeam^3], elapsed, win)
+	el, err := arenaPeriodUpdateFull(avatar, ArenaPeriodAfter, arenaPeriodEnd(st.tick, 0), 0, []float64{float64(win)})
+	if err != nil {
+		s.logf("arena %d: AFTERBATTLE: %v", arenaID, err)
+		return
+	}
+	var app []byte
+	if sel, serr := EncodeSelectEntity(avatar.ID); serr == nil {
+		app = append(app, sel...)
+	}
+	app = append(app, el...)
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, app, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		s.logf("arena %d: AFTERBATTLE send: %v", arenaID, err)
+	}
+}
+
+// battleLength is how long a battle runs before the timer ends it, in seconds:
+// the BATTLE period's own 1500.
+const battleLength = 1500
