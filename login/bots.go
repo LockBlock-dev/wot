@@ -27,11 +27,22 @@ var botNames = []string{
 // team: random playable tanks from the generated table, the stock modules, the
 // default shell and a default crew. The player's own tank is left out so the
 // teams don't mirror.
-func BotRoster(count, allies int, playerTank []byte) []ArenaPlayerDoc {
+func BotRoster(count, allies int, playerTank []byte, renderable map[string]bool) []ArenaPlayerDoc {
 	if count <= 0 {
 		return nil
 	}
-	pool := lobby.AllOwnableVehicles
+	// `renderable` is what the client can actually draw (see
+	// lobby.LoadVehicleModels). The generated table lists every ownable
+	// vehicle, event and story-mode variants included, and a tank whose model
+	// the client does not ship makes it fail to build the appearance and then
+	// crash. nil means "no filter", which is only right for tests.
+	var pool []lobby.OwnableVehicle
+	for _, v := range lobby.AllOwnableVehicles {
+		if renderable != nil && !renderable[v.Name] {
+			continue
+		}
+		pool = append(pool, v)
+	}
 	if len(pool) == 0 {
 		return nil
 	}

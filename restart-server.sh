@@ -47,6 +47,11 @@ DB="${DB:-$ROOT/wotserver.db}"
 # what the client decodes entity data against, and a type that changed between
 # builds silently shifts every field after it.
 DEFS="${DEFS:-$ROOT/scripts-2.4.1/entity_defs}"
+# The client's own packages, so the synthetic roster only uses tanks it can
+# actually draw. A vehicle whose model is not shipped (the event and story-mode
+# variants the garage table still lists) makes the client fail to build the
+# appearance and then crash with an access violation.
+PKGS="${PKGS:-$HOME/.local/share/Steam/steamapps/common/World of Tanks/eu/res/packages}"
 SETTINGS="${SETTINGS:-$ROOT/wot/wotserver.settings.json}"
 # The client dials the (host, port) pairs in the settings document's
 # `xmpp_connections`, so this must be the same address.
@@ -91,6 +96,8 @@ fi
 [ -e "$PRIVKEY" ] || die "missing $PRIVKEY"
 [ -d "$DEFS" ] || die "missing defs directory $DEFS (set DEFS=...)"
 [ -e "$SETTINGS" ] || die "missing settings document $SETTINGS (set SETTINGS=...)"
+PKGS_FLAG=
+[ -d "$PKGS" ] && PKGS_FLAG="-pkgs $PKGS"
 
 if [ "${BUILD:-1}" != "0" ]; then
 	printf 'restart-server: building %s\n' "$BIN"
@@ -119,6 +126,7 @@ setsid nohup "$BIN" \
 	-privkey "$PRIVKEY" \
 	-s1 "$S1" -s2 "$S2" -s3 "$S3" \
 	-defs "$DEFS" \
+	${PKGS_FLAG:+-pkgs "$PKGS"} \
 	-settings "$SETTINGS" \
 	-xmpp "$XMPP" \
 	-db "$DB" \

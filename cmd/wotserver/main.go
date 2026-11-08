@@ -71,29 +71,35 @@ import (
 // Flag targets live at package scope so -config can fill the ones the
 // command line left alone (see config.go).
 var (
-	flagAddr        *string
-	flagPrivKey     *string
-	flagS1          *string
-	flagS2          *string
-	flagS3          *string
-	flagFlood       *string
-	flagFloodKey    *string
-	flagFloodFlow   *string
-	flagPost        *string
-	flagPostKey     *string
-	flagPostFlow    *string
-	flagDefs        *string
-	flagSettings    *string
-	flagCBP         *bool
-	flagTokenAcct   *string
-	flagBaseApp     *string
-	flagMaxNonce    *int64
-	flagAnyVersion  *bool
-	flagDigest      *string
-	flagVerbose     *bool
-	flagDB          *string
-	flagUser        *string
-	flagGarageAll   *bool
+	flagAddr       *string
+	flagPrivKey    *string
+	flagS1         *string
+	flagS2         *string
+	flagS3         *string
+	flagFlood      *string
+	flagFloodKey   *string
+	flagFloodFlow  *string
+	flagPost       *string
+	flagPostKey    *string
+	flagPostFlow   *string
+	flagDefs       *string
+	flagSettings   *string
+	flagCBP        *bool
+	flagTokenAcct  *string
+	flagBaseApp    *string
+	flagMaxNonce   *int64
+	flagAnyVersion *bool
+	flagDigest     *string
+	flagVerbose    *bool
+	flagDB         *string
+	flagUser       *string
+	flagGarageAll  *bool
+	flagPkgs       *string
+
+	// renderableVehicles is the set of vehicle names the client ships a model
+	// for, or nil when -pkgs is not given. See lobby.LoadVehicleModels.
+	renderableVehicles map[string]bool
+
 	flagPass        *string
 	flagConfig      *string
 	flagXMPP        *string
@@ -115,6 +121,8 @@ func main() {
 	// tables the client decodes entity data against, and a type that
 	// changed between builds shifts every field after it. `scripts-2.4.1`
 	// is the client's own tree (extracted from its scripts.pkg).
+	flagPkgs = flag.String("pkgs", "",
+		"the client's res/packages directory; when set, the synthetic roster only uses vehicles whose model it ships (a tank the client cannot draw crashes it)")
 	flagDefs = flag.String("defs", "../scripts-2.4.1/entity_defs",
 		"scripts/entity_defs directory: decodes post-flood client calls from the defs (\"\" = hand-written reader)")
 	flagTokenAcct = flag.String("token-account", "",
@@ -198,6 +206,18 @@ func main() {
 		if err := seedAllVehicles(core); err != nil {
 			fatal(err)
 		}
+	}
+	// What the client can actually draw. The roster must come from this set:
+	// a synthetic tank whose model the client does not ship makes it fail to
+	// build the appearance and then crash with an access violation.
+	if *flagPkgs != "" {
+		set, err := lobby.LoadVehicleModels(*flagPkgs)
+		if err != nil {
+			fatal(err)
+		}
+		renderableVehicles = set
+		fmt.Printf("wotserver: %d vehicles have a model in %s (the roster draws only from these)\n",
+			len(set), *flagPkgs)
 	}
 	if *flagClanTag != "" {
 		if err := seedClan(core); err != nil {
@@ -862,7 +882,7 @@ func arenaHandoff(a *server.Arena, p *server.ArenaPlayer) *login.ArenaHandoff {
 	if len(a.Order) <= 1 {
 		playerTeam := p.Team + 1
 		enemyTeam := playerTeam ^ 3
-		bots := login.BotRoster(29, 14, p.VehicleCompDescr)
+		bots := login.BotRoster(29, 14, p.VehicleCompDescr, renderableVehicles)
 		for i := range bots {
 			if bots[i].Team == 1 {
 				bots[i].Team = playerTeam
