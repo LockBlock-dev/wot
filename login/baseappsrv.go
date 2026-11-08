@@ -3007,7 +3007,7 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		// spawn, where the terrain lookup can fail for reasons that have
 		// nothing to do with the edge.
 		if moved && terrain != nil {
-			if st.hull.settle(terrain, float32(dt)) {
+			if st.hull.settle(terrain, statics, float32(dt)) {
 				st.hadGround = true
 			} else if st.hadGround {
 				st.hull = before

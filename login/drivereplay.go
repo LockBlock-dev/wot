@@ -165,7 +165,7 @@ func ReplayDrive(h hull, samples []DriveSample, terrain *Terrain) DriveError {
 			}
 			h.step(float32(span)/float32(steps), ground)
 			if terrain != nil {
-				h.settle(terrain, float32(span)/float32(steps))
+				h.settle(terrain, nil, float32(span)/float32(steps))
 			}
 		}
 		if i+1 < len(updates) {

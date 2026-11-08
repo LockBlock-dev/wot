@@ -72,6 +72,14 @@ const (
 	// travel. A convex break (a ledge) drops the ground further than this in
 	// one tick and the hull goes airborne.
 	hullSuspensionTravel float32 = 0.3
+	// hullGroundProbe is how far above the hull a static surface may be and
+	// still count as the ground under it, in metres: a ramp's deck is under the
+	// hull, a bridge over it is not.
+	hullGroundProbe float32 = 2.0
+	// hullLaunchSpeed is how fast the hull must be going for a crest to throw
+	// it off the ground, in m/s: a crawling tank follows the slope, a fast one
+	// takes off.
+	hullLaunchSpeed float32 = 3.0
 	// hullMaxFollowSlope is the steepest slope the tracks can drive down, as
 	// tan(angle): 1.0 is 45°. Ground steeper than this is fallen off, not
 	// driven down — the heightmap turns a cliff into a steep ramp over one
@@ -452,12 +460,30 @@ func (h *hull) keepWithin(minX, minZ, maxX, maxZ float32) {
 // the hull's HORIZONTAL step against a fixed 45° slope, which followed every
 // ledge a tank could drive over: the tank was glued to the ground and could
 // never jump.
-func (h *hull) settle(tr *Terrain, dt float32) bool {
-	if tr == nil {
+func (h *hull) settle(tr *Terrain, statics *staticScene, dt float32) bool {
+	if tr == nil && statics == nil {
 		return false
 	}
+	// The ground under a point: the terrain's height, or a static model's
+	// surface where one is higher — a ramp's deck, a rock's top. Without the
+	// statics a ramp is only a wall to push out of, so a tank drives through
+	// it instead of up it.
 	height := func(dx, dz float32) (float32, bool) {
-		return tr.HeightAt(h.Position[0]+dx, h.Position[2]+dz)
+		x, z := h.Position[0]+dx, h.Position[2]+dz
+		best, found := float32(0), false
+		if tr != nil {
+			if v, ok := tr.HeightAt(x, z); ok {
+				best, found = v, true
+			}
+		}
+		if statics != nil {
+			if v, ok := statics.groundHeightAt(x, z, h.Position[1]+hullGroundProbe); ok {
+				if !found || v > best {
+					best, found = v, true
+				}
+			}
+		}
+		return best, found
 	}
 	center, ok := height(0, 0)
 	if !ok {
@@ -490,12 +516,22 @@ func (h *hull) settle(tr *Terrain, dt float32) bool {
 		if speed := float32(math.Hypot(float64(h.Velocity[0]), float64(h.Velocity[1]))); speed*dt*hullMaxFollowSlope < expected {
 			expected = speed * dt * hullMaxFollowSlope
 		}
-		if drop > expected+hullSuspensionTravel {
+		groundRate := -drop / dt
+		// Where the hull would be if it kept the vertical speed it had: on a
+		// slope that is the ground itself (its speed IS the ground's rate), but
+		// over a crest or a ramp's edge the ground falls away under it and the
+		// hull keeps going up. That is what launches a tank off a ramp instead
+		// of gluing it to the slope.
+		// Only upward momentum launches it: driving onto a down-slope drops
+		// the ground away just as fast, and the suspension follows that.
+		predicted := h.Position[1] + h.VerticalVelocity*dt
+		launch := h.VerticalVelocity > 0 && predicted > center+hullSuspensionTravel
+		if drop > expected+hullSuspensionTravel || launch {
 			h.Airborne = true
-			h.AirborneWhy = [3]float32{drop, expected, h.Position[1] - center}
+			h.AirborneWhy = [3]float32{drop, expected, groundRate}
 			return true
 		}
-		h.VerticalVelocity = -drop / dt
+		h.VerticalVelocity = groundRate
 		h.Position[1] = center
 	}
 	yaw := h.Direction[2]

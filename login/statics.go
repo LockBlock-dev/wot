@@ -992,3 +992,58 @@ func (s *staticScene) rebuildGrid() {
 		}
 	}
 }
+
+// groundHeightAt is the highest static surface under a point, below `maxY`: the
+// deck of a ramp, a rock's top, a bridge. Only near-horizontal triangles count
+// — a wall is the push-out's business, not the ground's — and what a destroyed
+// module leaves is not there.
+func (s *staticScene) groundHeightAt(x, z, maxY float32) (float32, bool) {
+	if s == nil {
+		return 0, false
+	}
+	key := [2]int32{
+		int32(math.Floor(float64(x / staticsCell))),
+		int32(math.Floor(float64(z / staticsCell))),
+	}
+	best := float32(0)
+	found := false
+	for _, i := range s.Grid[key] {
+		t := &s.Triangles[i]
+		if t.Kind == bodyRemains {
+			continue
+		}
+		if abs32(t.Normal[1]) < sin32(wallAngle) {
+			continue
+		}
+		if x < t.Bounds[0][0] || x > t.Bounds[1][0] || z < t.Bounds[0][2] || z > t.Bounds[1][2] {
+			continue
+		}
+		h, ok := triangleHeightAt(*t, x, z)
+		if !ok || h > maxY {
+			continue
+		}
+		if !found || h > best {
+			best, found = h, true
+		}
+	}
+	return best, found
+}
+
+// triangleHeightAt is the height of a triangle's plane at (x, z), when the
+// point is inside the triangle's footprint.
+func triangleHeightAt(t staticTriangle, x, z float32) (float32, bool) {
+	x1, z1 := t.Vertices[0][0], t.Vertices[0][2]
+	x2, z2 := t.Vertices[1][0], t.Vertices[1][2]
+	x3, z3 := t.Vertices[2][0], t.Vertices[2][2]
+	den := (z2-z3)*(x1-x3) + (x3-x2)*(z1-z3)
+	if abs32(den) < 1e-9 {
+		return 0, false
+	}
+	a := ((z2-z3)*(x-x3) + (x3-x2)*(z-z3)) / den
+	b := ((z3-z1)*(x-x3) + (x1-x3)*(z-z3)) / den
+	c := 1 - a - b
+	if a < -0.001 || b < -0.001 || c < -0.001 {
+		return 0, false
+	}
+	return a*t.Vertices[0][1] + b*t.Vertices[1][1] + c*t.Vertices[2][1], true
+}

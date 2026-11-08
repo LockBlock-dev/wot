@@ -165,12 +165,12 @@ func TestAimWorldPointSurvivesTheHullTurning(t *testing.T) {
 // its height there drives out into nothing and ends up underground.
 func TestSettleReportsMissingGround(t *testing.T) {
 	h := hull{Position: [3]float32{100, 50, 100}}
-	if h.settle(nil, 0) {
+	if h.settle(nil, nil, 0) {
 		t.Fatal("settle(nil) reported ground")
 	}
 	// A terrain that has no height anywhere is the off-map case.
 	empty := &Terrain{}
-	if h.settle(empty, 0) {
+	if h.settle(empty, nil, 0) {
 		t.Fatal("settle reported ground off the map")
 	}
 	if h.Position[1] != 50 {
@@ -337,7 +337,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	}
 	tm := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
 	h := hull{Position: [3]float32{10, 0, 10}, Velocity: [2]float32{0, 20}, Flags: moveForward, Limits: motionLimits{SpeedForward: 25}}
-	if !h.settle(tm, 0.1) {
+	if !h.settle(tm, nil, 0.1) {
 		t.Fatal("no ground at spawn")
 	}
 	if h.Airborne {
@@ -346,7 +346,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	// Drive to the cliff.
 	for i := 0; i < 40 && !h.Airborne; i++ {
 		h.step(0.1, groundFirm)
-		if !h.settle(tm, 0.1) {
+		if !h.settle(tm, nil, 0.1) {
 			t.Fatalf("off the map at tick %d", i)
 		}
 	}
@@ -357,7 +357,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	// Falling: the height drops and the vertical speed is negative.
 	for i := 0; i < 5; i++ {
 		h.step(0.1, groundFirm)
-		if !h.settle(tm, 0.1) {
+		if !h.settle(tm, nil, 0.1) {
 			t.Fatalf("off the map while falling at tick %d", i)
 		}
 	}
@@ -370,7 +370,7 @@ func TestHullJumpsOffACliff(t *testing.T) {
 	// It lands on the lower ground.
 	for i := 0; i < 40 && h.Airborne; i++ {
 		h.step(0.1, groundFirm)
-		if !h.settle(tm, 0.1) {
+		if !h.settle(tm, nil, 0.1) {
 			t.Fatalf("off the map while landing at tick %d", i)
 		}
 	}
@@ -400,7 +400,7 @@ func TestHullFollowsASteepSlopeWithoutBouncing(t *testing.T) {
 	}
 	tm := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
 	h := hull{Position: [3]float32{50, 0, 10}, Velocity: [2]float32{0, 20}, Flags: moveForward, Limits: motionLimits{SpeedForward: 25}}
-	if !h.settle(tm, 0.1) {
+	if !h.settle(tm, nil, 0.1) {
 		t.Fatal("no ground at spawn")
 	}
 	// The heightmap's triangulation zigzags, so a "constant" slope has small
@@ -409,7 +409,7 @@ func TestHullFollowsASteepSlopeWithoutBouncing(t *testing.T) {
 	maxOff := float32(0)
 	for i := 0; i < 30; i++ {
 		h.step(0.1, groundFirm)
-		if !h.settle(tm, 0.1) {
+		if !h.settle(tm, nil, 0.1) {
 			t.Fatalf("off the map at tick %d", i)
 		}
 		if ground, ok := tm.HeightAt(h.Position[0], h.Position[2]); ok {
@@ -436,12 +436,12 @@ func TestHullJumpsOffASmallLedge(t *testing.T) {
 	}
 	tm := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
 	h := hull{Position: [3]float32{10, 0, 10}, Velocity: [2]float32{0, 20}, Flags: moveForward, Limits: motionLimits{SpeedForward: 25}}
-	if !h.settle(tm, 0.1) {
+	if !h.settle(tm, nil, 0.1) {
 		t.Fatal("no ground at spawn")
 	}
 	for i := 0; i < 40 && !h.Airborne; i++ {
 		h.step(0.1, groundFirm)
-		if !h.settle(tm, 0.1) {
+		if !h.settle(tm, nil, 0.1) {
 			t.Fatalf("off the map at tick %d", i)
 		}
 	}
@@ -489,5 +489,113 @@ func TestHullStopsAtTheMapEdge(t *testing.T) {
 	}
 	if h.Velocity[1] > 0 {
 		t.Fatalf("velocity z = %v, want the speed into the edge stopped", h.Velocity[1])
+	}
+}
+
+// staticQuad adds a quad's two triangles to a static scene, with their bounds.
+func staticQuad(scene *staticScene, body string, kind staticBodyKind, a, b, c, d [3]float32) {
+	for _, tri := range [][3][3]float32{{a, b, c}, {a, c, d}} {
+		st := staticTriangle{Vertices: tri, Normal: triangleNormal(tri), Body: body, Kind: kind}
+		for k := 0; k < 3; k++ {
+			st.Bounds[0][k] = min32(min32(tri[0][k], tri[1][k]), tri[2][k])
+			st.Bounds[1][k] = max32(max32(tri[0][k], tri[1][k]), tri[2][k])
+		}
+		scene.Triangles = append(scene.Triangles, st)
+	}
+	scene.rebuildGrid()
+}
+
+// TestHullDrivesUpAStaticRamp pins the static models as ground: a ramp's deck
+// carries the hull up, and its edge launches it. Without this a ramp is only a
+// wall to push out of, and a tank drives through it.
+func TestHullDrivesUpAStaticRamp(t *testing.T) {
+	terrain := flatTerrain()
+	scene := &staticScene{Grid: map[[2]int32][]int32{}}
+	// A 3 m rise over 10 m, from z=20 to z=30, 10 m wide.
+	staticQuad(scene, "s_ramp", bodySolid,
+		[3]float32{-5, 0, 20}, [3]float32{5, 0, 20}, [3]float32{5, 3, 30}, [3]float32{-5, 3, 30})
+	h := hull{
+		Position: [3]float32{0, 0, 0},
+		Flags:    moveForward,
+		Limits: motionLimits{
+			SpeedForward: 15, SpeedBackward: 8, RotationSpeed: 0.5,
+			RotationSpeedByGround:   [3]float32{0.5, 0.4, 0.3},
+			RollingFrictionByGround: [3]float32{0.05, 0.05, 0.05},
+			EnginePower:             700000, Weight: 40000,
+			CarryingPoint: [2]float32{1.2, 2.0},
+		},
+	}
+	h.settle(terrain, scene, 0.1)
+	var peak float32
+	airborne := false
+	for i := 0; i < 300; i++ {
+		h.step(0.1, groundFirm)
+		h.settle(terrain, scene, 0.1)
+		if h.Position[1] > peak {
+			peak = h.Position[1]
+		}
+		if h.Airborne {
+			airborne = true
+		}
+		if h.Position[2] > 40 {
+			break
+		}
+	}
+	if peak < 2.0 {
+		t.Fatalf("the hull rose to %.2f m, want it carried up the ramp's 3 m", peak)
+	}
+	if !airborne {
+		t.Fatal("the hull never left the ramp's edge")
+	}
+}
+
+// TestHullJumpsOffABumpAtSpeed pins the crest: a tank driving fast over a bump
+// leaves the ground, while the same bump at a crawl does not.
+func TestHullJumpsOffABumpAtSpeed(t *testing.T) {
+	// A 0.6 m bump over 4 m, centred on z=30.
+	const n = 257
+	hm := &HeightMap{Width: n, Height: n, Heights: make([]float32, n*n)}
+	for iz := 0; iz < n; iz++ {
+		for ix := 0; ix < n; ix++ {
+			z := float32(iz) * 100 / float32(n-1)
+			h := float32(0)
+			if z >= 28 && z <= 32 {
+				h = 0.6 * (1 - abs32(z-30)/2)
+			}
+			hm.Heights[iz*n+ix] = h
+		}
+	}
+	terrain := &Terrain{ChunkSize: 100, Chunks: map[[2]int16]*HeightMap{{0, 0}: hm}}
+	drive := func(speed float32) bool {
+		h := hull{
+			Position: [3]float32{50, 0, 0},
+			Velocity: [2]float32{0, speed},
+			Flags:    moveForward,
+			Limits: motionLimits{
+				SpeedForward: speed, SpeedBackward: 8, RotationSpeed: 0.5,
+				RotationSpeedByGround:   [3]float32{0.5, 0.4, 0.3},
+				RollingFrictionByGround: [3]float32{0.05, 0.05, 0.05},
+				EnginePower:             700000, Weight: 40000,
+				CarryingPoint: [2]float32{1.2, 2.0},
+			},
+		}
+		h.settle(terrain, nil, 0.1)
+		for i := 0; i < 300; i++ {
+			h.step(0.1, groundFirm)
+			h.settle(terrain, nil, 0.1)
+			if h.Airborne {
+				return true
+			}
+			if h.Position[2] > 60 {
+				break
+			}
+		}
+		return false
+	}
+	if !drive(15) {
+		t.Error("a tank at 15 m/s did not leave a 0.6 m bump")
+	}
+	if drive(1.5) {
+		t.Error("a tank at 1.5 m/s left the bump: a crawl follows the ground")
 	}
 }
