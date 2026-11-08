@@ -13,7 +13,7 @@ func TestConfigFileFillsOnlyUnset(t *testing.T) {
 	// apply writes through the package-level flag targets, which main
 	// normally allocates; give the test its own.
 	flagAddr, flagPrivKey, flagS1, flagS2 = new(string), new(string), new(string), new(string)
-	flagFlood, flagFloodKey, flagBaseApp = new(string), new(string), new(string)
+	flagBaseApp = new(string)
 	flagMaxNonce = new(int64)
 	flagAnyVersion, flagVerbose = new(bool), new(bool)
 	flagDigest, flagDB, flagUser, flagPass = new(string), new(string), new(string), new(string)

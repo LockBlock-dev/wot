@@ -76,12 +76,6 @@ var (
 	flagS1         *string
 	flagS2         *string
 	flagS3         *string
-	flagFlood      *string
-	flagFloodKey   *string
-	flagFloodFlow  *string
-	flagPost       *string
-	flagPostKey    *string
-	flagPostFlow   *string
 	flagDefs       *string
 	flagSettings   *string
 	flagCBP        *bool

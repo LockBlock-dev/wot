@@ -6,29 +6,28 @@ package login
 // answers it shape-for-shape so a client LOGGED_ON by cmd/wotserver
 // reaches stage-2 (rotation-2 → double-auth) and a decrypt-verified
 // 1252B flood against US, and the game pointed here walks the same
-// turns. Content honesty is layered:
+// turns.
 //
-//   - transport frames are genuine (rotation 36B, tick 28B, redirect
-//     36B with the 0x44 core, flood frames verbatim from the capture);
-//   - per-session smalls (v2.1, flows3-s2 decrypts): the stage-2 36B
-//     info, the 76B descriptor (packed account name substituted per
-//     session) and the 1a/76 session dict (four live fields patched:
-//     serverUTC/aogasStartedAt/sessionStartedAt/databaseID) are
-//     SERVED with minted channel footers; the stage-1 52B/44B infos,
-//     entity bursts, the 1a/73 clan block the dict rode with, and the
-//     1a/79 lobby offers stay v1-cut (acked-only in captures);
-//   - the post-flood chain (v2/v2.1) is SERVED: the 332B terminator,
-//     the [13][7b] rev answer to the client's sync, the 1a/5b stats
-//     answer to every 501 poll, the 1a/5e "no such vehicle" error to
-//     the 121 season select, and a 100 ms minted tick stream. Answer
-//     bodies replay verbatim from the carrier (same staleness as the
-//     bulk); every frame — ticks and answers alike — takes one slot
-//     on the shared tag/seq/cumul walk, and cumul tracks the client's
-//     reliable-seq watermark;
-//   - the bulk carrier's chunk contents are a capture REFERENCE (the
-//     flows3 stage-2 run — stale shop/offer defs): faithful frames,
-//     wrong era. Per-session bulk heads stay stale until per-session
-//     bulk minting lands.
+// NOTHING here replays a capture at runtime. Every byte the server sends is
+// built from the entity defs and the server's own state:
+//
+//   - transport frames (rotation 36B, tick 28B, redirect 36B with the 0x44
+//     core) are framed by buildChannelPacket;
+//   - the stage-2 flood bundle is AUTHORED by FloodBundle from the defs
+//     (updateFrequencyNotification, tickSync, createBasePlayer with the
+//     Account's wire-order properties, the settings pickle);
+//   - the session dict, the stats answer, the queue census, the revision
+//     answer and the season-select error are Build* functions over live
+//     state;
+//   - the lobby sync is FullSyncDoc + BuildStreamElements over the account's
+//     garage, economy and unlocks, the way the genuine server answers the
+//     client's own CMD_SYNC_DATA;
+//   - the battle entry's arena settings are EncodeArenaSettingsUpdate.
+//
+// Captures are used OFFLINE only, as oracles in tests (the flood bundle is
+// pinned byte-for-byte against the genuine stream by
+// TestFloodBundleMatchesCapture). The `-flood` capture flags were removed
+// with the replay path they fed.
 //
 // Channel crypto is the client's LogOnParams key for BOTH stages: the
 // key rotation rides as app content (the [FF][len=8] reply and
@@ -270,7 +269,7 @@ type BaseAppConfig struct {
 	// existed (the client then never connects to XMPP).
 	XMPPToken func(dbid int64) string
 
-	// BulkFragSize is the flood datagram size the carrier selects
+	// BulkFragSize is the flood datagram size the bundle is split into
 	// (1252 in every genuine capture).
 	BulkFragSize int
 
@@ -639,7 +638,7 @@ type clientState struct {
 	tickPeriod time.Duration
 }
 
-// NewBaseAppServer validates the config and preloads the bulk carrier.
+// NewBaseAppServer validates the config and dry-runs the flood bundle.
 func NewBaseAppServer(cfg BaseAppConfig) (*BaseAppServer, error) {
 	if cfg.Stage1Space == "" {
 		cfg.Stage1Space = "default"
@@ -1284,7 +1283,7 @@ func cloneAddr(a *net.UDPAddr) *net.UDPAddr {
 	return &net.UDPAddr{IP: append(net.IP(nil), a.IP...), Port: a.Port, Zone: a.Zone}
 }
 
-// --- stage-2: rotation-2 → double-auth watch → flood carrier. ---
+// --- stage-2: rotation-2 → double-auth watch → flood bundle. ---
 
 func serveStage2(s *BaseAppServer, ctx context.Context, conn Transport) error {
 	s.mu.Lock()
@@ -1632,7 +1631,7 @@ func (r QueueResult) Ok() bool { return r.Code == 0 }
 // The Account entity itself is created by the flood bundle's
 // createBasePlayer element, so this does NOT send a second one: a
 // duplicate would replace the entity the bundle just built (and the
-// client asserts on two player entities). withCreate is for a carrier-less
+// client asserts on two player entities). withCreate is for a bundle-less
 // run that has no bundle to do it.
 //
 // seq is the next free reliable seq on the channel; the caller owns the
@@ -3419,7 +3418,7 @@ func (s *BaseAppServer) decodeBaseCall(elemID byte, body []byte) (postCall, bool
 //	  504, offer 7e/506 — offers are v1-cut, the walk just steps over
 //	  their slots — poll a4/545 = 7a+42/503+42 ✓, 1a5e dd/602 = +99 ✓)
 //
-// Answer BODIES replay verbatim from the carrier (1a/5f revisions,
+// Answer bodies are BUILT from live state (1a/5f revisions,
 // 1a/5b stat counters — stale reference, same layering as the bulk);
 // the [13][tag] head, the footers (seq; cumul = the live client
 // watermark), and the 1a/5e error small's req echo are minted.
@@ -3871,14 +3870,14 @@ func (s *BaseAppServer) answerPostCall(conn Transport, from *net.UDPAddr, st *cl
 		s.logf("stage2 %s: post-flood poll → 1a/5b stats answer", from)
 	case lobby.CmdReqQueueInfo:
 		// 1a/67 {players, classes}: the queue census. Server-wide, so the
-		// carrier's body replays verbatim; only the [13][tag] head and the
+		// answer is built from the live queue; only the [13][tag] head and the
 		// footers are minted. Absent from a carrier that never saw a 502
 		// (the flows3-s2 tail has none) — then stay silent, as the client
 		// tolerates.
 		// A live queue answers truthfully, PER QUEUE TYPE: the client
 		// polls the census for the queue it is in, so a random-battle
 		// poll must not count a ranked entry. Without a queue the
-		// carrier's census replays.
+		// census is zero.
 		var players int64
 		var classes []int64
 		if s.cfg.Queue != nil && s.cfg.Queue.Census != nil {
@@ -4346,7 +4345,7 @@ func isStageAuth(clear []byte, key2 uint32) bool {
 // the whole batch). Frames replay verbatim, re-keyed: fresh random
 // prefix + encryptBlowfish under the live session's key over the
 // capture's decrypted body. Contents stay the capture's (stale
-// reference; per-session bulk heads are future work).
+// reference; the bundle is authored per session).
 // floodFirstSeq is the reliable seq the flood chain starts at. The
 // client's channel counts the chain by its [first,last] range, and the
 // rotation-2 reply owns seq 0, so the chain opens at 1.

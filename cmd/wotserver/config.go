@@ -14,12 +14,6 @@ type fileConfig struct {
 	PrivKey    *string `json:"privkey"`
 	S1         *string `json:"s1"`
 	S2         *string `json:"s2"`
-	Flood      *string `json:"flood"`
-	FloodKey   *string `json:"floodkey"`
-	FloodFlow  *string `json:"floodflow"`
-	Post       *string `json:"post"`
-	PostKey    *string `json:"postkey"`
-	PostFlow   *string `json:"postflow"`
 	Defs       *string `json:"defs"`
 	CBP        *bool   `json:"createbaseplayer"`
 	TokenAcct  *string `json:"token_account"`
@@ -71,12 +65,6 @@ func (c *fileConfig) apply(set func(name string) bool) {
 	str("privkey", flagPrivKey, c.PrivKey)
 	str("s1", flagS1, c.S1)
 	str("s2", flagS2, c.S2)
-	str("flood", flagFlood, c.Flood)
-	str("floodkey", flagFloodKey, c.FloodKey)
-	str("floodflow", flagFloodFlow, c.FloodFlow)
-	str("post", flagPost, c.Post)
-	str("postkey", flagPostKey, c.PostKey)
-	str("postflow", flagPostFlow, c.PostFlow)
 	str("defs", flagDefs, c.Defs)
 	boolean("createbaseplayer", flagCBP, c.CBP)
 	str("token-account", flagTokenAcct, c.TokenAcct)
