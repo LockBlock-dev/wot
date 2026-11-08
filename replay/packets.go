@@ -9,6 +9,16 @@ import (
 // Packet is one timestamped battle-stream record: [u32 size][u32 type]
 // [f32 time][payload size bytes]. Verified chaining on 2.4.0.0
 // fixtures (version record → digest record → …).
+//
+// The type is the REPLAY's own record kind, not the wire element id, even
+// where the two coincide (0x0 base player create, 0x1 cell player create,
+// 0x5 entity create, 0x7 property, 0x8 method all match). Measured on
+// 10_hills: 0x18 carries the client version string ("2.3.1.0"), 0x30 the
+// graphics mode ("hd"), and 0x0a — 49k records, the most frequent — a 45-byte
+// `[entityID][?][position V3][direction V3]` update, which the wire's 0x0a
+// (`removeSpaceGeometryMapping`) is not. So a replay cannot answer "did the
+// server send element X": its type byte has to be mapped through the client's
+// own replay table (`BWReplay`) first.
 type Packet struct {
 	Time float32
 	Type uint32
