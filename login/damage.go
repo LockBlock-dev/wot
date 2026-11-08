@@ -156,11 +156,20 @@ func rollVehicleHit(sh shellSpec, target int, contact vehicleHit, dir [3]float32
 	case outcomeNotPierced:
 		res.Effect = hitEffectNotPierced
 		res.Flags = hitFlagDirect | hitFlagArmorNotPierced
-		// An HE shell that does not pierce explodes on the armour: half its
-		// damage at the armour, less what the armour absorbs.
+		// An HE shell that does not pierce explodes on the armour: the blast's
+		// damage at the point it hit, through the plates between it and the
+		// main armour — the reference's `explosion()` measured from the hit.
 		if sh.isHE() {
-			if dmg := 0.5*sh.damageAt(distance) - 1.3*float64(res.Armor); dmg > 0 {
-				res.Damage = int(math.Round(dmg * (1 + (rand.Float64()*2-1)*damageSpread)))
+			// The blast is measured from just before the armour, as the
+			// reference's `EXPLOSION_STANDOFF` does: exactly on it the way to
+			// the main armour has no direction.
+			center := [3]float32{
+				h.Point[0] - h.Normal[0]*explosionStandoff,
+				h.Point[1] - h.Normal[1]*explosionStandoff,
+				h.Point[2] - h.Normal[2]*explosionStandoff,
+			}
+			if dmg, _, ok := explosionAt(sh, center, c, pos, yaw); ok && dmg > 0 {
+				res.Damage = int(math.Round(float64(dmg) * (1 + (rand.Float64()*2-1)*damageSpread)))
 				res.Flags |= hitFlagExploded
 			}
 		}
@@ -259,7 +268,7 @@ func (s *BaseAppServer) splash(conn Transport, from *net.UDPAddr, st *clientStat
 		if t == nil || t.dead.Load() {
 			continue
 		}
-		damage, hit, ok := explosionAt(sh, center, t)
+		damage, hit, ok := explosionAt(sh, center, t.collision, t.pos, t.yaw)
 		if !ok || damage <= 0 {
 			continue
 		}
@@ -288,6 +297,20 @@ func (s *BaseAppServer) splash(conn Transport, from *net.UDPAddr, st *clientStat
 		s.logf("arena %d: HE blast %.1f m from bot %d: %d damage (armour %s)",
 			arenaID, res.Distance, t.id, res.Damage, hit.GroupName)
 		s.applyDamage(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, t, res)
+	}
+	// The blast takes down what it reaches: trees, fences, lamp posts and the
+	// modules of a structure. Each one leaves the collision scene, so the next
+	// shell flies through where it stood.
+	s.mu.Lock()
+	scene := st.statics
+	s.mu.Unlock()
+	if scene == nil || sh.ExplosionRadius <= 0 {
+		return
+	}
+	for _, tri := range scene.destructiblesWithin(center, float32(sh.ExplosionRadius)) {
+		if err := s.destroyStatic(conn, from, st, arenaID, tri); err != nil {
+			s.logf("arena %d: blast destructible: %v", arenaID, err)
+		}
 	}
 }
 
@@ -1121,12 +1144,12 @@ const (
 // explosionAt is what an HE shell's blast does to a vehicle whose centre is
 // `center`: the damage left after the way to its main armour, and the hit that
 // is shown.
-func explosionAt(sh shellSpec, center [3]float32, t *botTarget) (float32, vehicleHit, bool) {
-	if t == nil || t.collision == nil || sh.ExplosionRadius <= 0 {
+func explosionAt(sh shellSpec, center [3]float32, c *vehicleCollision, pos [3]float32, yaw float32) (float32, vehicleHit, bool) {
+	if c == nil || sh.ExplosionRadius <= 0 {
 		return 0, vehicleHit{}, false
 	}
 	radius := float32(sh.ExplosionRadius)
-	closest, distance, _, ok := t.collision.closestPoint(t.pos, t.yaw, center)
+	closest, distance, _, ok := c.closestPoint(pos, yaw, center)
 	if !ok || distance > radius {
 		return 0, vehicleHit{}, false
 	}
@@ -1141,7 +1164,7 @@ func explosionAt(sh shellSpec, center [3]float32, t *botTarget) (float32, vehicl
 		closest[1] + dir[1]*explosionStandoff*2,
 		closest[2] + dir[2]*explosionStandoff*2,
 	}
-	hits := t.collision.hits(t.pos, t.yaw, center, to)
+	hits := c.hits(pos, yaw, center, to)
 	seen := map[[2]int]bool{}
 	absorbed := float32(0)
 	var reached vehicleHit

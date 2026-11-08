@@ -942,3 +942,53 @@ func loadStaticSceneFor(pkg, spacePath string) (*staticScene, error) {
 	mask := visibilityMask(settings, "ctf")
 	return loadStaticScene(res, spacePath, mask)
 }
+
+// destructiblesWithin is the distinct destructible bodies — a tree, a fence, a
+// lamp post, a structure's module — whose triangles lie within `radius` of a
+// point. Each is returned once, as its first triangle.
+func (s *staticScene) destructiblesWithin(center [3]float32, radius float32) []staticTriangle {
+	if s == nil || radius <= 0 {
+		return nil
+	}
+	min := [3]float32{center[0] - radius, center[1] - radius, center[2] - radius}
+	max := [3]float32{center[0] + radius, center[1] + radius, center[2] + radius}
+	type bodyKey struct {
+		instance uint32
+		body     string
+	}
+	seen := map[bodyKey]bool{}
+	var out []staticTriangle
+	for _, t := range s.trianglesIn(min, max) {
+		if t.Kind != bodyDestructible && t.Kind != bodyModule {
+			continue
+		}
+		key := bodyKey{instance: t.Instance, body: t.Body}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, *t)
+	}
+	return out
+}
+
+// rebuildGrid re-indexes the scene's triangles in the grid.
+func (s *staticScene) rebuildGrid() {
+	if s == nil {
+		return
+	}
+	s.Grid = map[[2]int32][]int32{}
+	for i := range s.Triangles {
+		t := &s.Triangles[i]
+		x0 := int32(math.Floor(float64(t.Bounds[0][0] / staticsCell)))
+		x1 := int32(math.Floor(float64(t.Bounds[1][0] / staticsCell)))
+		z0 := int32(math.Floor(float64(t.Bounds[0][2] / staticsCell)))
+		z1 := int32(math.Floor(float64(t.Bounds[1][2] / staticsCell)))
+		for x := x0; x <= x1; x++ {
+			for z := z0; z <= z1; z++ {
+				key := [2]int32{x, z}
+				s.Grid[key] = append(s.Grid[key], int32(i))
+			}
+		}
+	}
+}

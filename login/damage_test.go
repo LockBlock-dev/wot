@@ -119,7 +119,8 @@ func TestResolveShotNotPierced(t *testing.T) {
 // deals its explosion damage and sets the explosion flag.
 func TestResolveShotHEExplodes(t *testing.T) {
 	box := dummyBox([3]float32{0, 0, 0}, 0)
-	sh := shellSpec{Damage: 300, Pen: 10, Kind: "HIGH_EXPLOSIVE", KindIndex: 1, Caliber: 76.2}
+	// A 76.2 mm HE shell's blast radius is caliber²/5555, about a metre.
+	sh := shellSpec{Damage: 300, Pen: 10, Kind: "HIGH_EXPLOSIVE", KindIndex: 1, Caliber: 76.2, ExplosionRadius: 1.05}
 	res := resolveShot(sh, [3]float32{0, 2, 20}, [3]float32{0, 0, -1}, []hitBox{box})
 	if !res.Hit || res.Pierced {
 		t.Fatalf("hit=%v pierced=%v, want a non-piercing hit", res.Hit, res.Pierced)

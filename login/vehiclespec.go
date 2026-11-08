@@ -877,13 +877,19 @@ func dispersionIn(pkg, vehicleName, gunsName, chassis, gun string) (dispersionSp
 		}
 	}
 	if data, derr := shellDataIn(pkg, nation, shell.Name); derr == nil {
-		shell.Damage = data.Damage
-		shell.Kind = data.Kind
-		shell.KindIndex = data.KindIndex
-		shell.Caliber = data.Caliber
-		shell.EffectsIndex = data.EffectsIndex
-		shell.PiercedSticker = data.PiercedSticker
-		shell.HasPiercedSticker = data.HasPiercedSticker
+		// The shell's own def carries everything about what it does — its
+		// kind, damage, normalization, ricochet angle, explosion radius, jet
+		// loss and effects — while the flight figures come from the gun's
+		// `shots` entry: speed, gravity, range and the penetration pair.
+		//
+		// Copying only a few fields here silently zeroed the rest, so no
+		// shell ever normalized, ricocheted or exploded: the HE blast had no
+		// radius at all.
+		speed, gravity, maxDist := shell.Speed, shell.Gravity, shell.MaxDistance
+		pen, penNear, penFar := shell.Pen, shell.PenNear, shell.PenFar
+		shell = data
+		shell.Speed, shell.Gravity, shell.MaxDistance = speed, gravity, maxDist
+		shell.Pen, shell.PenNear, shell.PenFar = pen, penNear, penFar
 	}
 	shellCD := int32(0)
 	if nation != "" {

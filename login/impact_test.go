@@ -58,7 +58,7 @@ func TestExplosionReachesTheArmour(t *testing.T) {
 	sh := shellSpec{Kind: "HIGH_EXPLOSIVE", KindIndex: 1, Damage: 300, DamageNear: 300, DamageFar: 300, ExplosionRadius: 2.5, Caliber: 105}
 
 	// Beside the tank, 1 m from its side: the blast reaches it.
-	damage, hit, ok := explosionAt(sh, [3]float32{2.0, 1.0, 0}, tgt)
+	damage, hit, ok := explosionAt(sh, [3]float32{2.0, 1.0, 0}, tgt.collision, tgt.pos, tgt.yaw)
 	if !ok {
 		t.Fatal("the blast did not reach the tank")
 	}
@@ -69,18 +69,18 @@ func TestExplosionReachesTheArmour(t *testing.T) {
 		t.Fatal("the blast reached no armour group")
 	}
 	// The damage falls off with the distance: nearer is stronger.
-	near, _, okNear := explosionAt(sh, [3]float32{1.2, 1.0, 0}, tgt)
+	near, _, okNear := explosionAt(sh, [3]float32{1.2, 1.0, 0}, tgt.collision, tgt.pos, tgt.yaw)
 	if !okNear || near <= damage {
 		t.Errorf("near damage %v, far damage %v: want the nearer one stronger", near, damage)
 	}
 	// Beyond the radius there is nothing.
-	if _, _, ok := explosionAt(sh, [3]float32{8, 1, 0}, tgt); ok {
+	if _, _, ok := explosionAt(sh, [3]float32{8, 1, 0}, tgt.collision, tgt.pos, tgt.yaw); ok {
 		t.Error("the blast reached a tank 8 m away with a 2.5 m radius")
 	}
 	// An AP shell has no blast at all.
 	ap := sh
 	ap.Kind, ap.KindIndex, ap.ExplosionRadius = "ARMOR_PIERCING", 2, 0
-	if _, _, ok := explosionAt(ap, [3]float32{2.0, 1.0, 0}, tgt); ok {
+	if _, _, ok := explosionAt(ap, [3]float32{2.0, 1.0, 0}, tgt.collision, tgt.pos, tgt.yaw); ok {
 		t.Error("an AP shell exploded")
 	}
 }
@@ -185,5 +185,70 @@ func TestRicochetTracerCarriesTheFlagAndRange(t *testing.T) {
 	binary.LittleEndian.PutUint32(want[:], math.Float32bits(500))
 	if !bytes.Contains(el, want[:]) {
 		t.Fatalf("tracer = % x, want the remaining range 500", el)
+	}
+}
+
+// TestDestructiblesWithin pins the blast's reach over the statics: the
+// destructible bodies near the point come back once each, the solid ones and
+// the far ones do not.
+func TestDestructiblesWithin(t *testing.T) {
+	scene := &staticScene{Grid: map[[2]int32][]int32{}}
+	add := func(instance uint32, body string, kind staticBodyKind, x float32) {
+		scene.Triangles = append(scene.Triangles, staticTriangle{
+			Vertices: [3][3]float32{{x, 0, 0}, {x + 1, 0, 0}, {x, 1, 0}},
+			Bounds:   [2][3]float32{{x, 0, 0}, {x + 1, 1, 0}},
+			Instance: instance,
+			Body:     body,
+			Kind:     kind,
+		})
+	}
+	add(1, "n_tree_1", bodyDestructible, 0)
+	add(1, "n_tree_1", bodyDestructible, 0) // the same body's second triangle
+	add(2, "n_wood0_1", bodyModule, 1)
+	add(3, "s_rock", bodySolid, 0)
+	add(4, "n_far", bodyDestructible, 40)
+	// The grid has to be rebuilt for the query to see the triangles.
+	scene.rebuildGrid()
+	got := scene.destructiblesWithin([3]float32{0, 0, 0}, 5)
+	if len(got) != 2 {
+		t.Fatalf("%d destructibles in reach, want 2 (the tree and the module): %+v", len(got), got)
+	}
+	names := map[string]bool{}
+	for _, tri := range got {
+		names[tri.Body] = true
+	}
+	if !names["n_tree_1"] || !names["n_wood0_1"] {
+		t.Fatalf("reached %v, want the tree and the module", names)
+	}
+	// A blast that reaches nothing.
+	if got := scene.destructiblesWithin([3]float32{100, 0, 100}, 0.1); len(got) != 0 {
+		t.Fatalf("%d destructibles in a blast 100 m away, want none", len(got))
+	}
+}
+
+// TestShellParametersSurviveTheMerge pins the shell's own def: its explosion
+// radius, normalization, ricochet angle and damage pair all reach the spec, not
+// just the kind and caliber.
+func TestShellParametersSurviveTheMerge(t *testing.T) {
+	gamePackages(t)
+	sp, ok := vehicleGunSpeeds(mustHex(t, "414a9d006500cd0022008200630000"))
+	if !ok {
+		t.Skip("no EBR 105 defs")
+	}
+	sh := sp.Dispersion.Shell
+	if sh.ExplosionRadius <= 0 {
+		t.Errorf("explosion radius = %v, want the shell's caliber²/5555", sh.ExplosionRadius)
+	}
+	if sh.NormalizationAngle <= 0 {
+		t.Errorf("normalization = %v, want the shell's own", sh.NormalizationAngle)
+	}
+	if !sh.HasRicochetAngle {
+		t.Error("the shell has no ricochet angle")
+	}
+	if sh.DamageNear <= 0 || sh.DamageFar <= 0 {
+		t.Errorf("damage pair = %v/%v, want the shell's own", sh.DamageNear, sh.DamageFar)
+	}
+	if sh.PenNear <= 0 {
+		t.Errorf("penetration = %v, want the gun's own pair", sh.PenNear)
 	}
 }
