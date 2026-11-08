@@ -132,6 +132,17 @@ var clientElementByID = func() map[uint8]clientElement {
 // ClientElementName is the element's name, or "".
 func ClientElementName(id uint8) string { return clientElementByID[id].Name }
 
+// ClientElementLength is the element's payload framing: the fixed payload size,
+// or -1 when the element carries a 16-bit length header. The second result is
+// false when the id is not in the client's table at all.
+func ClientElementLength(id uint8) (fixed int, ok bool) {
+	spec, ok := clientElementByID[id]
+	if !ok {
+		return 0, false
+	}
+	return spec.Length.Fixed, true
+}
+
 // EncodeElement frames one element: `[id][payload]` for a fixed one,
 // `[id][len u16][payload]` for a variable one.
 func EncodeElement(id uint8, body []byte) ([]byte, error) {

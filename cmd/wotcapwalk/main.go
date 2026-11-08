@@ -1,10 +1,11 @@
 // Command wotcapwalk walks a wotproxy capture's bulk stream element by element.
 //
-// The element sizes come from the reference's client element table
-// (reference/wg-toolkit/src/app/client/element.rs, `id` module): FIXED n for the
-// fixed-size elements, VAR 2 for the variable ones, and for an entity method
-// `[elem][entity-or-alias][len u16][args]`, which is how the captured server
-// frames them.
+// The element sizes come from the client's own server-to-client table
+// (`login/clientElements`), so an id this build does not know is reported
+// rather than guessed at. Entity methods are `[elem][entity-or-alias][len u16]
+// [args]`; entity properties carry no entity byte — the entity is whatever the
+// preceding selectEntity/selectPlayerEntity selected, and the length is the
+// property's declared one.
 package main
 
 import (
@@ -16,33 +17,37 @@ import (
 	"github.com/LockBlock-dev/wot/login"
 )
 
-// fixed sizes from the reference's client element table (wg-toolkit
-// wg-toolkit/src/app/client/element.rs, id module).
-var fixed = map[byte]int{
-	0x00: 4, 0x01: 4, 0x02: 7, 0x03: 4, 0x04: 1,
-	0x0D: 0, 0x0E: 0, 0x0F: 4,
-	0x10: 5, 0x11: 9,
-	0x13: 1, 0x14: 2, 0x15: 1, 0x16: 12, 0x17: 8, 0x18: 1, 0x19: 4, 0x1A: 0, 0x1B: 38,
-	0x1C: 29, 0x1D: 26, 0x1E: 25,
-	0x24: 0, 0x25: 0,
-	0x29: 15, 0x2A: 13, 0x2B: 12, 0x2C: 11, 0x2D: 12, 0x2E: 10, 0x2F: 9, 0x30: 8,
-	0x31: 9, 0x32: 7, 0x33: 6, 0x34: 5,
-	0x35: 12, 0x36: 10, 0x37: 9, 0x38: 8, 0x39: 9, 0x3A: 7, 0x3B: 6, 0x3C: 5,
-	0x3D: 9, 0x3E: 7, 0x3F: 6, 0x40: 5,
-}
-
-var variable = map[byte]bool{
-	0x05: true, 0x06: true, 0x07: true, 0x08: true, 0x09: true, 0x0A: true,
-	0x0B: true, 0x0C: true, 0x12: true,
-	0x1F: true, 0x20: true, 0x21: true, 0x22: true, 0x23: true, 0x26: true, 0x27: true, 0x28: true,
-	0x49: true, 0x4A: true, 0x4B: true,
-}
-
 func main() {
-	f, _ := os.Open(os.Args[1])
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "usage: wotcapwalk DUMP ADDR-SUBSTR KEYFILE [MAX]\n")
+		os.Exit(2)
+	}
+	max := 400
+	if len(os.Args) > 4 {
+		fmt.Sscanf(os.Args[4], "%d", &max)
+	}
+	f, err := os.Open(os.Args[1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	defer f.Close()
-	dd, _ := login.ParseWotproxyDump(f)
-	key, _ := login.ReadKeyFile(os.Args[3])
+	dd, err := login.ParseWotproxyDump(f)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	key, err := login.ReadKeyFile(os.Args[3])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	// Concatenate in arrival order. A capture also contains the
+	// retransmissions, so a walk past a resent frame is unreliable — the
+	// stream needs per-channel reassembly (the client rebinds its socket on
+	// battle entry, so one flow substring can span two channels) and that is
+	// not what this tool does. It is still enough to read the head of a
+	// stream and to census it.
 	var stream []byte
 	for _, d := range dd {
 		if d.Dir != "S>C" || !strings.Contains(d.Addr, os.Args[2]) || len(d.Data) != 1252 {
@@ -53,51 +58,63 @@ func main() {
 			continue
 		}
 		trl := login.ChannelTrailerLen(binary.LittleEndian.Uint16(clear[0:2]))
+		if len(clear) < 2+trl {
+			continue
+		}
 		stream = append(stream, clear[2:len(clear)-trl]...)
 	}
 	fmt.Printf("stream=%d\n", len(stream))
+	counts := map[uint8]int{}
 	i := 0
-	for n := 0; n < 400 && i < len(stream); n++ {
+	for n := 0; n < max && i < len(stream); n++ {
 		e := stream[i]
-		if sz, ok := fixed[e]; ok {
-			fmt.Printf("%3d @%5d elem=%02x FIXED %d\n", n, i, e, sz)
-			i += 1 + sz
-			continue
-		}
-		if variable[e] {
+		if fixed, ok := login.ClientElementLength(e); ok {
+			if fixed >= 0 {
+				fmt.Printf("%4d @%6d elem=%02x %-28s FIXED %d\n", n, i, e, login.ClientElementName(e), fixed)
+				counts[e]++
+				i += 1 + fixed
+				continue
+			}
 			if i+3 > len(stream) {
 				break
 			}
 			l := int(stream[i+1]) | int(stream[i+2])<<8
-			fmt.Printf("%3d @%5d elem=%02x VAR %d % x\n", n, i, e, l, stream[i+3:i+3+min(12, l)])
+			fmt.Printf("%4d @%6d elem=%02x %-28s VAR %d % x\n", n, i, e, login.ClientElementName(e), l, stream[i+3:i+3+min(12, l)])
+			counts[e]++
 			i += 3 + l
 			continue
 		}
 		if e >= 0x4E && e <= 0xA6 {
-			// [elem][entity-or-alias][len u16][args]
 			if i+4 > len(stream) {
 				break
 			}
 			l := int(stream[i+2]) | int(stream[i+3])<<8
-			fmt.Printf("%3d @%5d elem=%02x METHOD ent=%02x len=%5d % x\n", n, i, e, stream[i+1], l, stream[i+4:i+4+min(12, l)])
+			fmt.Printf("%4d @%6d elem=%02x METHOD ent=%02x len=%5d % x\n", n, i, e, stream[i+1], l, stream[i+4:i+4+min(12, l)])
+			counts[e]++
 			i += 4 + l
 			continue
 		}
 		if e >= 0xA7 && e <= 0xFE {
-			// EntityProperty carries no entity byte: the entity is whatever the
-			// preceding SelectEntity/SelectPlayerEntity selected (reference's
-			// EntityProperty::read_length), and its length is the property's
-			// declared one — Variable16 here.
 			if i+3 > len(stream) {
 				break
 			}
 			l := int(stream[i+1]) | int(stream[i+2])<<8
-			fmt.Printf("%3d @%5d elem=%02x PROPERTY len=%5d % x\n", n, i, e, l, stream[i+3:i+3+min(12, l)])
+			fmt.Printf("%4d @%6d elem=%02x PROPERTY len=%5d % x\n", n, i, e, l, stream[i+3:i+3+min(12, l)])
+			counts[e]++
 			i += 3 + l
 			continue
 		}
-		fmt.Printf("%3d @%5d elem=%02x UNKNOWN rest=% x\n", n, i, e, stream[i:i+min(16, len(stream)-i)])
-		return
+		fmt.Printf("%4d @%6d elem=%02x UNKNOWN rest=% x\n", n, i, e, stream[i:i+min(16, len(stream)-i)])
+		break
+	}
+	for id := 0; id < 256; id++ {
+		if c := counts[uint8(id)]; c > 0 {
+			name := login.ClientElementName(uint8(id))
+			if name == "" {
+				name = "?"
+			}
+			fmt.Printf("  %#02x %-28s x%d\n", id, name, c)
+		}
 	}
 }
 
