@@ -135,7 +135,7 @@ func TestSweepResendsUnacked(t *testing.T) {
 
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
 	st := &clientState{resendKey: "session-1", stage2Addr: addr}
-	s.resend.track(st.resendKey, addr.String(), 5, []byte("reliable-answer"))
+	s.resend.track(st.resendKey, addr.String(), 5, []byte("PREreliable-answer"))
 
 	tr := &fakeTransport{}
 	s.sweepStage2(tr, now)
@@ -148,8 +148,13 @@ func TestSweepResendsUnacked(t *testing.T) {
 	if len(tr.writes) != 1 {
 		t.Fatalf("%d writes after the timeout, want 1", len(tr.writes))
 	}
-	if string(tr.writes[0]) != "reliable-answer" {
-		t.Errorf("resent %q", tr.writes[0])
+	// The body is replayed verbatim; the 4-byte prefix is refreshed so the
+	// client's packet receiver does not deduplicate the replay.
+	if got := string(tr.writes[0][4:]); got != "eliable-answer" {
+		t.Errorf("resent body %q, want the original after a fresh prefix", got)
+	}
+	if string(tr.writes[0][:4]) == "PREr" {
+		t.Error("resent with the original prefix; the client drops a duplicate")
 	}
 	if tr.addrs[0].String() != addr.String() {
 		t.Errorf("resent to %s, want %s", tr.addrs[0], addr)

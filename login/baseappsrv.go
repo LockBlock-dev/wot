@@ -4229,7 +4229,20 @@ func (s *BaseAppServer) sweepStage2(conn Transport, now time.Time) {
 		s.mu.Lock()
 		st := s.byAddr[job.Addr]
 		s.mu.Unlock()
-		if _, err := connFor(st).WriteToUDP(job.Pkt, addr); err != nil {
+		// A replay must carry a FRESH 4-byte prefix: the client's packet
+		// receiver deduplicates on it, so a byte-identical resend is dropped
+		// on arrival and the gap it was meant to fill never closes — the
+		// client then stalls at that sequence forever while the server keeps
+		// replaying. The prefix rides outside the Blowfish, so replacing it
+		// leaves the encrypted body valid.
+		pkt := append([]byte(nil), job.Pkt...)
+		if len(pkt) >= 4 {
+			var prefix [4]byte
+			if _, err := rand.Read(prefix[:]); err == nil {
+				copy(pkt[:4], prefix[:])
+			}
+		}
+		if _, err := connFor(st).WriteToUDP(pkt, addr); err != nil {
 			continue
 		}
 		s.logf("stage2 %s: resent reliable seq %d (%dB)", addr, job.Seq, len(job.Pkt))
