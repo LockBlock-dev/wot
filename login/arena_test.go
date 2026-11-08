@@ -736,20 +736,21 @@ func TestFormationSpawnMatchesTheOfficialLayout(t *testing.T) {
 	}
 }
 
-// TestPrebattleLength pins the prebattle window: zero by default, because the
-// client cannot drive during it (`Avatar.moveVehicle` returns early unless the
-// period is BATTLE), and the environment can put a countdown back.
+// TestPrebattleLength pins the prebattle window to the capture's 3.0 s, the
+// official server's own: the client cannot drive during it (its
+// `Avatar.moveVehicle` returns early unless the period is BATTLE), which is
+// faithful. The environment overrides it for testing.
 func TestPrebattleLength(t *testing.T) {
 	t.Setenv("WOT_PREBATTLE_MS", "")
-	if got := prebattleLength(); got != 0 {
-		t.Errorf("default prebattle = %v, want 0", got)
-	}
-	t.Setenv("WOT_PREBATTLE_MS", "3000")
 	if got := prebattleLength(); got != 3*time.Second {
-		t.Errorf("WOT_PREBATTLE_MS=3000 gave %v, want 3s", got)
+		t.Errorf("default prebattle = %v, want the capture's 3s", got)
+	}
+	t.Setenv("WOT_PREBATTLE_MS", "500")
+	if got := prebattleLength(); got != 500*time.Millisecond {
+		t.Errorf("WOT_PREBATTLE_MS=500 gave %v, want 500ms", got)
 	}
 	t.Setenv("WOT_PREBATTLE_MS", "nonsense")
-	if got := prebattleLength(); got != 0 {
-		t.Errorf("a bad value gave %v, want the default 0", got)
+	if got := prebattleLength(); got != 3*time.Second {
+		t.Errorf("a bad value gave %v, want the default 3s", got)
 	}
 }

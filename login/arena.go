@@ -1637,23 +1637,22 @@ var arenaPeriodDelays = []time.Duration{
 	prebattleLength(),       // PREBATTLE
 }
 
-// prebattleLength is how long the PREBATTLE period runs before BATTLE.
+// prebattleLength is how long the PREBATTLE period runs before BATTLE: the
+// capture's own 3.0 s.
 //
 // The client cannot drive during it: `Avatar.moveVehicle` returns early unless
 // `isOnArena`, and that is only true once the period is BATTLE
-// (`__setIsOnArena(period == ARENA_PERIOD.BATTLE)`). The capture's own
-// prebattle is 3.0 s, which is a window where the battle view is up, the turret
-// turns, and the hull does nothing — the tank looks frozen until the period
-// flips. It defaults to zero here: the client is ready (it said so with
-// `setClientReady`) and the battle view is up, so there is nothing left to wait
-// for. `WOT_PREBATTLE_MS` restores a countdown.
+// (`__setIsOnArena(period == ARENA_PERIOD.BATTLE)`). That is the official
+// server's behaviour too — the battle view is up, the turret turns, and the
+// hull waits for the battle to start. `WOT_PREBATTLE_MS` overrides the length,
+// for testing only; the default is the capture's.
 func prebattleLength() time.Duration {
 	if v := os.Getenv("WOT_PREBATTLE_MS"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
 			return time.Duration(ms) * time.Millisecond
 		}
 	}
-	return 0
+	return 3000 * time.Millisecond
 }
 
 // arenaReadyTimeout is how long the entry waits for `Avatar.setClientReady`
