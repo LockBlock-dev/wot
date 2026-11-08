@@ -378,6 +378,11 @@ type clientState struct {
 	// ignored until the session binds its new one: the client closes that
 	// socket, and a straggler must not drag `stage2Addr` back to it.
 	leaveAddr string
+	// arenaTime is how long the battle has been running, in seconds, and ramAt
+	// is when each synthetic tank last rammed the player, so one contact is
+	// not counted twice.
+	arenaTime float64
+	ramAt     map[uint32]float64
 	// interest is the client's area of interest: the entities it holds and the
 	// ones it could hold. The arena's vehicles are created at the entry and
 	// entered as they come into range.
@@ -3032,6 +3037,11 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		dispFactor := st.dispFactor
 		st.gunYaw, st.gunPitch = cur, pitch
 		s.mu.Unlock()
+
+		// The synthetic tanks it drives into: a ram damages both, the lighter
+		// one more, and the client is shown the impact. It runs outside the
+		// hull's lock because it sends.
+		s.ramTick(conn, from, st, arenaID, float32(dt))
 
 		// A failed write is one lost update, not the end of the battle: the
 		// next tick carries the position again.
