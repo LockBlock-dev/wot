@@ -348,6 +348,16 @@ func main() {
 		// is how the arena and reconnect are exercised with one client.
 		arenas := server.NewArenas()
 		matchmaking.Matchmaker().TeamSize = *flagBattleTeam
+		// The map rotation: every battle gets a different map, walked in a
+		// shuffled order so consecutive battles differ and the order differs
+		// between server runs. Only the standard random-battle maps are in
+		// it; the special modes and the hangars are filtered out.
+		rotation := login.NewMapRotation(login.RandomBattleMaps())
+		if rotation.Len() > 0 {
+			fmt.Fprintf(os.Stderr, "wotserver: map rotation: %d maps\n", rotation.Len())
+		} else {
+			fmt.Fprintf(os.Stderr, "wotserver: map rotation: no maps found, every battle is on Karelia\n")
+		}
 		matchmaking.OnMatch = func(match *server.Match) {
 			players := make([]server.ArenaPlayer, 0, len(match.Entries))
 			for _, e := range match.Entries {
@@ -357,7 +367,18 @@ func main() {
 					VehicleCompDescr: e.VehicleType,
 				})
 			}
-			arena := arenas.Create(players, match.ArenaTypeID, match.QueueType, "spaces/01_karelia")
+			// The next map of the rotation, and its own arena type: a random
+			// battle queues with 0, and the arena type carries the map's
+			// geometry id.
+			mapPath := "spaces/01_karelia"
+			arenaTypeID := match.ArenaTypeID
+			if m, ok := rotation.Next(); ok {
+				mapPath = m.Geometry
+				if arenaTypeID == 0 {
+					arenaTypeID = m.ArenaTypeID
+				}
+			}
+			arena := arenas.Create(players, arenaTypeID, match.QueueType, mapPath)
 			fmt.Fprintf(os.Stderr, "wotserver: arena %d formed from match %d (%d players, %s)\n",
 				arena.ID, match.ID, len(players), arena.Map)
 			for _, p := range players {
