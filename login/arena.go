@@ -678,11 +678,13 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		st.interest.add(vehicle.ID, spawn, true)
 	}
 	s.mu.Unlock()
-	// Control authority over the player's own tank. The captured server never
-	// sends this, but without it this client's vehicle physics is never
-	// stepped: the simulation callbacks never fire, `movementSignals` stays 0
-	// while driving, and the track scroll and engine RPM stay pinned. It is
-	// behind a switch because it is traffic the official server does not send.
+	// Control authority over the player's own tank. Without it the client's
+	// vehicle physics is never stepped: the simulation callbacks never fire,
+	// `movementSignals` stays 0 while driving, the track scroll and engine RPM
+	// stay pinned, and `Vehicle.speedInfo` stays zero — which is what the
+	// aiming circle's own dispersion model reads, so the circle never grew
+	// while driving. The reference's proxy decodes `controlEntity` in the
+	// server-to-client direction, so the real server sends it.
 	if controlEntityOn {
 		if ctl := EncodeControlEntity(vehicle.ID, true); len(ctl) > 0 {
 			if err := s.sendReliableEntity(conn, from, st, ctl, seq, cumul); err != nil {

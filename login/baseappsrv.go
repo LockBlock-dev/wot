@@ -2688,7 +2688,14 @@ var noGunMarker = os.Getenv("WOT_NO_MARKER") != ""
 var selfAliasOff = os.Getenv("WOT_SELF_ALIAS_OFF") != ""
 
 // controlEntityOn sends `controlEntity(vehicle, true)` at the arena entry.
-var controlEntityOn = os.Getenv("WOT_CONTROL_ENTITY") != ""
+//
+// It is ON by default: it is the message that makes the client step its own
+// vehicle physics, and without it the client's `speedInfo` stays zero — so the
+// aiming circle never grows while driving, the tracks do not scroll and the
+// engine RPM stays pinned. The reference's proxy decodes `controlEntity` in
+// the server-to-client direction, so the real server does send it.
+// `WOT_NO_CONTROL_ENTITY` turns it off.
+var controlEntityOn = os.Getenv("WOT_NO_CONTROL_ENTITY") == ""
 
 // vehiclePropsOn sends the Vehicle's `gunAnglesPacked` and `engineMode` as bare
 // property elements at the end of the tick.
