@@ -689,3 +689,49 @@ func TestLeaveArenaResetIsReliable(t *testing.T) {
 		t.Fatalf("reset app = % x, want resetEntities(false)", app)
 	}
 }
+
+// TestFormationSpawnMatchesTheOfficialLayout pins the team formation against
+// what a replay's initial creates show: a grid offset from the team's spawn
+// point toward the enemy, every tank facing the enemy, each standing on the
+// terrain.
+func TestFormationSpawnMatchesTheOfficialLayout(t *testing.T) {
+	base := [3]float32{-236.6, 0, 329.6}  // a team's spawn point
+	enemy := [3]float32{175.8, 0, -305.8} // the other team's
+	ground := func(x, z float32) (float32, bool) { return 10 + x*0.01, true }
+	const n = 15
+	seen := map[[2]int]bool{}
+	var sumX, sumZ float64
+	for i := 0; i < n; i++ {
+		sp := formationSpawn(base, enemy, i, n, ground)
+		// Every tank faces the enemy.
+		wantYaw := float32(math.Atan2(float64(enemy[0]-base[0]), float64(enemy[2]-base[2])))
+		if sp.yaw != wantYaw {
+			t.Errorf("tank %d yaw = %v, want the team's heading %v", i, sp.yaw, wantYaw)
+		}
+		// And stands on the terrain under it.
+		if gy, _ := ground(sp.pos[0], sp.pos[2]); sp.pos[1] != gy {
+			t.Errorf("tank %d y = %v, want the ground %v", i, sp.pos[1], gy)
+		}
+		// No two tanks share a slot.
+		key := [2]int{int(sp.pos[0] * 10), int(sp.pos[2] * 10)}
+		if seen[key] {
+			t.Errorf("tank %d shares a slot at %v", i, sp.pos)
+		}
+		seen[key] = true
+		sumX += float64(sp.pos[0])
+		sumZ += float64(sp.pos[2])
+	}
+	// The formation's centre is offset from the spawn point toward the enemy.
+	cx, cz := sumX/n, sumZ/n
+	dx, dz := cx-float64(base[0]), cz-float64(base[2])
+	dist := math.Hypot(dx, dz)
+	// A grid that does not fill its last rank shifts the centroid a little.
+	if math.Abs(dist-float64(spawnFormationOffset)) > 5 {
+		t.Errorf("formation centre is %.1f m from the spawn point, want %.0f", dist, float64(spawnFormationOffset))
+	}
+	// And it is toward the enemy, not away from it.
+	ex, ez := float64(enemy[0]-base[0]), float64(enemy[2]-base[2])
+	if dx*ex+dz*ez < 0 {
+		t.Errorf("the formation is offset away from the enemy (%.1f, %.1f)", dx, dz)
+	}
+}

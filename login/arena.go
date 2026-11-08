@@ -757,7 +757,9 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// the damage target, so its position and health are kept on the session.
 	if h.Dummy != nil {
 		dummyID := h.VehicleID + 1
-		dv, infoValue, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, 1, seq, cumul)
+		// The dummy is the enemy team's first tank: it faces the player's side.
+		dummyYaw := float32(math.Atan2(float64(spawn[0]-enemy[0]), float64(spawn[2]-enemy[2])))
+		dv, infoValue, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, dummyYaw, 1, seq, cumul)
 		if err != nil {
 			s.logf("stage2 %s: arena %d: no dummy Vehicle (%v)", from, h.ArenaID, err)
 		} else {
@@ -796,18 +798,20 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		for i := range h.Bots {
 			doc := h.Bots[i]
 			id := h.VehicleID + 2 + uint32(i)
-			base, slot := enemy, 0
+			base, other, slot := enemy, spawn, 0
 			if doc.Team == h.Player.Team {
-				base = spawn
+				base, other = spawn, enemy
 				allySlot++
 				slot = allySlot
 			} else {
 				enemySlot++
 				slot = enemySlot
 			}
-			pos := botSpawn(base, i, len(h.Bots))
-			vehicles = append(vehicles, vehicleInfoValue(infoType, doc, id, slot, pos[0], pos[2]))
-			st.pendingBots = append(st.pendingBots, pendingBot{doc: doc, id: id, pos: pos, index: slot})
+			sp := formationSpawn(base, other, i, len(h.Bots), func(x, z float32) (float32, bool) {
+				return GroundHeight(h.Map, x, z, base[1]), true
+			})
+			vehicles = append(vehicles, vehicleInfoValue(infoType, doc, id, slot, sp.pos[0], sp.pos[2]))
+			st.pendingBots = append(st.pendingBots, pendingBot{doc: doc, id: id, pos: sp.pos, yaw: sp.yaw, index: slot})
 		}
 		s.mu.Unlock()
 		s.logf("stage2 %s: arena %d: %d bots queued (team 1 %d, team 2 %d)", from, h.ArenaID,
@@ -2002,6 +2006,7 @@ type pendingBot struct {
 	doc   ArenaPlayerDoc
 	id    uint32
 	pos   [3]float32
+	yaw   float32
 	index int
 }
 
@@ -2032,7 +2037,7 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 	}
 	created := 0
 	for _, b := range batch {
-		e, _, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.index, seq, cumul)
+		e, _, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.yaw, b.index, seq, cumul)
 		if err != nil {
 			s.logf("arena %d: bot %s: %v", h.ArenaID, b.doc.Name, err)
 			continue
@@ -2048,6 +2053,7 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 			entity:    e,
 			id:        b.id,
 			pos:       b.pos,
+			yaw:       b.yaw,
 			collision: targetCollision(b.doc.VehicleCompDescr),
 			health:    health,
 			maxHealth: health,
@@ -2073,7 +2079,7 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 // It sends four reliable packets on seq..seq+3, in the same order the player's
 // own tank uses (create, select, the cell-property run, enterAoI), and returns
 // the entity and the row the caller appends to the arena's vehicle list.
-func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, infoIndex int, seq, cumul uint32) (*Entity, entdef.Value, error) {
+func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, yaw float32, infoIndex int, seq, cumul uint32) (*Entity, entdef.Value, error) {
 	infoType := entdef.Alias("VEHICLES_INFO")
 	if infoType == nil {
 		return nil, entdef.Value{}, fmt.Errorf("no VEHICLES_INFO type")
@@ -2093,7 +2099,7 @@ func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr
 	if err != nil {
 		return nil, entdef.Value{}, err
 	}
-	create, err := EncodeCreateEntity(e.ID, uint16(e.Type.TypeID), VolatilePackerType, pos, 0, 0, 0, props)
+	create, err := EncodeCreateEntity(e.ID, uint16(e.Type.TypeID), VolatilePackerType, pos, yaw, 0, 0, props)
 	if err != nil {
 		return nil, entdef.Value{}, err
 	}
@@ -2137,26 +2143,64 @@ func countTeam(bots []ArenaPlayerDoc, team uint8) int {
 	return n
 }
 
-// botSpawn spreads the i-th of n synthetic tanks around a team's spawn point.
+// How a team is laid out at the start of a battle.
 //
-// The arena defs carry ONE spawn per team, so a fifteen-tank side has to be
-// laid out here: a ring of up to six around the point, then wider rings, so
-// they neither overlap nor stand in a line. The y is the caller's ground
-// height; the ring only moves x and z.
-func botSpawn(base [3]float32, i, n int) [3]float32 {
+// The arena defs carry ONE spawn point per team, so the fifteen tanks of a
+// side have to be placed here. The official server lays them out in a grid
+// offset from that point toward the enemy, every tank facing the enemy, and
+// takes each tank's height from the terrain under it — measured on a replay's
+// initial creates: fifteen tanks in a 4x4 grid about 60 m from their spawn
+// point, every one within 3 degrees of the same heading, each y following the
+// ground.
+const (
+	// spawnFormationOffset is how far toward the enemy a team's formation sits
+	// from its spawn point, in metres.
+	spawnFormationOffset float32 = 60
+	// spawnAcross and spawnAlong are the grid's spacings: side by side across
+	// the facing, and one rank behind another along it, in metres.
+	spawnAcross float32 = 9
+	spawnAlong  float32 = 13
+)
+
+// teamSpawn is one tank's place in its team's formation.
+type teamSpawn struct {
+	pos [3]float32
+	// yaw is the team's heading: every tank of a side faces the enemy.
+	yaw float32
+}
+
+// formationSpawn places the i-th of n tanks of a team whose spawn point is
+// `base`, facing the enemy at `enemy`. ground gives the terrain's height at a
+// point, so each tank stands on it.
+func formationSpawn(base, enemy [3]float32, i, n int, ground func(x, z float32) (float32, bool)) teamSpawn {
 	if n <= 0 {
-		return base
+		return teamSpawn{pos: base}
 	}
-	const perRing = 6
-	ring := i / perRing
-	slot := i % perRing
-	radius := 6.0 + float64(ring)*5.0
-	angle := 2 * math.Pi * (float64(slot) + 0.5*float64(ring%2)) / perRing
-	return [3]float32{
-		base[0] + float32(math.Cos(angle)*radius),
-		base[1],
-		base[2] + float32(math.Sin(angle)*radius),
+	yaw := float32(math.Atan2(float64(enemy[0]-base[0]), float64(enemy[2]-base[2])))
+	fx, fz := sin32(yaw), cos32(yaw)
+	rx, rz := cos32(yaw), -sin32(yaw)
+	// As square a grid as the roster allows, filled across the facing first.
+	cols := int(math.Ceil(math.Sqrt(float64(n))))
+	if cols < 1 {
+		cols = 1
 	}
+	rows := (n + cols - 1) / cols
+	col := i % cols
+	row := i / cols
+	across := (float32(col) - float32(cols-1)/2) * spawnAcross
+	along := (float32(row) - float32(rows-1)/2) * spawnAlong
+	// The formation's centre sits toward the enemy from the spawn point.
+	cx := base[0] + fx*spawnFormationOffset
+	cz := base[2] + fz*spawnFormationOffset
+	x := cx + rx*across + fx*along
+	z := cz + rz*across + fz*along
+	y := base[1]
+	if ground != nil {
+		if gy, ok := ground(x, z); ok {
+			y = gy
+		}
+	}
+	return teamSpawn{pos: [3]float32{x, y, z}, yaw: yaw}
 }
 
 // arenaVehicleIDs is every vehicle entity id in the battle: the player's own,
