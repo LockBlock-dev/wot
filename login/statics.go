@@ -52,6 +52,17 @@ type staticTriangle struct {
 	Normal [3]float32
 	// Instance is which placed model it is of.
 	Instance uint32
+	// Model is the placed model's path, Body its collision body's name.
+	Model string
+	Body  string
+	// Kind is what the body is to a shell, MatKind its material kind when it
+	// is a structure module.
+	Kind    staticBodyKind
+	MatKind uint8
+	// Chunk is the chunk the model stands in, DestrIndex its index in that
+	// chunk's destructible list (the client's `destrID`).
+	Chunk      uint16
+	DestrIndex uint16
 }
 
 // staticScene is a space's static triangles, indexed in a ground-plane grid.
@@ -95,6 +106,10 @@ func loadStaticScene(mapPkg, spaceDir string, visibilityMask uint32) (*staticSce
 	}
 	cache := map[uint32]loaded{}
 	scene := &staticScene{Grid: map[[2]int32][]int32{}}
+	// The client names a destructible by its index in its CHUNK's list, so the
+	// instances are counted per chunk in the order the space places them.
+	table := Destructibles()
+	chunkCounters := map[uint16]uint16{}
 	for index, inst := range instances {
 		if inst.VisibilityMask&visibilityMask == 0 {
 			continue
@@ -122,16 +137,38 @@ func loadStaticScene(mapPkg, spaceDir string, visibilityMask uint32) (*staticSce
 		if entry.err != nil || entry.model == nil {
 			continue
 		}
+		modelPath := stringsTable[model.Havok]
+		// The chunk the model stands in, and its index in that chunk's
+		// destructible list when it is one.
+		origin := transformPoint(inst.Transform, [3]float32{})
+		chunk := chunkIDAt(origin[0], origin[2])
+		destrIndex := uint16(0)
+		if table != nil {
+			if d := table.desc(modelPath); d != nil {
+				destrIndex = chunkCounters[chunk]
+				chunkCounters[chunk] = destrIndex + 1
+			}
+		}
 		for _, body := range entry.model.Bodies {
+			kind, matKind := bodySolid, uint8(0)
+			if table != nil {
+				kind, matKind = table.bodyKindOf(modelPath, body.Name)
+			}
 			for _, tri := range body.Triangles {
 				var world [3][3]float32
 				for k := 0; k < 3; k++ {
 					world[k] = transformPoint(inst.Transform, tri[k])
 				}
 				st := staticTriangle{
-					Vertices: world,
-					Normal:   triangleNormal(world),
-					Instance: uint32(index),
+					Vertices:   world,
+					Normal:     triangleNormal(world),
+					Instance:   uint32(index),
+					Model:      modelPath,
+					Body:       body.Name,
+					Kind:       kind,
+					MatKind:    matKind,
+					Chunk:      chunk,
+					DestrIndex: destrIndex,
 				}
 				for k := 0; k < 3; k++ {
 					st.Bounds[0][k] = min32(min32(world[0][k], world[1][k]), world[2][k])
@@ -156,6 +193,86 @@ func loadStaticScene(mapPkg, spaceDir string, visibilityMask uint32) (*staticSce
 		}
 	}
 	return scene, nil
+}
+
+// chunkIDAt is the chunk a world point stands in, as the client's
+// `chunkIDFromChunkPosition` computes it: 100 m chunks, biased by 127.
+func chunkIDAt(x, z float32) uint16 {
+	gx := int(math.Floor(float64(x) / 100))
+	gz := int(math.Floor(float64(z) / 100))
+	return uint16((gx+127)<<8 | (gz + 127))
+}
+
+// chunkCenter is the world position of a chunk's centre, which is where its
+// `AreaDestructibles` entity stands (the client reads the chunk back from the
+// entity's position).
+func chunkCenter(chunk uint16) [3]float32 {
+	gx := int(chunk>>8) - 127
+	gz := int(chunk&0xFF) - 127
+	return [3]float32{float32(gx)*100 + 50, 0, float32(gz)*100 + 50}
+}
+
+// segmentHit is the nearest static triangle a segment meets, and the fraction
+// along it.
+func (s *staticScene) segmentHit(from, to [3]float32) (staticTriangle, float32, bool) {
+	if s == nil {
+		return staticTriangle{}, 0, false
+	}
+	min := [3]float32{min32(from[0], to[0]), min32(from[1], to[1]), min32(from[2], to[2])}
+	max := [3]float32{max32(from[0], to[0]), max32(from[1], to[1]), max32(from[2], to[2])}
+	delta := [3]float32{to[0] - from[0], to[1] - from[1], to[2] - from[2]}
+	best := float32(-1)
+	var bestTri staticTriangle
+	for _, t := range s.trianglesIn(min, max) {
+		f, _, ok := segmentTriangle(from, delta, t.Vertices)
+		if !ok {
+			continue
+		}
+		if best < 0 || f < best {
+			best, bestTri = f, *t
+		}
+	}
+	if best < 0 {
+		return staticTriangle{}, 0, false
+	}
+	return bestTri, best, true
+}
+
+// destroy removes every triangle of one placed model's body, so later shells
+// and hulls pass through what broke. It reports whether anything was removed.
+func (s *staticScene) destroy(instance uint32, body string) bool {
+	if s == nil {
+		return false
+	}
+	removed := false
+	keep := s.Triangles[:0]
+	for _, t := range s.Triangles {
+		if t.Instance == instance && t.Body == body {
+			removed = true
+			continue
+		}
+		keep = append(keep, t)
+	}
+	if !removed {
+		return false
+	}
+	s.Triangles = keep
+	// The grid indexes the triangles by position, so it has to be rebuilt.
+	s.Grid = map[[2]int32][]int32{}
+	for i := range s.Triangles {
+		t := &s.Triangles[i]
+		x0 := int32(math.Floor(float64(t.Bounds[0][0] / staticsCell)))
+		x1 := int32(math.Floor(float64(t.Bounds[1][0] / staticsCell)))
+		z0 := int32(math.Floor(float64(t.Bounds[0][2] / staticsCell)))
+		z1 := int32(math.Floor(float64(t.Bounds[1][2] / staticsCell)))
+		for x := x0; x <= x1; x++ {
+			for z := z0; z <= z1; z++ {
+				key := [2]int32{x, z}
+				s.Grid[key] = append(s.Grid[key], int32(i))
+			}
+		}
+	}
+	return true
 }
 
 // trianglesIn returns the triangles overlapping a box.

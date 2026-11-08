@@ -378,6 +378,12 @@ type clientState struct {
 	// ignored until the session binds its new one: the client closes that
 	// socket, and a straggler must not drag `stage2Addr` back to it.
 	leaveAddr string
+	// statics is the battle's static scene (buildings, rocks, trees): the hull
+	// is pushed out of it and a shell stops on it, or destroys it.
+	statics *staticScene
+	// destrChunks is one `AreaDestructibles` entity per chunk that has lost a
+	// destructible, with the lists already sent.
+	destrChunks map[uint16]*destructibleChunk
 	// targets are the synthetic tanks the player's shells can hit: the dummy
 	// first, then the bots. Each carries its own entity, spawn, health,
 	// shell-hole list and module state, so a shot resolves against whichever
@@ -2866,6 +2872,7 @@ func stepTurret(cur, target, step float64) float64 {
 func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, spec gunSpec, terrain *Terrain, arenaDef *ArenaDef, statics *staticScene) {
 	s.mu.Lock()
 	st.terrain = terrain
+	st.statics = statics
 	s.mu.Unlock()
 	// `SERVER_TICK_LENGTH` is 0.1 in the client's own `common/constants.pyc`
 	// and the reference ticks at 100 ms, but the client draws the tank at

@@ -453,8 +453,21 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	// distance is what the penetration falls off with.
 	s.mu.Lock()
 	terrain := st.terrain
+	statics := st.statics
 	s.mu.Unlock()
-	landing := flyShell(sh, marker.Position, v, terrain, targets)
+	// A destructible the shell breaks is destroyed on the spot and the shell
+	// goes on through it; anything else stops it.
+	onStatic := func(tri staticTriangle) bool {
+		switch tri.Kind {
+		case bodyDestructible, bodyModule:
+			if err := s.destroyStatic(conn, from, st, arenaID, tri); err != nil {
+				s.logf("arena %d: destructible: %v", arenaID, err)
+			}
+			return true
+		}
+		return false
+	}
+	landing := flyShell(sh, marker.Position, v, terrain, targets, statics, onStatic)
 	// The aim and the muzzle are the two numbers that decide whether a shot at
 	// a top surface lands or sails over: the elevation is measured from the
 	// gun pivot above the CHASSIS origin, and the pitch is clamped to the
@@ -463,15 +476,15 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		arenaID, sh.Name, aimWorld, yaw, pitch, marker.Position)
 	if landing.Kind != landingVehicle {
 		// A miss: the client drew its own shot, so only the end and, for the
-		// ground, the explosion go out. `explodeProjectile`'s shot id is
-		// flagged unknown (`| 0x40000000`) so the client shows it from these
-		// arguments alone.
+		// ground or a wall, the explosion go out. `explodeProjectile`'s shot
+		// id is flagged unknown (`| 0x40000000`) so the client shows it from
+		// these arguments alone.
 		var app []byte
 		app = append(app, EncodeSelectPlayerEntity()...)
 		if el, err := stopTracerElement(avatar, shotID, landing.Point); err == nil {
 			app = append(app, el...)
 		}
-		if landing.Kind == landingTerrain {
+		if landing.Kind == landingTerrain || landing.Kind == landingStatic {
 			if el, err := explodeProjectileElement(avatar, uint32(shotID)|0x40000000, sh, landing); err == nil {
 				app = append(app, el...)
 			}
@@ -485,6 +498,9 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 				s.logf("arena %d: miss: %v", arenaID, err)
 			} else if landing.Kind == landingTerrain {
 				s.logf("arena %d: shot %s landed on the ground at %v after %.0f m",
+					arenaID, sh.Name, landing.Point, landing.Distance)
+			} else if landing.Kind == landingStatic {
+				s.logf("arena %d: shot %s stopped on a static model at %v after %.0f m",
 					arenaID, sh.Name, landing.Point, landing.Distance)
 			} else {
 				s.logf("arena %d: shot %s flew its %.0f m and landed at %v",

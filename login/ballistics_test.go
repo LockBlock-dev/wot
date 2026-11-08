@@ -32,7 +32,7 @@ func TestShellFliesAndHitsTheDummy(t *testing.T) {
 	start := [3]float32{0, 1.6, 100}
 	dir := [3]float32{0, 0, -1}
 	vel := [3]float32{dir[0] * float32(sh.Speed), dir[1] * float32(sh.Speed), dir[2] * float32(sh.Speed)}
-	landing := flyShell(sh, start, vel, flatTerrain(), targets)
+	landing := flyShell(sh, start, vel, flatTerrain(), targets, nil, nil)
 	if landing.Kind != landingVehicle {
 		t.Fatalf("landing kind %d, want a vehicle hit", landing.Kind)
 	}
@@ -57,7 +57,7 @@ func TestShellFallsShortOfTheDummy(t *testing.T) {
 	// far more than 20 m.
 	start := [3]float32{0, 20, 300}
 	vel := [3]float32{0, 0, -float32(sh.Speed)}
-	landing := flyShell(sh, start, vel, flatTerrain(), targets)
+	landing := flyShell(sh, start, vel, flatTerrain(), targets, nil, nil)
 	if landing.Kind != landingTerrain {
 		t.Fatalf("landing kind %d, want the ground", landing.Kind)
 	}
@@ -79,7 +79,7 @@ func TestShellStopsAtItsMaxDistance(t *testing.T) {
 	}
 	start := [3]float32{0, 2000, 0}
 	vel := [3]float32{0, 0, -800}
-	landing := flyShell(sh, start, vel, nil, nil)
+	landing := flyShell(sh, start, vel, nil, nil, nil, nil)
 	if landing.Kind != landingRange {
 		t.Fatalf("landing kind %d, want range", landing.Kind)
 	}

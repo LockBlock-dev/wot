@@ -55,6 +55,9 @@ const (
 	landingVehicle uint8 = 0
 	landingTerrain uint8 = 1
 	landingRange   uint8 = 2
+	// landingStatic is a space model the shell stopped on: a wall, a rock, or
+	// a destructible it did not break through.
+	landingStatic uint8 = 3
 )
 
 // traceTargets finds the nearest synthetic tank a segment meets, and where on
@@ -82,8 +85,11 @@ func traceTargets(targets []*botTarget, from, to [3]float32) (int, vehicleHit, b
 
 // flyShell flies a shell and returns where it lands.
 //
-// terrain may be nil (no ground), and boxes are the vehicles it may meet.
-func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, targets []*botTarget) shellLanding {
+// terrain may be nil (no ground), targets are the vehicles it may meet, and
+// statics the space's models. A destructible static the shell breaks is
+// reported through onStatic, which returns whether the shell goes on through
+// it (a fence, a tree) or stops there.
+func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, targets []*botTarget, statics *staticScene, onStatic func(staticTriangle) bool) shellLanding {
 	pos, vel := start, velocity
 	time := float32(0)
 	gravity := float32(sh.Gravity)
@@ -101,6 +107,27 @@ func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, target
 			pos[2] + vel[2]*flightStep,
 		}
 		nextVel := [3]float32{vel[0], vel[1] - gravity*flightStep, vel[2]}
+		// The statics first: a wall in front of a tank is what the shell meets.
+		if statics != nil {
+			if tri, t, ok := statics.segmentHit(pos, next); ok {
+				point := lerp3(pos, next, t)
+				if onStatic != nil && onStatic(tri) {
+					// The shell broke it and goes on from there.
+					pos = [3]float32{point[0] + vel[0]*0.002, point[1] + vel[1]*0.002, point[2] + vel[2]*0.002}
+					continue
+				}
+				return shellLanding{
+					Kind:     landingStatic,
+					Point:    point,
+					Velocity: lerp3(vel, nextVel, t),
+					Distance: float32(math.Sqrt(float64(
+						(point[0]-start[0])*(point[0]-start[0]) +
+							(point[1]-start[1])*(point[1]-start[1]) +
+							(point[2]-start[2])*(point[2]-start[2])))),
+					Time: time + flightStep*t,
+				}
+			}
+		}
 		if idx, hit, ok := traceTargets(targets, pos, next); ok {
 			fraction := hit.Distance
 			step := float32(math.Sqrt(float64(
