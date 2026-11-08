@@ -478,8 +478,8 @@ func (s *BaseAppServer) enterArenaEntities(conn Transport, from *net.UDPAddr, st
 		return seq, err
 	}
 	seq++
-	s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, Avatar, arena %d)",
-		from, len(avatar), st.entityID, h.ArenaID)
+	s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, element id %d, Avatar, arena %d)",
+		from, len(avatar), st.entityID, entity.ID, h.ArenaID)
 	// The rest waits for the client's next datagram: it rebinds its UDP
 	// socket when the battle app is created, so anything sent now goes to
 	// the port it is tearing down.
