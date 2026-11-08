@@ -816,3 +816,84 @@ func TestArenaEntityIDsArePastTheVehicles(t *testing.T) {
 		t.Errorf("the AvatarInfo and the TeamInfo share id %d", infoID)
 	}
 }
+
+// TestArenaEntrySequenceHasNoHoles pins the one invariant the reliable channel
+// cannot survive being broken: every sequence number the entry hands out must
+// belong to a packet that actually went on the wire.
+//
+// The measured run lost sequence 211 to a phantom fourth packet per synthetic
+// vehicle — create, select and the property run are the entry's, while the AoI
+// entry belongs to the interest. The client's cumulative ack stopped at 210, so
+// the AvatarInfo, the TeamInfo and the period, everything behind the hole, sat
+// in its reorder buffer for the whole battle: a roster and no tanks.
+func TestArenaEntrySequenceHasNoHoles(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	st := &clientState{accountID: 2, name: "admin", blockKey: "0123456789abcdef", entityID: 0x1234}
+	h := &ArenaHandoff{
+		ArenaID: 9, SpaceID: 9, ArenaTypeID: 1, Map: "spaces/01_karelia",
+		Player:    ArenaPlayerDoc{AccountID: 2, Name: "admin", Team: 1, VehicleCompDescr: []byte{0x51, 0x64}},
+		VehicleID: 0x2222,
+		Dummy:     &ArenaPlayerDoc{AccountID: 0, Name: "Dummy", Team: 2, VehicleCompDescr: []byte{0x51, 0xd2}},
+		Bots: []ArenaPlayerDoc{
+			{AccountID: 3, Name: "Bot1", Team: 1, VehicleCompDescr: []byte{0x51, 0x64}},
+			{AccountID: 4, Name: "Bot2", Team: 2, VehicleCompDescr: []byte{0x51, 0xd2}},
+		},
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40000}
+	const firstSeq = 10
+	tr := &fakeTransport{}
+	st.stage2Addr = addr
+	st.resendKey = "test"
+	// enterArena is what records the handoff on the session; the sweep reads it.
+	st.arena = h
+	seq, err := s.enterArenaEntities(tr, addr, st, h, firstSeq, 10)
+	if err != nil {
+		t.Fatalf("enterArenaEntities: %v", err)
+	}
+	seq, err = s.enterArenaSpace(tr, addr, st, h, seq, 10)
+	if err != nil {
+		t.Fatalf("enterArenaSpace: %v", err)
+	}
+	// The bots are created by the sweep, not the entry, and the sweep is gated
+	// on the client's ack. There is no client here, so acknowledge the entry
+	// the way one would. The caller is what publishes the entry's final
+	// sequence to the session, so do that here too.
+	s.resend.ack(st.resendKey, seq)
+	st.postSeq = seq
+	s.spawnPendingBots(tr, st)
+	if got := len(st.pendingBots); got != 0 {
+		t.Fatalf("%d bots still queued, want 0 (the sweep takes them all)", got)
+	}
+	next := st.postSeq
+
+	// Every reliable, on-channel packet the entry put on the wire, by the
+	// sequence number in its trailer. Fragment frames carry the same seq in
+	// the same place (the 8 bytes before the end).
+	sent := map[uint32]bool{}
+	for _, w := range tr.writes {
+		clear, err := DecryptChannel(st.blockKey, w)
+		if err != nil {
+			t.Fatalf("DecryptChannel: %v", err)
+		}
+		if len(clear) < 8 {
+			t.Fatalf("packet of %d B", len(clear))
+		}
+		flags := uint16(clear[0]) | uint16(clear[1])<<8
+		if flags&chFlagReliable == 0 || flags&chFlagOnChannel == 0 {
+			continue // the settings chain and the unreliable ticks
+		}
+		sent[binary.LittleEndian.Uint32(clear[len(clear)-8:])] = true
+	}
+	for want := uint32(firstSeq); want < next; want++ {
+		if !sent[want] {
+			t.Fatalf("sequence %d was allocated but never sent: the client's ack "+
+				"stops in front of it and everything behind it never arrives "+
+				"(allocated %d..%d, sent %d packets)", want, firstSeq, next-1, len(sent))
+		}
+	}
+	for seq := range sent {
+		if seq < firstSeq || seq >= next {
+			t.Fatalf("sequence %d was sent but is outside the entry's %d..%d", seq, firstSeq, next-1)
+		}
+	}
+}

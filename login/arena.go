@@ -797,11 +797,17 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		dummyID := h.VehicleID + 1
 		// The dummy is the enemy team's first tank: it faces the player's side.
 		dummyYaw := float32(math.Atan2(float64(spawn[0]-enemy[0]), float64(spawn[2]-enemy[2])))
-		dv, infoValue, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, dummyYaw, 1, seq, cumul)
+		dv, infoValue, dummySent, err := s.createSyntheticVehicle(conn, from, st, h, *h.Dummy, dummyID, enemy, dummyYaw, 1, seq, cumul)
 		if err != nil {
 			s.logf("stage2 %s: arena %d: no dummy Vehicle (%v)", from, h.ArenaID, err)
 		} else {
-			seq = nextSeqAfter(seq, 4)
+			// Advance by what actually went out. The AoI entry is the
+			// interest's call, so this is three packets, not four: advancing
+			// by four burned sequence 211 on the measured run — a number that
+			// was never on the wire, so the client's cumulative ack stopped at
+			// 210 and everything behind the hole (the AvatarInfo, the team,
+			// the period) sat in its reorder buffer for the whole battle.
+			seq = nextSeqAfter(seq, dummySent)
 			health := 0
 			if hv, ok := dv.Props["health"]; ok {
 				health = int(hv.Int)
@@ -916,9 +922,28 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		from, info.ID, len(icreate), len(infoApp), len(vehicles), icreate)
 	// Everything is created; what the client HOLDS is the interest's call.
 	// The tanks around the player enter now, the rest as it drives.
+	//
+	// refreshInterest allocates its own sequence numbers from st.postSeq, but
+	// this function has been counting on a local `seq` since the Avatar, and
+	// the session counter only caught up when the entry returned. Left
+	// unsynced, the refresh re-sent a sequence that was already on the wire
+	// (measured: a second 200, which the client drops as a duplicate, so the
+	// AvatarInfo's enterAoI never arrived) and the entry then carried on
+	// underneath the refresh's numbers. Hand it the entry's position, then
+	// take back what it used.
+	s.mu.Lock()
+	if seq > st.postSeq {
+		st.postSeq = seq
+	}
+	s.mu.Unlock()
 	if err := s.refreshInterest(conn, from, st); err != nil {
 		s.logf("stage2 %s: arena %d: interest: %v", from, h.ArenaID, err)
 	}
+	s.mu.Lock()
+	if st.postSeq > seq {
+		seq = st.postSeq
+	}
+	s.mu.Unlock()
 
 	// The player's own tank gets its `OwnVehicle` component: the client only
 	// turns its turret once it knows how fast it can, and it reads the
@@ -2092,26 +2117,36 @@ type pendingBot struct {
 	index int
 }
 
-// botsPerSweep is how many synthetic vehicles one sweep creates. Four packets
+// botsPerSweep is how many synthetic vehicles one sweep creates. Three packets
 // each, every 200 ms, keeps the client's reliable window clear.
 const botsPerSweep = 4
 
 // spawnPendingBots creates up to `botsPerSweep` of a session's queued synthetic
 // vehicles. It returns the number created.
 func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
+	// Never run ahead of the client's cumulative ack by more than its receive
+	// window. The bots are three packets each (create, select, the property
+	// run), and creating them as fast as the tick allows outran the client's
+	// acks: it buffered the later sequences, the earliest ones fell outside its
+	// window and were dropped on arrival, and the ack then stalled on a hole
+	// the server could never fill — the battle with a roster and no tanks.
+	//
+	// The measure is the resend queue's outstanding count, NOT
+	// `postSeq - postCumul`: postCumul is the CLIENT's own reliable-out counter
+	// (the value our packets carry as their cumul field), so that difference
+	// grows with the client's traffic and never shrinks with its acks. Measured,
+	// it read 218 at the battle entry and this guard then refused every sweep
+	// for the whole battle — a roster with no tanks, again.
+	const sendWindow = 16
 	s.mu.Lock()
-	if len(st.pendingBots) == 0 || st.arena == nil {
-		s.mu.Unlock()
+	resendKey := st.resendKey
+	s.mu.Unlock()
+	inFlight := s.resend.outstanding(resendKey)
+	if inFlight >= sendWindow {
 		return 0
 	}
-	// Never run ahead of the client's cumulative ack by more than its receive
-	// window. The bots are four packets each, and creating them as fast as the
-	// tick allows outran the client's acks: it buffered the later sequences,
-	// the earliest ones fell outside its window and were dropped on arrival,
-	// and the ack then stalled on a hole the server could never fill — the
-	// battle with a roster and no tanks.
-	const sendWindow = 16
-	if st.postSeq-st.postCumul >= sendWindow {
+	s.mu.Lock()
+	if len(st.pendingBots) == 0 || st.arena == nil {
 		s.mu.Unlock()
 		return 0
 	}
@@ -2119,9 +2154,9 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 	if n > len(st.pendingBots) {
 		n = len(st.pendingBots)
 	}
-	// One bot is four packets; keep the sweep inside the window too.
-	if room := int(sendWindow - (st.postSeq - st.postCumul)); room < n*4 {
-		n = room / 4
+	// One bot is three packets; keep the sweep inside the window too.
+	if room := sendWindow - inFlight; room < n*3 {
+		n = room / 3
 	}
 	if n <= 0 {
 		s.mu.Unlock()
@@ -2138,9 +2173,13 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 	}
 	created := 0
 	for _, b := range batch {
-		e, _, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.yaw, b.index, seq, cumul)
+		e, _, botSent, err := s.createSyntheticVehicle(conn, addr, st, h, b.doc, b.id, b.pos, b.yaw, b.index, seq, cumul)
 		if err != nil {
 			s.logf("arena %d: bot %s: %v", h.ArenaID, b.doc.Name, err)
+			// Whatever went out before the failure still consumed sequence
+			// numbers; leaving them out of the count would put a hole in the
+			// reliable stream, which is what stalls the whole battle.
+			seq = nextSeqAfter(seq, botSent)
 			continue
 		}
 		health := 0
@@ -2162,7 +2201,7 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 			infoIndex: b.index,
 		})
 		s.mu.Unlock()
-		seq = nextSeqAfter(seq, 4)
+		seq = nextSeqAfter(seq, botSent)
 		created++
 	}
 	s.mu.Lock()
@@ -2176,19 +2215,28 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 }
 
 // createSyntheticVehicle puts one non-player Vehicle into the battle: the
-// entity, its cell properties, the AoI entry and its VEHICLES_INFO row.
+// entity, its cell properties and its VEHICLES_INFO row.
 //
-// It sends four reliable packets on seq..seq+3, in the same order the player's
-// own tank uses (create, select, the cell-property run, enterAoI), and returns
-// the entity and the row the caller appends to the arena's vehicle list.
-func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, yaw float32, infoIndex int, seq, cumul uint32) (*Entity, entdef.Value, error) {
+// It sends three reliable packets on seq..seq+2, in the same order the player's
+// own tank uses (create, select, the cell-property run), and returns the entity,
+// the row the caller appends to the arena's vehicle list, and how many sequence
+// numbers it actually consumed. The AoI entry is deliberately NOT sent here:
+// whether a tank on the far side of the map is in the client's table is the
+// interest's call, and it sends the enterAoI when the tank comes into range.
+//
+// Callers must advance by the returned count, never by a constant: a skipped
+// encode leaves a sequence number that was never on the wire, and the client's
+// cumulative ack then stops in front of the hole for the whole battle — which
+// is exactly how the measured run lost its AvatarInfo, its team and its period.
+func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr, st *clientState, h *ArenaHandoff, doc ArenaPlayerDoc, id uint32, pos [3]float32, yaw float32, infoIndex int, seq, cumul uint32) (*Entity, entdef.Value, uint32, error) {
+	var sent uint32
 	infoType := entdef.Alias("VEHICLES_INFO")
 	if infoType == nil {
-		return nil, entdef.Value{}, fmt.Errorf("no VEHICLES_INFO type")
+		return nil, entdef.Value{}, 0, fmt.Errorf("no VEHICLES_INFO type")
 	}
 	e, err := s.arenaVehicleFor(st, h, doc, id, false)
 	if err != nil {
-		return nil, entdef.Value{}, err
+		return nil, entdef.Value{}, 0, err
 	}
 	// `publicInfo.index` is the tank's slot in its team: the team panel and
 	// the scoreboard order by it, and `arenaVehicleFor` writes 1 for the
@@ -2199,27 +2247,30 @@ func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr
 	// A synthetic tank is nobody's own: its OWN_CLIENT properties are left out.
 	props, err := EntityPropertyRunFor(e, false, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag")
 	if err != nil {
-		return nil, entdef.Value{}, err
+		return nil, entdef.Value{}, 0, err
 	}
 	create, err := EncodeCreateEntity(e.ID, uint16(e.Type.TypeID), VolatilePackerType, pos, yaw, 0, 0, props)
 	if err != nil {
-		return nil, entdef.Value{}, err
+		return nil, entdef.Value{}, 0, err
 	}
 	if err := s.sendReliableEntity(conn, from, st, create, seq, cumul); err != nil {
-		return nil, entdef.Value{}, err
+		return nil, entdef.Value{}, 0, err
 	}
 	seq++
+	sent++
 	if sel, err := EncodeSelectEntity(e.ID); err == nil {
 		if err := s.sendReliableEntity(conn, from, st, sel, seq, cumul); err != nil {
-			return nil, entdef.Value{}, err
+			return nil, entdef.Value{}, sent, err
 		}
 		seq++
+		sent++
 	}
 	if upd, err := EncodeUpdateEntityExcept(e, true, vehicleDeltaSkip...); err == nil {
 		if err := s.sendReliableEntity(conn, from, st, upd, seq, cumul); err != nil {
-			return nil, entdef.Value{}, err
+			return nil, entdef.Value{}, sent, err
 		}
 		seq++
+		sent++
 	}
 	// The entity is created here; whether the client holds it is the interest's
 	// call, so a tank on the far side of the map is not in its table.
@@ -2228,7 +2279,7 @@ func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr
 		st.interest.add(id, pos, false)
 	}
 	s.mu.Unlock()
-	return e, vehicleInfoValue(infoType, doc, id, infoIndex, pos[0], pos[2]), nil
+	return e, vehicleInfoValue(infoType, doc, id, infoIndex, pos[0], pos[2]), sent, nil
 }
 
 // nextSeqAfter is the seq after n reliable sends.

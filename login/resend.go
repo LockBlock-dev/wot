@@ -161,6 +161,22 @@ func (q *resendQueue) ack(key string, cumul uint32) {
 	q.byKey[key] = kept
 }
 
+// outstanding is how many reliable packets the session has sent and the peer
+// has not acknowledged yet.
+//
+// This is the only honest measure of how far ahead of the client the server
+// is. `postSeq - postCumul` is not: postCumul is the CLIENT's own reliable-out
+// counter — the value our packets carry as their cumul field — so that
+// difference grows with the client's traffic and never shrinks with its acks.
+func (q *resendQueue) outstanding(key string) int {
+	if q == nil {
+		return 0
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.byKey[key])
+}
+
 // readdr points a session's unacknowledged packets at a new address.
 //
 // The client rebinds its UDP socket on battle entry and exit
