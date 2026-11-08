@@ -126,9 +126,16 @@ func TestMatchmakingRecordsFormedBattles(t *testing.T) {
 	if matches[0].Size() != 2 {
 		t.Fatalf("battle size = %d, want 2", matches[0].Size())
 	}
-	// The players stay queued: the handoff needs a battle server.
-	if players, _ := m.Census(1); players != 2 {
-		t.Fatalf("census players = %d after a formed battle, want 2 (not handed off)", players)
+	// The battle takes them out of the queue. Leaving them in means they are
+	// matched again on the next sweep and their own next enqueue is refused
+	// with JOIN_FAILURE 18 ("already in the queue") — permanently, because
+	// nothing else removes the stale entry.
+	if players, _ := m.Census(1); players != 0 {
+		t.Fatalf("census players = %d after a formed battle, want 0 (the battle took them)", players)
+	}
+	// And the same player can queue again for the next battle.
+	if res := m.Enqueue(1, "a", []int32{1, 2}, veh); !res.Ok() {
+		t.Fatalf("re-enqueue after a formed battle = %+v", res)
 	}
 }
 
@@ -156,9 +163,11 @@ func TestMatchmakingSoloFormsABattle(t *testing.T) {
 	if got.Size() != 1 || got.Entries[0].AccountID != 1 {
 		t.Fatalf("battle = %+v", got)
 	}
-	// The player stays queued: the handoff is the arena's job, not the
-	// queue's.
-	if players, _ := m.Census(1); players != 1 {
-		t.Fatalf("census players = %d, want 1", players)
+	// The battle took them: the queue is empty and they can queue again.
+	if players, _ := m.Census(1); players != 0 {
+		t.Fatalf("census players = %d after a formed battle, want 0", players)
+	}
+	if res := m.Enqueue(1, "a", []int32{1, 1}, veh); !res.Ok() {
+		t.Fatalf("re-enqueue after a formed battle = %+v", res)
 	}
 }

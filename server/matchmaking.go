@@ -228,17 +228,28 @@ func (m *Matchmaking) Census(queueType uint8) (int, []int) {
 	return m.queue.Census(queueType)
 }
 
-// tryForm asks the matchmaker whether the queue can now produce a battle
-// and records it.
+// tryForm asks the matchmaker whether the queue can now produce a battle,
+// takes the players it matched OUT of the queue, and records the battle.
 //
-// The battle is NOT handed off: `Account.onArenaCreated` makes the client
-// wait for a CreateCellPlayer that a lobby-only server cannot send, so
-// sending it would hang the client on the loading screen. The players stay
-// queued and the match is logged; the handoff is TODO.md #1.
+// The dequeue is not optional. An entry that has been matched and left in the
+// queue is matched again on the next sweep, and the client's own next enqueue
+// is refused with JOIN_FAILURE 18 ("already in the queue") — which is what a
+// player saw after leaving a battle and queueing again: the matchmaker would
+// not take them, and the refusal is permanent because nothing ever removed
+// the stale entry.
 func (m *Matchmaking) tryForm(queueType uint8) {
 	match := m.maker.TryForm(m.queue.EntriesOf(queueType))
 	if match == nil {
 		return
+	}
+	// A squad is one entry in the battle and several in the queue: drop it by
+	// group id so no member is left behind.
+	for _, e := range match.Entries {
+		if e.GroupID != 0 {
+			m.queue.DequeueGroup(e.GroupID)
+			continue
+		}
+		m.queue.Dequeue(e.AccountID)
 	}
 	m.mu.Lock()
 	m.matches = append(m.matches, match)
