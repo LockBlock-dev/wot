@@ -403,8 +403,8 @@ func (s *BaseAppServer) enterArena(conn Transport, from *net.UDPAddr, st *client
 	st.readyCh = make(chan struct{})
 	st.readyDone = false
 	s.mu.Unlock()
-	s.logf("stage2 %s: arena %d entry — onArenaCreated + resetEntities (space %d, %s)",
-		from, h.ArenaID, h.SpaceID, h.Map)
+	s.logf("stage2 %s: arena %d entry — onArenaCreated + resetEntities (space %d, %s) via %s",
+		from, h.ArenaID, h.SpaceID, h.Map, connLabel(conn))
 	return nil
 }
 

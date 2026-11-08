@@ -594,6 +594,12 @@ type clientState struct {
 	// tree holds it, so its properties and client methods can be updated
 	// through the `0x26`/`0x25` stream after it is created.
 	ownVehicle nrlComponent
+	// connLabel is the listener the session's current connection arrived on,
+	// for the logs. A client has ONE channel, to one of the BaseApp listeners;
+	// a packet sent from a different one is dropped by the client and its
+	// channel then times out ("Disconnecting due to dead channel"), which is
+	// what a randomly-missed battle entry looked like.
+	connLabel string
 	// markerBaseTicks counts the gun markers sent this battle, so the first
 	// nrlBaseMarkerTicks of them can carry the base snapshot (see
 	// nrlMarkerElement).
@@ -1318,6 +1324,10 @@ func (s *BaseAppServer) handleStage2(conn Transport, from *net.UDPAddr, pkt []by
 			return nil
 		}
 		s.mu.Lock()
+		if lbl := connLabel(conn); lbl != "" && lbl != st.connLabel {
+			s.logf("stage2 %s: session listener → %s (was %q)", from, lbl, st.connLabel)
+			st.connLabel = lbl
+		}
 		st.conn = conn
 		st.leaveAddr = ""
 		st.reentry = false
@@ -1689,6 +1699,19 @@ func (s *BaseAppServer) enterAccount(conn Transport, from *net.UDPAddr, st *clie
 		seq++
 	}
 	return seq, nil
+}
+
+// connLabel names a listener by its local address, for the logs.
+//
+// The Transport interface deliberately does not expose the socket, so this is
+// best-effort: a scripted fake in a test has no address and gets "?".
+func connLabel(c Transport) string {
+	if u, ok := c.(interface{ LocalAddr() net.Addr }); ok {
+		if a := u.LocalAddr(); a != nil {
+			return a.String()
+		}
+	}
+	return "?"
 }
 
 // sendReliable frames an app as a reliable packet, sends it, and tracks it
@@ -4604,8 +4627,8 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 		// exactly the crash a leave produced.
 		s.resend.track(st.resendKey, from.String(), floodFirstSeq+uint32(i), frame)
 	}
-	s.logf("stage2 %s: flood burst %d frames, %d B bundle (seq %d..%d)",
-		from, len(frames), len(stream), floodFirstSeq, lastSeq)
+	s.logf("stage2 %s: flood burst %d frames, %d B bundle (seq %d..%d) via %s",
+		from, len(frames), len(stream), floodFirstSeq, lastSeq, connLabel(conn))
 	// The chain that follows goes out IMMEDIATELY, in the same burst order the
 	// capture has: the session dict (`1a 76`, which IS `showGUI`), the stats
 	// small and the Account's entry. Deferring it until the client
@@ -4695,7 +4718,7 @@ func (s *BaseAppServer) sendPostFlood(conn Transport, from *net.UDPAddr, st *cli
 	st.tickPeriod = PostTickPeriod
 	st.postAt = time.Now().Add(PostTickPeriod)
 	s.mu.Unlock()
-	s.logf("stage2 %s: post-flood chain sent (seq %d..%d)", from, lastSeq+1, next-1)
+	s.logf("stage2 %s: post-flood chain sent (seq %d..%d) via %s", from, lastSeq+1, next-1, connLabel(conn))
 	return nil
 }
 
