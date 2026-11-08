@@ -594,6 +594,12 @@ type clientState struct {
 	// tree holds it, so its properties and client methods can be updated
 	// through the `0x26`/`0x25` stream after it is created.
 	ownVehicle nrlComponent
+	// postFloodPending is set between the flood burst and the client's
+	// acknowledgement of its LAST frame; postFloodAckSeq is that frame's
+	// sequence number. What follows the burst addresses the Account entity it
+	// creates, so it waits for the client to have the whole chain.
+	postFloodPending bool
+	postFloodAckSeq  uint32
 	// connLabel is the listener the session's current connection arrived on,
 	// for the logs. A client has ONE channel, to one of the BaseApp listeners;
 	// a packet sent from a different one is dropped by the client and its
@@ -1534,6 +1540,24 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// channel exactly while the client is entering the battle.
 	if cumul > 0 {
 		s.resend.ack(st.resendKey, cumul)
+		// The burst's last sequence number being acknowledged releases the
+		// chain that follows it. The client acks in UNRELIABLE datagrams, so
+		// this cannot live behind the RELIABLE check below.
+		s.mu.Lock()
+		runPost := st.postFloodPending && cumul > st.postFloodAckSeq
+		if runPost {
+			st.postFloodPending = false
+		}
+		conn := st.conn
+		s.mu.Unlock()
+		if runPost {
+			if conn == nil {
+				conn = s.stage2
+			}
+			if err := s.sendPostFlood(conn, from, st, st.postFloodAckSeq); err != nil {
+				s.logf("stage2 %s: post-flood chain: %v", from, err)
+			}
+		}
 	}
 	if !hasSeq || clear[0]&0x10 == 0 {
 		return
@@ -4629,14 +4653,25 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 	}
 	s.logf("stage2 %s: flood burst %d frames, %d B bundle (seq %d..%d) via %s",
 		from, len(frames), len(stream), floodFirstSeq, lastSeq, connLabel(conn))
-	// The chain that follows goes out IMMEDIATELY, in the same burst order the
-	// capture has: the session dict (`1a 76`, which IS `showGUI`), the stats
-	// small and the Account's entry. Deferring it until the client
-	// acknowledged the burst was tried and does not work — the dict then
-	// arrives after the client has started its lobby sync, `showGUI` never
-	// dispatches, and the client sits on the waiting screen with an empty
-	// entity table.
-	return s.sendPostFlood(conn, from, st, lastSeq)
+	// What follows the burst — the session dict (`1a 76`, which IS `showGUI`),
+	// the stats small and the Account's entry — addresses the Account entity
+	// the burst creates, so it must not go out until the client HAS the burst.
+	//
+	// Sending it immediately is what crashes the client when a fragment is
+	// lost: a frame that is not the chain's first is discarded outright, so a
+	// lost frame 1 means no Account, and the `1a 76` that selects it dies with
+	// `MF_ASSERT_DEV FAILED: pEntity` (bw_entities.cpp:1103). Measured three
+	// times, each right after the client stalled ~1 s tearing the battle down.
+	//
+	// So it waits for the burst's LAST sequence number to be acknowledged.
+	// That is the burst's own completion signal — not the client's first lobby
+	// call, which it will not send until it has `showGUI`, and not the first
+	// ack, which can arrive while later frames are still missing.
+	s.mu.Lock()
+	st.postFloodPending = true
+	st.postFloodAckSeq = lastSeq
+	s.mu.Unlock()
+	return nil
 }
 
 // sendPostFlood emits what follows the flood burst: the session dict, the stats
