@@ -596,23 +596,18 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: probe 2, stopping after the geometry", from, h.ArenaID)
 		return seq, nil
 	}
-	// The capture's entry also ships an arena-settings fragment chain
-	// (`selectPlayerEntity` + `updateArena`, the pickle beginning `80 02 7d 71
-	// … "epic_config"`). We do NOT send it: the element wrapping is not
-	// decoded, and sending the document without it makes the client parse the
-	// pickle as elements and die with
-	// `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_` (memory_stream.hpp:434)
-	// the moment the battle space loads.
-	//
-	// What is known, from `captures/proxy-20261031-1358.hex` chain 4..9:
-	// `updateArena` is client method 58 (element 0x88) and takes
-	// `(UINT8 period, STRING data)`; the chain's later elements are
-	// `1a 88 25 03 23 78 9c …` — length 0x25, period 3, string length 0x23,
-	// zlib — the same shape our own period updates use and the client accepts.
-	// The FIRST element is `1a 88 ff db 04 00 00 00 80 02 7d 71 …`, period 0
-	// with a raw (uncompressed) pickle, and its length field matches none of
-	// the encodings tried so far. Until it does, the battle runs on the
-	// settings the lobby flood already delivered.
+	// The capture's entry ships the arena settings as a fragment chain right
+	// after CreateBasePlayer: `selectPlayerEntity` + `updateArena(SETTINGS,
+	// pickle)`, the pickle beginning `80 02 7d 71 … "epic_config"`. The chain
+	// is on-channel (flags 0x0078, the same word as the flood), so it takes
+	// real sequence numbers and the entry advances past it.
+	if len(s.settings) > 0 {
+		n, err := s.sendArenaSettings(conn, from, st, seq, cumul)
+		if err != nil {
+			return seq, err
+		}
+		seq = nextSeqAfter(seq, n)
+	}
 
 	// The capture's entry carries avatar updates (0x32/0x34/0x3c) for the
 	// player's entity before the entities are created: they anchor the
@@ -1665,6 +1660,30 @@ func arenaPeriodEnd(tick, length uint32) float64 {
 // `ClientArena.__onPeriodInfoUpdate`.
 const ArenaUpdatePeriod uint8 = 3
 
+// ArenaUpdateSettings is `ARENA_UPDATE.SETTINGS`. `ClientArena.__onUpdate`
+// maps it to `__onArenaSettingsUpdate`, which does `cPickle.loads(argStr)` on
+// the argument — a RAW pickle, no zlib, unlike PERIOD which inflates first.
+const ArenaUpdateSettings uint8 = 30
+
+// EncodeArenaSettingsUpdate builds the `updateArena(SETTINGS, pickle)` element
+// the captured entry carries: `selectPlayerEntity` + element 0x88
+// (`updateArena`, client method 58).
+//
+// Both length fields are PACKED integers, as the engine writes them
+// (`BinaryOStream::writePackedInt`, binary_stream.hpp:254): one byte below 255,
+// else 0xFF followed by a little-endian u24. The element length is packed
+// because `updateArena` declares `VariableLengthHeaderSize 1`, and the STRING
+// argument is packed because every string length is.
+func EncodeArenaSettingsUpdate(settings []byte) ([]byte, error) {
+	args := []byte{ArenaUpdateSettings}
+	args = appendPackedU24(args, len(settings))
+	args = append(args, settings...)
+	out := []byte{elSelectPlayerEntity}
+	out = append(out, byte(entityMethodBase+58)) // updateArena
+	out = appendPackedU24(out, len(args))
+	return append(out, args...), nil
+}
+
 // SpawnHeight is how far above the map origin the player is placed. The origin
 // is below the terrain on every map, so this is what keeps the tank on the
 // surface rather than under it — but it is a constant, not a terrain query:
@@ -2316,6 +2335,41 @@ func countTeam(bots []ArenaPlayerDoc, team uint8) int {
 		}
 	}
 	return n
+}
+
+// sendArenaSettings ships the arena settings document to the battle app as a
+// fragment chain, which is how the capture's entry carries it: chains of
+// pickles beginning `80 02 7d 71 … "epic_config"`.
+//
+// The captured frames are `0x0078` — ON_CHANNEL | RELIABLE | SEQ | FRAGMENT,
+// the same shape as the flood burst, with the 12-byte (first, last, seq)
+// trailer. They are therefore IN the connection's reliable sequence space:
+// they take real sequence numbers and are tracked for resend.
+//
+// The payload is `selectPlayerEntity` + `updateArena(SETTINGS, pickle)`; see
+// EncodeArenaSettingsUpdate for the framing. Sending the bare pickle here —
+// which is what an earlier version did — makes the client parse it as
+// elements and die with `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_`.
+func (s *BaseAppServer) sendArenaSettings(conn Transport, from *net.UDPAddr, st *clientState, seq, cumul uint32) (uint32, error) {
+	app, err := EncodeArenaSettingsUpdate(s.settings)
+	if err != nil {
+		return 0, err
+	}
+	frames, err := BuildFrames(st.blockKey, app, DefaultBulkPayload, seq)
+	if err != nil {
+		return 0, err
+	}
+	st.sendMu.Lock()
+	defer st.sendMu.Unlock()
+	for i, frame := range frames {
+		if _, err := conn.WriteToUDP(frame, from); err != nil {
+			return uint32(i), err
+		}
+		s.resend.track(st.resendKey, from.String(), seq+uint32(i), frame)
+	}
+	s.logf("stage2 %s: arena settings chain %d B in %d frame(s) (seq %d..%d)",
+		from, len(app), len(frames), seq, seq+uint32(len(frames))-1)
+	return uint32(len(frames)), nil
 }
 
 // How a team is laid out at the start of a battle.

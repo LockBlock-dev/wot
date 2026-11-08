@@ -924,3 +924,59 @@ func TestArenaEntrySequenceHasNoHoles(t *testing.T) {
 		t.Fatalf("%d distinct sequences over %d..%d, want %d", got, lo, hi, want)
 	}
 }
+
+// TestArenaSettingsUpdateIsAPackedElement pins the framing of the entry's
+// arena-settings element.
+//
+// The client's `Avatar.updateArena(updateType, argStr)` hands the argument to
+// `ClientArena.update`, which maps ARENA_UPDATE.SETTINGS (30) to
+// `__onArenaSettingsUpdate` — and that does `cPickle.loads(argStr)`, a RAW
+// pickle (PERIOD, by contrast, inflates first). The captured element is
+// `selectPlayerEntity` + element 0x88 (`updateArena`, client method 58), and
+// both length fields are PACKED integers as `BinaryOStream::writePackedInt`
+// writes them: one byte below 255, else 0xFF and a little-endian u24.
+//
+// Sending the bare pickle here instead makes the client read its first byte as
+// an element id and die with `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_`.
+func TestArenaSettingsUpdateIsAPackedElement(t *testing.T) {
+	short := []byte{0x80, 0x02, '}', 'q', 0x00, '.', 0x2e}
+	el, err := EncodeArenaSettingsUpdate(short)
+	if err != nil {
+		t.Fatalf("EncodeArenaSettingsUpdate: %v", err)
+	}
+	want := []byte{elSelectPlayerEntity, 0x88, byte(1 + 1 + len(short)), ArenaUpdateSettings, byte(len(short))}
+	want = append(want, short...)
+	if !bytes.Equal(el, want) {
+		t.Fatalf("short settings element\n got % x\nwant % x", el, want)
+	}
+
+	// A document past 255 bytes takes the packed form on both lengths.
+	long := bytes.Repeat([]byte{0x41}, 1000)
+	el, err = EncodeArenaSettingsUpdate(long)
+	if err != nil {
+		t.Fatalf("EncodeArenaSettingsUpdate(long): %v", err)
+	}
+	if el[0] != elSelectPlayerEntity || el[1] != 0x88 {
+		t.Fatalf("head % x, want 1a 88", el[:2])
+	}
+	if el[2] != 0xFF {
+		t.Fatalf("element length byte %#02x, want the 0xFF escape", el[2])
+	}
+	elLen := int(el[3]) | int(el[4])<<8 | int(el[5])<<16
+	if wantLen := 1 + 4 + len(long); elLen != wantLen {
+		t.Fatalf("element length %d, want %d", elLen, wantLen)
+	}
+	if el[6] != ArenaUpdateSettings {
+		t.Fatalf("update type %d, want %d (ARENA_UPDATE.SETTINGS)", el[6], ArenaUpdateSettings)
+	}
+	if el[7] != 0xFF {
+		t.Fatalf("string length byte %#02x, want the 0xFF escape", el[7])
+	}
+	strLen := int(el[8]) | int(el[9])<<8 | int(el[10])<<16
+	if strLen != len(long) {
+		t.Fatalf("string length %d, want %d", strLen, len(long))
+	}
+	if !bytes.Equal(el[11:], long) {
+		t.Fatal("the pickle is not the string argument")
+	}
+}
