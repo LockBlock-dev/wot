@@ -197,10 +197,10 @@ func TestNoteReliableRetiresFromTheClientsCumul(t *testing.T) {
 	}
 	s.noteReliable(st, st.stage2Addr, dec)
 
-	// The ack counts the client's reliable packets, one per packet: this is
-	// the first, so it moves to 2 from the setup's 1.
-	if st.postCumul != 2 {
-		t.Fatalf("our cumulative ack moved to %d, want 2 (one reliable packet counted)", st.postCumul)
+	// The ack is the client's own channel counter: its seq 0 is below the
+	// setup's 1 and not a channel reset, so it leaves the watermark alone.
+	if st.postCumul != 1 {
+		t.Fatalf("our cumulative ack moved to %d, want 1 (the client's seq 0 is not ahead)", st.postCumul)
 	}
 	if got := len(s.resend.byKey[st.resendKey]); got != 1 {
 		t.Fatalf("%d packets still queued, want 1 (seq 7 is not below the client's ack of 7)", got)

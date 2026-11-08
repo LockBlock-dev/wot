@@ -1517,21 +1517,27 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 		return
 	}
 	s.mu.Lock()
-	// The ack counts the client's RELIABLE packets, one per packet. Its
-	// trailer's `seq` is not that counter: it is the channel's total send
-	// count (reliable and unreliable both), which runs far ahead — using it
-	// made every packet we sent carry an ack the client rejected:
+	// The client's trailer `seq` is its channel's own reliable out counter —
+	// the one `handleCumulativeAck` compares against (`channel->0x154`,
+	// 0x142d34d40: `(0x154 - endSeq) & 0x0FFFFFFF > 0x8000000` rejects). Our
+	// ack must be that value, not a count of packets we saw: counting
+	// over-counts the client's retransmissions and ran ahead of it
+	// (`endSeq: #29 outSeq: #15`).
 	//
-	//   UDPChannel::handleCumulativeAck: Received ACK for packets not yet
-	//   sent. endSeq: #467 outSeq: #87
-	//   Error 'REASON_CORRUPTED_PACKET'
-	//
-	// (0x142d34d40: `(channel->0x154 - endSeq) & 0x0FFFFFFF > 0x8000000` is
-	// the rejection, and 0x154 is the channel's reliable out counter.)
-	st.postCumul++
-	// The channel's total send count is what an unreliable packet's last four
-	// bytes must echo (`processFilteredPacket`), so keep it too.
-	st.clientTotal = seq
+	// The counter is per channel, and the client builds a new channel for the
+	// battle app, so a seq far below the watermark is a fresh counter, not a
+	// stale one.
+	// `seq + 1` is the client's next expected sequence, which is what it
+	// compares our ack against.
+	wm := seq + 1
+	if wm < st.postCumul && st.postCumul-wm > 256 {
+		// A fresh channel: the client builds one for the battle app, so its
+		// counter restarts.
+		st.postCumul = wm
+		st.unrelSeq = 1
+	} else if wm > st.postCumul {
+		st.postCumul = wm
+	}
 	s.mu.Unlock()
 }
 
