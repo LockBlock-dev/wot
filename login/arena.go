@@ -1002,7 +1002,15 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// Without this the client resolves the element id against Vehicle, finds
 	// it out of range, and drops the whole bundle as
 	// REASON_CORRUPTED_PACKET.
-	if sel, err := EncodeSelectEntity(st.entityID); err == nil {
+	// The Avatar's own id, not the session's: the battle reuses the id
+	// stage-1 named the client's player with, and selecting anything else
+	// makes the client resolve the method against the wrong entity and drop
+	// the whole bundle.
+	selID := st.entityID
+	if st.avatar != nil {
+		selID = st.avatar.ID
+	}
+	if sel, err := EncodeSelectEntity(selID); err == nil {
 		if err := s.sendReliableEntity(conn, from, st, sel, seq, cumul); err != nil {
 			return seq, err
 		}
