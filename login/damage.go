@@ -314,6 +314,13 @@ func (s *BaseAppServer) splash(conn Transport, from *net.UDPAddr, st *clientStat
 	}
 }
 
+// turretDetachedHealth is `SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED` (-1 ^ 28):
+// the health the client reads as a detached turret.
+const turretDetachedHealth = -1 ^ 28
+
+// turretDetachChance is how often a destroyed tank's turret comes off.
+const turretDetachChance = 0.25
+
 // maxHitAngle is the steepest impact the normalization may turn a shell to,
 // in radians: the reference's `MAX_HIT_ANGLE`.
 const maxHitAngle = 1.5
@@ -776,6 +783,13 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 	// client reads as the explosion, whatever the hit points left.
 	if boom != nil {
 		newHealth = boom.health
+	}
+	// A destroyed tank's turret sometimes comes off: the client reads the
+	// special health as "the turret is detached" and swaps to the exploded
+	// model, its `VehicleDamageState` mapping `TURRET_DETACHED` to
+	// `ammoBayExplosion`.
+	if newHealth == 0 && damage > 0 && boom == nil && rand.Float64() < turretDetachChance {
+		newHealth = turretDetachedHealth
 	}
 	// A tank whose crew is all dead is dead, whatever its hit points.
 	if newHealth > 0 && s.allCrewDead(t) {

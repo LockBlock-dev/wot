@@ -251,3 +251,15 @@ func TestAmmoBayDetonates(t *testing.T) {
 		t.Error("a wrecked ammo bay detonated twice")
 	}
 }
+
+// TestTurretDetachedHealth pins the turret detachment's health value: the
+// client's `SPECIAL_VEHICLE_HEALTH.TURRET_DETACHED` (-1 ^ 28), which its
+// `VehicleDamageState` maps to the exploded model.
+func TestTurretDetachedHealth(t *testing.T) {
+	if turretDetachedHealth != -29 {
+		t.Errorf("TURRET_DETACHED = %d, want -29", turretDetachedHealth)
+	}
+	if turretDetachChance <= 0 || turretDetachChance > 1 {
+		t.Errorf("detach chance = %v, want a share in (0, 1]", turretDetachChance)
+	}
+}
