@@ -49,6 +49,9 @@ type shellLanding struct {
 	VHit   vehicleHit
 	// Dir is the shell's direction at the hit.
 	Dir [3]float32
+	// Material is the effect material the impact shows: the ground's for the
+	// terrain, the static's own (stone, wood, metal) for a wall.
+	Material uint8
 }
 
 const (
@@ -120,6 +123,7 @@ func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, target
 					Kind:     landingStatic,
 					Point:    point,
 					Velocity: lerp3(vel, nextVel, t),
+					Material: staticEffectMaterial(tri),
 					Distance: float32(math.Sqrt(float64(
 						(point[0]-start[0])*(point[0]-start[0]) +
 							(point[1]-start[1])*(point[1]-start[1]) +
@@ -214,6 +218,7 @@ func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, target
 // kindIndex, caliber, position, velocity, speed, ARRAY<UINT32>)`; the velocity
 // is the last flight step's, which the client projects the crater along.
 func explodeProjectileElement(avatar *Entity, shotID uint32, sh shellSpec, landing shellLanding) ([]byte, error) {
+	material := landing.Material
 	prefab := uint64(noPrefabEffects)
 	if sh.HasPrefabEffectsIndex {
 		prefab = uint64(sh.PrefabEffectsIndex)
@@ -222,7 +227,7 @@ func explodeProjectileElement(avatar *Entity, shotID uint32, sh shellSpec, landi
 		{Kind: entdef.VUint, Uint: uint64(shotID)},
 		{Kind: entdef.VUint, Uint: uint64(sh.EffectsIndex)},
 		{Kind: entdef.VUint, Uint: prefab},
-		{Kind: entdef.VUint, Uint: uint64(groundEffectMaterial)},
+		{Kind: entdef.VUint, Uint: uint64(material)},
 		{Kind: entdef.VUint, Uint: uint64(sh.KindIndex)},
 		{Kind: entdef.VFloat, Float: float64(sh.Caliber / 1000)},
 		{Kind: entdef.VSeq, Seq: []entdef.Value{

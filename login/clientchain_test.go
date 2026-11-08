@@ -108,13 +108,13 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	if _, err := s.enterArenaSpace(tr3, addr, st, h, 11, 10); err != nil {
 		t.Fatalf("enterArenaSpace: %v", err)
 	}
-	// space, cell, Vehicle create/select/update/enter, AvatarInfo
+	// space, cell, controlEntity, Vehicle create/select/update/enter, AvatarInfo
 	// create/enter/NRL, OwnVehicle, its vehicleHealthInfo, selectEntity(Avatar),
 	// the hull attitude, the update frequency, WAITING, then the TeamInfo
 	// create/enter pair. BATTLE is not here: it waits for the client's
 	// `setClientReady`.
-	if len(tr3.writes) != 17 {
-		t.Fatalf("%d packets, want 17", len(tr3.writes))
+	if len(tr3.writes) != 18 {
+		t.Fatalf("%d packets, want 18", len(tr3.writes))
 	}
 	avatar := parseClientPacket(t, d, tr2.writes[0], st.blockKey)
 	avatar = withoutTick(avatar)

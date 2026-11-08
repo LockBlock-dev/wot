@@ -181,6 +181,30 @@ func loadStaticScene(res *staticResources, spaceDir string, visibilityMask uint3
 	return scene, nil
 }
 
+// The effect materials' indices, from `system/data/effect_materials.xml` in
+// the order the client loads them: what an impact shows.
+const (
+	effectMaterialGround uint8 = 0
+	effectMaterialStone  uint8 = 1
+	effectMaterialWood   uint8 = 2
+	effectMaterialMetal  uint8 = 3
+)
+
+// staticEffectMaterial is the effect material a static body's impact shows,
+// from its name: the game names them `n_stone_10`, `n_wood0_1`, `n_metal1_1_2`.
+func staticEffectMaterial(tri staticTriangle) uint8 {
+	name := strings.ToLower(tri.Body)
+	switch {
+	case strings.Contains(name, "stone"), strings.Contains(name, "brick"), strings.Contains(name, "concrete"):
+		return effectMaterialStone
+	case strings.Contains(name, "wood"):
+		return effectMaterialWood
+	case strings.Contains(name, "metal"), strings.Contains(name, "iron"):
+		return effectMaterialMetal
+	}
+	return effectMaterialGround
+}
+
 // chunkIDAt is the chunk a world point stands in, as the client's
 // `chunkIDFromChunkPosition` computes it: 100 m chunks, biased by 127.
 func chunkIDAt(x, z float32) uint16 {

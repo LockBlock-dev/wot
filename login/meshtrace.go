@@ -384,3 +384,105 @@ func (s shellSpec) isAP() bool   { return s.Kind == "ARMOR_PIERCING" }
 func (s shellSpec) isAPCR() bool { return s.Kind == "ARMOR_PIERCING_CR" }
 func (s shellSpec) isHEAT() bool { return s.Kind == "HOLLOW_CHARGE" }
 func (s shellSpec) isHE() bool   { return s.Kind == "HIGH_EXPLOSIVE" }
+
+// closestPoint is the point of the vehicle's main armour closest to a world
+// point, and how far it is. It is what an explosion measures its reach to.
+func (c *vehicleCollision) closestPoint(pos [3]float32, yaw float32, point [3]float32) ([3]float32, float32, vehicleHit, bool) {
+	if c == nil {
+		return [3]float32{}, 0, vehicleHit{}, false
+	}
+	best := float32(math.MaxFloat32)
+	var bestPoint [3]float32
+	var bestHit vehicleHit
+	found := false
+	for _, part := range c.Parts {
+		// The point in the part's frame.
+		dx, dy, dz := point[0]-pos[0]-part.Offset[0], point[1]-pos[1]-part.Offset[1], point[2]-pos[2]-part.Offset[2]
+		cw, sw := cos32(-yaw), sin32(-yaw)
+		local := [3]float32{dx*cw - dz*sw, dy, dx*sw + dz*cw}
+		for gi := range part.Groups {
+			g := &part.Groups[gi]
+			if g.Material == nil || !g.Material.isMainArmor() {
+				continue
+			}
+			for _, tri := range g.Triangles {
+				cp := closestOnTriangle(local, tri)
+				if d := dist3(cp, local); d < best {
+					best = d
+					bestPoint = [3]float32{
+						pos[0] + part.Offset[0] + cp[0]*cos32(yaw) + cp[2]*sin32(yaw),
+						pos[1] + part.Offset[1] + cp[1],
+						pos[2] + part.Offset[2] - cp[0]*sin32(yaw) + cp[2]*cos32(yaw),
+					}
+					bestHit = vehicleHit{
+						Part:       part.Part,
+						Group:      gi,
+						GroupName:  g.Name,
+						Material:   g.Material,
+						Point:      bestPoint,
+						LocalPoint: cp,
+						Bounds:     part.Bounds,
+					}
+					found = true
+				}
+			}
+		}
+	}
+	return bestPoint, best, bestHit, found
+}
+
+// closestOnTriangle is the point of a triangle closest to p.
+func closestOnTriangle(p [3]float32, tri [3][3]float32) [3]float32 {
+	ab := sub3(tri[1], tri[0])
+	ac := sub3(tri[2], tri[0])
+	ap := sub3(p, tri[0])
+	d1 := dot3(ab, ap)
+	d2 := dot3(ac, ap)
+	if d1 <= 0 && d2 <= 0 {
+		return tri[0]
+	}
+	bp := sub3(p, tri[1])
+	d3 := dot3(ab, bp)
+	d4 := dot3(ac, bp)
+	if d3 >= 0 && d4 <= d3 {
+		return tri[1]
+	}
+	vc := d1*d4 - d3*d2
+	if vc <= 0 && d1 >= 0 && d3 <= 0 {
+		v := d1 / (d1 - d3)
+		return [3]float32{tri[0][0] + ab[0]*v, tri[0][1] + ab[1]*v, tri[0][2] + ab[2]*v}
+	}
+	cp := sub3(p, tri[2])
+	d5 := dot3(ab, cp)
+	d6 := dot3(ac, cp)
+	if d6 >= 0 && d5 <= d6 {
+		return tri[2]
+	}
+	vb := d5*d2 - d1*d6
+	if vb <= 0 && d2 >= 0 && d6 <= 0 {
+		w := d2 / (d2 - d6)
+		return [3]float32{tri[0][0] + ac[0]*w, tri[0][1] + ac[1]*w, tri[0][2] + ac[2]*w}
+	}
+	va := d3*d6 - d5*d4
+	if va <= 0 && d4-d3 >= 0 && d5-d6 >= 0 {
+		w := (d4 - d3) / ((d4 - d3) + (d5 - d6))
+		return [3]float32{
+			tri[1][0] + (tri[2][0]-tri[1][0])*w,
+			tri[1][1] + (tri[2][1]-tri[1][1])*w,
+			tri[1][2] + (tri[2][2]-tri[1][2])*w,
+		}
+	}
+	denom := 1 / (va + vb + vc)
+	v := vb * denom
+	w := vc * denom
+	return [3]float32{
+		tri[0][0] + ab[0]*v + ac[0]*w,
+		tri[0][1] + ab[1]*v + ac[1]*w,
+		tri[0][2] + ab[2]*v + ac[2]*w,
+	}
+}
+
+func dist3(a, b [3]float32) float32 {
+	dx, dy, dz := a[0]-b[0], a[1]-b[1], a[2]-b[2]
+	return float32(math.Sqrt(float64(dx*dx + dy*dy + dz*dz)))
+}

@@ -107,7 +107,7 @@ func resolveShot(sh shellSpec, origin, dir [3]float32, boxes []hitBox) shotResul
 		if best.Hit && h.Distance >= best.Distance {
 			continue
 		}
-		res, ok := rollVehicleHit(sh, b.Target, h, dir, float64(h.Distance), c, [3]float32{}, 0)
+		res, ok := rollVehicleHit(sh, b.Target, h, dir, float64(h.Distance), 1, c, [3]float32{}, 0)
 		if !ok {
 			continue
 		}

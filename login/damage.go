@@ -107,8 +107,8 @@ type shotResult struct {
 //
 // Ported from the reference's `armor::hit`: the outcome decides the damage,
 // and an HE shell that does not pierce explodes on the armour instead.
-func rollVehicleHit(sh shellSpec, target int, contact vehicleHit, dir [3]float32, distance float64, c *vehicleCollision, pos [3]float32, yaw float32) (shotResult, bool) {
-	impact, ok := armorHit(sh, float32(distance), 1, contact.Point, dir, c, pos, yaw)
+func rollVehicleHit(sh shellSpec, target int, contact vehicleHit, dir [3]float32, distance float64, penFactor float32, c *vehicleCollision, pos [3]float32, yaw float32) (shotResult, bool) {
+	impact, ok := armorHit(sh, float32(distance), penFactor, contact.Point, dir, c, pos, yaw)
 	if !ok {
 		return shotResult{}, false
 	}
@@ -192,6 +192,84 @@ func faceOf(n [3]float32) int {
 		return 1
 	}
 	return 2
+}
+
+// maxGroundRicochets is how many times a shell may skim off the ground before
+// it stops.
+const maxGroundRicochets = 3
+
+// groundRicochetAngle is the largest angle between a shell's path and the
+// ground it ricochets off, in radians: the reference's `GROUND.ricochet_angle`,
+// 8 degrees.
+const groundRicochetAngle = 8 * math.Pi / 180
+
+// ricochetsOffGround reports whether a shell skims off the ground at this
+// angle: AP and APCR only, within `groundRicochetAngle` of the surface.
+func ricochetsOffGround(sh shellSpec, velocity, normal [3]float32) bool {
+	if !sh.isAP() && !sh.isAPCR() {
+		return false
+	}
+	l := float32(math.Sqrt(float64(velocity[0]*velocity[0] + velocity[1]*velocity[1] + velocity[2]*velocity[2])))
+	if l < 1e-6 {
+		return false
+	}
+	cos := -(velocity[0]*normal[0] + velocity[1]*normal[1] + velocity[2]*normal[2]) / l
+	if cos < -1 {
+		cos = -1
+	}
+	if cos > 1 {
+		cos = 1
+	}
+	grazing := math.Asin(float64(cos))
+	return grazing >= 0 && grazing <= groundRicochetAngle
+}
+
+// ricochetPenFactor is the share of its penetration a shell keeps off a
+// ricochet: 0.75 for AP and APCR, all of it otherwise.
+func ricochetPenFactor(sh shellSpec) float32 {
+	if sh.isAP() || sh.isAPCR() {
+		return 0.75
+	}
+	return 1
+}
+
+// splash is an HE shell exploding on the ground or a wall: every synthetic
+// tank whose main armour the blast reaches takes its damage.
+func (s *BaseAppServer) splash(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, sh shellSpec, shotID int32, attacker uint32, vehicle, avatar *Entity, marker nrlGunMarker, targets []*botTarget, center [3]float32) {
+	for i, t := range targets {
+		if t == nil || t.dead.Load() {
+			continue
+		}
+		damage, hit, ok := explosionAt(sh, center, t)
+		if !ok || damage <= 0 {
+			continue
+		}
+		// The blast's way to the armour is the hit's own direction.
+		dir := [3]float32{hit.Point[0] - center[0], hit.Point[1] - center[1], hit.Point[2] - center[2]}
+		if l := dist3(hit.Point, center); l > 1e-6 {
+			dir = [3]float32{dir[0] / l, dir[1] / l, dir[2] / l}
+		}
+		res := shotResult{
+			Hit:         true,
+			Target:      i,
+			Point:       hit.Point,
+			Normal:      dir,
+			Distance:    dist3(center, hit.Point),
+			Part:        hit.Part,
+			Bounds:      hit.Bounds,
+			Local:       hit.LocalPoint,
+			LocalDir:    dir,
+			LocalNormal: dir,
+			Face:        faceOf(hit.LocalNormal),
+			Pierced:     false,
+			Damage:      int(math.Round(float64(damage))),
+			Effect:      hitEffectNotPierced,
+			Flags:       hitFlagDirect | hitFlagExploded,
+		}
+		s.logf("arena %d: HE blast %.1f m from bot %d: %d damage (armour %s)",
+			arenaID, res.Distance, t.id, res.Damage, hit.GroupName)
+		s.applyDamage(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, t, res)
+	}
 }
 
 // maxHitAngle is the steepest impact the normalization may turn a shell to,
@@ -467,7 +545,41 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		}
 		return false
 	}
-	landing := flyShell(sh, marker.Position, v, terrain, targets, statics, onStatic)
+	// The shell's flight. An AP or APCR shell that meets the ground at a
+	// grazing angle skims off it and goes on, with less penetration, up to
+	// `maxGroundRicochets` times.
+	start := marker.Position
+	penFactor := float32(1)
+	flew := float32(0)
+	ricochets := 0
+	var landing shellLanding
+	for {
+		landing = flyShell(sh, start, v, terrain, targets, statics, onStatic)
+		landing.Distance += flew
+		if landing.Kind != landingTerrain || ricochets >= maxGroundRicochets {
+			break
+		}
+		normal := [3]float32{0, 1, 0}
+		if terrain != nil {
+			if n, ok := terrain.NormalAt(landing.Point[0], landing.Point[2]); ok {
+				normal = n
+			}
+		}
+		if !ricochetsOffGround(sh, landing.Velocity, normal) {
+			break
+		}
+		s.logf("arena %d: shot %s ricochets off the ground at %v, %.0f%% of its penetration left",
+			arenaID, sh.Name, landing.Point, penFactor*100)
+		v = reflect(landing.Velocity, normal)
+		start = [3]float32{
+			landing.Point[0] + normal[0]*0.05,
+			landing.Point[1] + normal[1]*0.05,
+			landing.Point[2] + normal[2]*0.05,
+		}
+		penFactor *= ricochetPenFactor(sh)
+		flew = landing.Distance
+		ricochets++
+	}
 	// The aim and the muzzle are the two numbers that decide whether a shot at
 	// a top surface lands or sails over: the elevation is measured from the
 	// gun pivot above the CHASSIS origin, and the pitch is clamped to the
@@ -487,6 +599,12 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		if landing.Kind == landingTerrain || landing.Kind == landingStatic {
 			if el, err := explodeProjectileElement(avatar, uint32(shotID)|0x40000000, sh, landing); err == nil {
 				app = append(app, el...)
+			}
+			// An HE shell explodes where it lands: the vehicles whose main
+			// armour the blast reaches take its damage, the shooter's own
+			// aside.
+			if sh.isHE() {
+				s.splash(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, targets, landing.Point)
 			}
 		}
 		if len(app) > 0 {
@@ -513,22 +631,30 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		return
 	}
 	t := targets[landing.Target]
+	// What the shell does to the armour it meets: the plates it walks are the
+	// client's own triangles, so a screen stops it short of the hull and a
+	// ricochet names the plate it bounced off.
+	res, ok := rollVehicleHit(sh, landing.Target, landing.VHit, landing.Dir, float64(landing.Distance), penFactor, t.collision, t.pos, t.yaw)
+	if !ok {
+		// It met no armour on its way (only a device, or a gap): the shell
+		// goes on, as the reference's `hit` returns None there.
+		s.logf("arena %d: shot %s met no armour on bot %d at %v", arenaID, sh.Name, t.id, landing.VHit.LocalPoint)
+		return
+	}
+	s.applyDamage(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, t, res)
+}
+
+// applyDamage applies one shell's result to one target and sends the packets:
+// the victim's own (its modules, health, stickers, kill) and the shooter's
+// (the tracer, the hit marker, the damage log). A direct hit and an HE blast
+// that reaches a vehicle both go through here.
+func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, sh shellSpec, shotID int32, attacker uint32, vehicle, avatar *Entity, marker nrlGunMarker, t *botTarget, res shotResult) {
 	s.mu.Lock()
 	oldHealth := t.health
 	maxHealth := t.maxHealth
 	s.mu.Unlock()
 	if oldHealth <= 0 {
 		return // a wreck takes no more shells
-	}
-	// What the shell does to the armour it meets: the plates it walks are the
-	// client's own triangles, so a screen stops it short of the hull and a
-	// ricochet names the plate it bounced off.
-	res, ok := rollVehicleHit(sh, landing.Target, landing.VHit, landing.Dir, float64(landing.Distance), t.collision, t.pos, t.yaw)
-	if !ok {
-		// It met no armour on its way (only a device, or a gap): the shell
-		// goes on, as the reference's `hit` returns None there.
-		s.logf("arena %d: shot %s met no armour on bot %d at %v", arenaID, sh.Name, t.id, landing.VHit.LocalPoint)
-		return
 	}
 	// The module or crewman behind the armour: a penetrating hit damages one,
 	// and the client is told which one (`onExtraHitted`) and, for a wrecked
@@ -899,4 +1025,79 @@ func battleEventsSummaryElement(comp nrlComponent, damage uint32) ([]byte, error
 		return nil, err
 	}
 	return EncodeNrlPropertyUpdate(comp, ownVehiclePropIndex("battleEventsSummary"), buf.Bytes())
+}
+
+// The explosion of an HE shell beside a vehicle.
+//
+// Ported from the reference's `armor::explosion`: the blast reaches the
+// vehicle's closest MAIN armour point within the shell's radius, and the
+// plates between it and that point absorb their share of the damage. A screen
+// or a track in the way eats into it, and the main armour stops it.
+const (
+	// explosionDamageFactor is the share of the shell's damage the blast
+	// carries at the centre of its radius.
+	explosionDamageFactor = 0.5
+	// explosionEdgeDamageFactor is the share left at the radius's edge.
+	explosionEdgeDamageFactor = 0.05
+	// explosionDamageAbsorptionFactor is how much damage each millimetre of
+	// armour between the blast and the main armour takes out of it.
+	explosionDamageAbsorptionFactor = 1.3
+	// explosionStandoff is how far past the armour point the walk goes, so
+	// that the plate is crossed.
+	explosionStandoff = 0.01
+)
+
+// explosionAt is what an HE shell's blast does to a vehicle whose centre is
+// `center`: the damage left after the way to its main armour, and the hit that
+// is shown.
+func explosionAt(sh shellSpec, center [3]float32, t *botTarget) (float32, vehicleHit, bool) {
+	if t == nil || t.collision == nil || sh.ExplosionRadius <= 0 {
+		return 0, vehicleHit{}, false
+	}
+	radius := float32(sh.ExplosionRadius)
+	closest, distance, _, ok := t.collision.closestPoint(t.pos, t.yaw, center)
+	if !ok || distance > radius {
+		return 0, vehicleHit{}, false
+	}
+	dir := [3]float32{closest[0] - center[0], closest[1] - center[1], closest[2] - center[2]}
+	if l := dist3(closest, center); l > 1e-6 {
+		dir = [3]float32{dir[0] / l, dir[1] / l, dir[2] / l}
+	} else {
+		return 0, vehicleHit{}, false
+	}
+	to := [3]float32{
+		closest[0] + dir[0]*explosionStandoff*2,
+		closest[1] + dir[1]*explosionStandoff*2,
+		closest[2] + dir[2]*explosionStandoff*2,
+	}
+	hits := t.collision.hits(t.pos, t.yaw, center, to)
+	seen := map[[2]int]bool{}
+	absorbed := float32(0)
+	var reached vehicleHit
+	found := false
+	for _, h := range hits {
+		if h.Material == nil {
+			continue
+		}
+		key := [2]int{int(h.Part), h.Group}
+		if h.Material.CollideOnceOnly && seen[key] {
+			continue
+		}
+		seen[key] = true
+		absorbed += explosionDamageAbsorptionFactor * h.Material.Armor
+		if h.Material.isMainArmor() {
+			reached = h
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0, vehicleHit{}, false
+	}
+	falloff := 1 - (1-explosionEdgeDamageFactor)*distance/radius
+	damage := explosionDamageFactor*float32(sh.damageAt(0))*falloff - absorbed
+	if damage < 0 {
+		damage = 0
+	}
+	return damage, reached, true
 }

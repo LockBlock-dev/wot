@@ -189,23 +189,26 @@ func TestEnterArenaSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enterArenaSpace: %v", err)
 	}
-	// space, cell, Vehicle create/select/update/enter, AvatarInfo
+	// space, cell, controlEntity, Vehicle create/select/update/enter, AvatarInfo
 	// create/enter/NRL, OwnVehicle, its vehicleHealthInfo, selectEntity(Avatar),
 	// the hull attitude, the update frequency, WAITING, then the TeamInfo
 	// create/enter pair. BATTLE is NOT here: it waits for the client's
 	// `setClientReady`.
-	if seq != 28 {
-		t.Fatalf("seq = %d, want 28 (seventeen more frames)", seq)
+	if seq != 29 {
+		t.Fatalf("seq = %d, want 29 (eighteen more frames)", seq)
 	}
-	if len(tr3.writes) != 17 {
-		t.Fatalf("%d writes, want 17 (space, cell, Vehicle x4, AvatarInfo x3, OwnVehicle, vehicleHealthInfo, select, auxPhysics, frequency, WAITING, TeamInfo x2)", len(tr3.writes))
+	if len(tr3.writes) != 18 {
+		t.Fatalf("%d writes, want 18 (space, cell, controlEntity, Vehicle x4, AvatarInfo x3, OwnVehicle, vehicleHealthInfo, select, auxPhysics, frequency, WAITING, TeamInfo x2)", len(tr3.writes))
 	}
 	// The period call is an Avatar method, so the Avatar must be the selected
 	// entity when it goes out: an entity method applies to whatever
 	// selectEntity last selected, and the last one was a Vehicle.
-	selAvatar := findAppInPacket(t, tr3.writes[11], st.blockKey)
+	// The controlEntity that hands the client its own tank sits between the
+	// Vehicle's enterAoI and the AvatarInfo, so the Avatar's selection is the
+	// thirteenth write, not the twelfth.
+	selAvatar := findAppInPacket(t, tr3.writes[12], st.blockKey)
 	if !bytes.Contains(selAvatar, []byte{elSelectEntity}) {
-		t.Fatalf("eleventh write is not selectEntity: % x", selAvatar[:8])
+		t.Fatalf("thirteenth write is not selectEntity: % x", selAvatar[:8])
 	}
 	if got := binary.LittleEndian.Uint32(selAvatar[1:5]); got != st.entityID {
 		t.Fatalf("selectEntity id = %d, want the Avatar %d", got, st.entityID)

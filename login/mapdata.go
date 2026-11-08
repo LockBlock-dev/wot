@@ -554,3 +554,27 @@ func vec3String(s *entdef.Section) ([3]float32, error) {
 	}
 	return out, nil
 }
+
+// NormalAt is the terrain's upward unit normal at a point, from the heightmap's
+// gradient: what a shell's ricochet off the ground is measured against.
+func (t *Terrain) NormalAt(x, z float32) ([3]float32, bool) {
+	if t == nil {
+		return [3]float32{0, 1, 0}, false
+	}
+	const step = 0.5
+	h, ok := t.HeightAt(x, z)
+	if !ok {
+		return [3]float32{0, 1, 0}, false
+	}
+	hx, okx := t.HeightAt(x+step, z)
+	hz, okz := t.HeightAt(x, z+step)
+	if !okx || !okz {
+		return [3]float32{0, 1, 0}, false
+	}
+	n := [3]float32{-(hx - h) / step, 1, -(hz - h) / step}
+	l := float32(math.Sqrt(float64(n[0]*n[0] + n[1]*n[1] + n[2]*n[2])))
+	if l < 1e-9 {
+		return [3]float32{0, 1, 0}, true
+	}
+	return [3]float32{n[0] / l, n[1] / l, n[2] / l}, true
+}
