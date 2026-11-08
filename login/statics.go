@@ -68,6 +68,19 @@ type staticTriangle struct {
 
 // staticScene is a space's static triangles, indexed in a ground-plane grid.
 type staticScene struct {
+	// mu guards Triangles and Grid.
+	//
+	// The scene is shared: the battle's turret-tracker goroutine reads it every
+	// tick while a shell's destructible removal rewrites the grid. An
+	// unsynchronised map read against that write is a fatal "concurrent map
+	// read and map write" — measured, it killed the server mid-battle, and the
+	// client then reported REASON_CORRUPTED_PACKET because the packets it was
+	// waiting for stopped coming.
+	mu sync.RWMutex
+	// Triangles is the scene's collision geometry. Readers get POINTERS into
+	// it, so destroy must never compact it in place: a reader that took a
+	// pointer before the removal would otherwise find a different triangle
+	// there afterwards. It builds a fresh slice instead.
 	Triangles []staticTriangle
 	// Grid maps a cell to the triangles overlapping it.
 	Grid map[[2]int32][]int32
@@ -228,12 +241,14 @@ func (s *staticScene) segmentHit(from, to [3]float32) (staticTriangle, float32, 
 	if s == nil {
 		return staticTriangle{}, 0, false
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	min := [3]float32{min32(from[0], to[0]), min32(from[1], to[1]), min32(from[2], to[2])}
 	max := [3]float32{max32(from[0], to[0]), max32(from[1], to[1]), max32(from[2], to[2])}
 	delta := [3]float32{to[0] - from[0], to[1] - from[1], to[2] - from[2]}
 	best := float32(-1)
 	var bestTri staticTriangle
-	for _, t := range s.trianglesIn(min, max) {
+	for _, t := range s.trianglesInLocked(min, max) {
 		if t.Kind == bodyRemains {
 			continue
 		}
@@ -257,8 +272,13 @@ func (s *staticScene) destroy(instance uint32, body string) bool {
 	if s == nil {
 		return false
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	removed := false
-	keep := s.Triangles[:0]
+	// A fresh slice, not `s.Triangles[:0]`: trianglesIn hands out pointers into
+	// the old array, and compacting in place would leave them pointing at a
+	// different triangle.
+	keep := make([]staticTriangle, 0, len(s.Triangles))
 	for _, t := range s.Triangles {
 		if t.Instance == instance && t.Body == body {
 			removed = true
@@ -271,20 +291,7 @@ func (s *staticScene) destroy(instance uint32, body string) bool {
 	}
 	s.Triangles = keep
 	// The grid indexes the triangles by position, so it has to be rebuilt.
-	s.Grid = map[[2]int32][]int32{}
-	for i := range s.Triangles {
-		t := &s.Triangles[i]
-		x0 := int32(math.Floor(float64(t.Bounds[0][0] / staticsCell)))
-		x1 := int32(math.Floor(float64(t.Bounds[1][0] / staticsCell)))
-		z0 := int32(math.Floor(float64(t.Bounds[0][2] / staticsCell)))
-		z1 := int32(math.Floor(float64(t.Bounds[1][2] / staticsCell)))
-		for x := x0; x <= x1; x++ {
-			for z := z0; z <= z1; z++ {
-				key := [2]int32{x, z}
-				s.Grid[key] = append(s.Grid[key], int32(i))
-			}
-		}
-	}
+	s.rebuildGridLocked()
 	return true
 }
 
@@ -293,6 +300,13 @@ func (s *staticScene) trianglesIn(min, max [3]float32) []*staticTriangle {
 	if s == nil {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.trianglesInLocked(min, max)
+}
+
+// trianglesInLocked is trianglesIn for a caller that already holds the lock.
+func (s *staticScene) trianglesInLocked(min, max [3]float32) []*staticTriangle {
 	x0 := int32(math.Floor(float64(min[0] / staticsCell)))
 	x1 := int32(math.Floor(float64(max[0] / staticsCell)))
 	z0 := int32(math.Floor(float64(min[2] / staticsCell)))
@@ -950,6 +964,8 @@ func (s *staticScene) destructiblesWithin(center [3]float32, radius float32) []s
 	if s == nil || radius <= 0 {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	min := [3]float32{center[0] - radius, center[1] - radius, center[2] - radius}
 	max := [3]float32{center[0] + radius, center[1] + radius, center[2] + radius}
 	type bodyKey struct {
@@ -958,7 +974,7 @@ func (s *staticScene) destructiblesWithin(center [3]float32, radius float32) []s
 	}
 	seen := map[bodyKey]bool{}
 	var out []staticTriangle
-	for _, t := range s.trianglesIn(min, max) {
+	for _, t := range s.trianglesInLocked(min, max) {
 		if t.Kind != bodyDestructible && t.Kind != bodyModule {
 			continue
 		}
@@ -977,6 +993,13 @@ func (s *staticScene) rebuildGrid() {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rebuildGridLocked()
+}
+
+// rebuildGridLocked is rebuildGrid for a caller that already holds the lock.
+func (s *staticScene) rebuildGridLocked() {
 	s.Grid = map[[2]int32][]int32{}
 	for i := range s.Triangles {
 		t := &s.Triangles[i]
@@ -1001,6 +1024,8 @@ func (s *staticScene) groundHeightAt(x, z, maxY float32) (float32, bool) {
 	if s == nil {
 		return 0, false
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	key := [2]int32{
 		int32(math.Floor(float64(x / staticsCell))),
 		int32(math.Floor(float64(z / staticsCell))),
