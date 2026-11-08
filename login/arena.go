@@ -1669,19 +1669,31 @@ const ArenaUpdateSettings uint8 = 30
 // the captured entry carries: `selectPlayerEntity` + element 0x88
 // (`updateArena`, client method 58).
 //
-// Both length fields are PACKED integers, as the engine writes them
-// (`BinaryOStream::writePackedInt`, binary_stream.hpp:254): one byte below 255,
-// else 0xFF followed by a little-endian u24. The element length is packed
-// because `updateArena` declares `VariableLengthHeaderSize 1`, and the STRING
-// argument is packed because every string length is.
+// The two length fields are encoded DIFFERENTLY and both matter:
+//
+//   - The ELEMENT length is fixed-width (`VariableLengthHeaderSize 1`), and a
+//     value of 0xFF is not a length at all — it selects
+//     `InterfaceElement::specialExpandLength` (interface_element.cpp:544),
+//     which reads a little-endian u32 length from the next four bytes and then
+//     treats the body as ROTATED: the four bytes that follow the length are
+//     body[4:], and body[0:4] sit at the end of the element. `appendElement`
+//     writes exactly that.
+//   - The STRING length is a packed integer (`writePackedInt`,
+//     binary_stream.hpp:254): one byte below 255, else 0xFF and a u24.
+//
+// Writing the element length packed instead makes the client read the u24 plus
+// the period byte as a u32 length and die with
+// `MF_ASSERT_DEV FAILED: tailAdvanceSuccess` (interface_element.cpp:544,
+// "BundleDataPos::advance: Ran out of packets").
 func EncodeArenaSettingsUpdate(settings []byte) ([]byte, error) {
 	args := []byte{ArenaUpdateSettings}
 	args = appendPackedU24(args, len(settings))
 	args = append(args, settings...)
-	out := []byte{elSelectPlayerEntity}
-	out = append(out, byte(entityMethodBase+58)) // updateArena
-	out = appendPackedU24(out, len(args))
-	return append(out, args...), nil
+	el, err := appendElement(nil, byte(entityMethodBase+58), 1, args)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{elSelectPlayerEntity}, el...), nil
 }
 
 // SpawnHeight is how far above the map origin the player is placed. The origin

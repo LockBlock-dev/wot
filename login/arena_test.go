@@ -925,32 +925,35 @@ func TestArenaEntrySequenceHasNoHoles(t *testing.T) {
 	}
 }
 
-// TestArenaSettingsUpdateIsAPackedElement pins the framing of the entry's
+// TestArenaSettingsUpdateIsTheOversizedElement pins the framing of the entry's
 // arena-settings element.
 //
 // The client's `Avatar.updateArena(updateType, argStr)` hands the argument to
 // `ClientArena.update`, which maps ARENA_UPDATE.SETTINGS (30) to
 // `__onArenaSettingsUpdate` — and that does `cPickle.loads(argStr)`, a RAW
-// pickle (PERIOD, by contrast, inflates first). The captured element is
-// `selectPlayerEntity` + element 0x88 (`updateArena`, client method 58), and
-// both length fields are PACKED integers as `BinaryOStream::writePackedInt`
-// writes them: one byte below 255, else 0xFF and a little-endian u24.
+// pickle (PERIOD, by contrast, inflates first). The element is
+// `selectPlayerEntity` + element 0x88 (`updateArena`, client method 58).
 //
-// Sending the bare pickle here instead makes the client read its first byte as
-// an element id and die with `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_`.
-func TestArenaSettingsUpdateIsAPackedElement(t *testing.T) {
+// The element length is FIXED-width, and 0xFF selects
+// `InterfaceElement::specialExpandLength`: a little-endian u32 length followed
+// by a ROTATED body — body[4:] first, body[0:4] at the end of the element.
+// The STRING length inside is a packed integer instead. Writing the element
+// length packed makes the client read a u32 out of the u24 and the period byte
+// and die with `tailAdvanceSuccess`.
+func TestArenaSettingsUpdateIsTheOversizedElement(t *testing.T) {
 	short := []byte{0x80, 0x02, '}', 'q', 0x00, '.', 0x2e}
 	el, err := EncodeArenaSettingsUpdate(short)
 	if err != nil {
 		t.Fatalf("EncodeArenaSettingsUpdate: %v", err)
 	}
+	// Small enough for a one-byte length: [1a][88][len][1e][strlen][pickle].
 	want := []byte{elSelectPlayerEntity, 0x88, byte(1 + 1 + len(short)), ArenaUpdateSettings, byte(len(short))}
 	want = append(want, short...)
 	if !bytes.Equal(el, want) {
 		t.Fatalf("short settings element\n got % x\nwant % x", el, want)
 	}
 
-	// A document past 255 bytes takes the packed form on both lengths.
+	// Past 255 bytes the element takes the oversized form.
 	long := bytes.Repeat([]byte{0x41}, 1000)
 	el, err = EncodeArenaSettingsUpdate(long)
 	if err != nil {
@@ -962,21 +965,33 @@ func TestArenaSettingsUpdateIsAPackedElement(t *testing.T) {
 	if el[2] != 0xFF {
 		t.Fatalf("element length byte %#02x, want the 0xFF escape", el[2])
 	}
-	elLen := int(el[3]) | int(el[4])<<8 | int(el[5])<<16
-	if wantLen := 1 + 4 + len(long); elLen != wantLen {
-		t.Fatalf("element length %d, want %d", elLen, wantLen)
+	elLen := binary.LittleEndian.Uint32(el[3:7])
+	args := []byte{ArenaUpdateSettings}
+	args = appendPackedU24(args, len(long))
+	args = append(args, long...)
+	if int(elLen) != len(args) {
+		t.Fatalf("element length %d, want %d", elLen, len(args))
 	}
-	if el[6] != ArenaUpdateSettings {
-		t.Fatalf("update type %d, want %d (ARENA_UPDATE.SETTINGS)", el[6], ArenaUpdateSettings)
+	// The body is rotated: body[4:] then body[0:4].
+	body := append(append([]byte{}, el[7:]...), el[7+len(args)-4:]...)
+	_ = body
+	if !bytes.Equal(el[7:7+len(args)-4], args[4:]) {
+		t.Fatal("body[4:] does not follow the length")
 	}
-	if el[7] != 0xFF {
-		t.Fatalf("string length byte %#02x, want the 0xFF escape", el[7])
+	if !bytes.Equal(el[7+len(args)-4:], args[:4]) {
+		t.Fatalf("tail % x, want the body's first four bytes % x", el[7+len(args)-4:], args[:4])
 	}
-	strLen := int(el[8]) | int(el[9])<<8 | int(el[10])<<16
+	if args[0] != ArenaUpdateSettings {
+		t.Fatalf("update type %d, want %d (ARENA_UPDATE.SETTINGS)", args[0], ArenaUpdateSettings)
+	}
+	if args[1] != 0xFF {
+		t.Fatalf("string length byte %#02x, want the 0xFF escape", args[1])
+	}
+	strLen := int(args[2]) | int(args[3])<<8 | int(args[4])<<16
 	if strLen != len(long) {
 		t.Fatalf("string length %d, want %d", strLen, len(long))
 	}
-	if !bytes.Equal(el[11:], long) {
+	if !bytes.Equal(args[5:], long) {
 		t.Fatal("the pickle is not the string argument")
 	}
 }
