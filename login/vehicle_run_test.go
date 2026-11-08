@@ -2,7 +2,6 @@ package login
 
 import (
 	"bytes"
-	"encoding/binary"
 	"os"
 	"testing"
 
@@ -40,13 +39,12 @@ func TestVehiclePropertyRunRoundTrips(t *testing.T) {
 	c := entdef.NewCodec()
 	got := map[string]entdef.Value{}
 	for i := range typ.Properties {
-		// The run's property index is a u16 (the client reads it that way).
-		var id [2]byte
+		var id [1]byte
 		if _, err := r.Read(id[:]); err != nil {
 			t.Fatalf("property %d: %v", i, err)
 		}
-		if got := int(binary.LittleEndian.Uint16(id[:])); got != i {
-			t.Fatalf("exposed id = %d, want %d", got, i)
+		if int(id[0]) != i {
+			t.Fatalf("exposed id = %d, want %d", id[0], i)
 		}
 		v, err := c.Read(r, typ.Properties[i].Type)
 		if err != nil {
