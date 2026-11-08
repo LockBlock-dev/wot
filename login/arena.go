@@ -839,14 +839,15 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: AvatarInfo properties (%v)", from, h.ArenaID, err)
 		return seq, nil
 	}
-	// The plain createEntity, like every other entity this server makes. The
-	// battle capture has NO createEntityDetailed element at all (28 `0c`-led
-	// datagrams, none of them one), so the client's detailed path is not what
-	// the genuine server drives — and against ours it silently created
-	// nothing, which is why the AvatarInfo never existed and the arena's
-	// vehicle list stayed empty.
-	icreate, err := EncodeCreateEntity(info.ID, uint16(info.Type.TypeID), VolatilePackerType,
-		[3]float32{0, 0, 0}, 0, 0, 0, iprops)
+	// createEntityDetailed, exactly as the capture does it. The official
+	// AvatarInfo create is `0c 32 00 | 00 | <id> | 1d 00 | 00 00 | 00 |
+	// 0a "bw.default" | pos 12B | dir 4B | 01 00 <avatarID>` — element 0x0C,
+	// 50 bytes, property run count 1 index 0. The plain createEntity (0x0B)
+	// is what this used to send, and the client refused it: its cumulative ack
+	// stopped on this packet and everything behind it — the period, the bots,
+	// the roster — queued there for the whole battle.
+	icreate, err := EncodeCreateEntityDetailed(info.ID, uint16(info.Type.TypeID), "",
+		[3]float32{0, 0, 0}, [3]float32{0, 0, 0}, iprops)
 	if err != nil {
 		s.logf("stage2 %s: arena %d: AvatarInfo element (%v)", from, h.ArenaID, err)
 		return seq, nil
