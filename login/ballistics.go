@@ -43,8 +43,12 @@ type shellLanding struct {
 	Distance float32
 	// Time is how long it flew, in seconds.
 	Time float32
-	// Hit is the vehicle hit, when Kind is landingVehicle.
-	Hit shotResult
+	// Target is the index into the session's targets of the vehicle hit, when
+	// Kind is landingVehicle, and VHit where on its mesh.
+	Target int
+	VHit   vehicleHit
+	// Dir is the shell's direction at the hit.
+	Dir [3]float32
 }
 
 const (
@@ -53,32 +57,33 @@ const (
 	landingRange   uint8 = 2
 )
 
-// traceShot traces a SEGMENT against the boxes and returns the nearest hit.
+// traceTargets finds the nearest synthetic tank a segment meets, and where on
+// its collision mesh.
 //
-// The ray form is `resolveShot`; this is the flight's step, which ends at the
-// step's end and must not reach past it.
-func traceShot(sh shellSpec, from, to [3]float32, boxes []hitBox, distanceOffset float64) shotResult {
-	d := [3]float32{to[0] - from[0], to[1] - from[1], to[2] - from[2]}
-	length := float32(math.Sqrt(float64(d[0]*d[0] + d[1]*d[1] + d[2]*d[2])))
-	if length < 1e-9 {
-		return shotResult{}
-	}
-	dir := [3]float32{d[0] / length, d[1] / length, d[2] / length}
-	var res shotResult
-	for _, box := range boxes {
-		t, point, normal, localNormal, face, ok := box.intersect(from, dir)
-		if !ok || t > length || (res.Hit && t >= res.Distance) {
+// The segment is the flight's step, so it must not reach past the step's end:
+// every part's triangles are tested, and the nearest crossing wins.
+func traceTargets(targets []*botTarget, from, to [3]float32) (int, vehicleHit, bool) {
+	best := -1
+	var bestHit vehicleHit
+	for i, t := range targets {
+		if t == nil || t.dead.Load() || t.collision == nil {
 			continue
 		}
-		res = rollShot(sh, box, t, point, normal, localNormal, face, dir, distanceOffset+float64(t))
+		h, ok := t.collision.firstHit(t.pos, t.yaw, from, to)
+		if !ok {
+			continue
+		}
+		if best < 0 || h.Distance < bestHit.Distance {
+			best, bestHit = i, h
+		}
 	}
-	return res
+	return best, bestHit, best >= 0
 }
 
 // flyShell flies a shell and returns where it lands.
 //
 // terrain may be nil (no ground), and boxes are the vehicles it may meet.
-func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, boxes []hitBox) shellLanding {
+func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, targets []*botTarget) shellLanding {
 	pos, vel := start, velocity
 	time := float32(0)
 	gravity := float32(sh.Gravity)
@@ -96,7 +101,7 @@ func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, boxes 
 			pos[2] + vel[2]*flightStep,
 		}
 		nextVel := [3]float32{vel[0], vel[1] - gravity*flightStep, vel[2]}
-		if hit := traceShot(sh, pos, next, boxes, float64(time)*float64(sh.Speed)); hit.Hit {
+		if idx, hit, ok := traceTargets(targets, pos, next); ok {
 			fraction := hit.Distance
 			step := float32(math.Sqrt(float64(
 				(next[0]-pos[0])*(next[0]-pos[0]) +
@@ -112,14 +117,19 @@ func flyShell(sh shellSpec, start, velocity [3]float32, terrain *Terrain, boxes 
 			if t > 1 {
 				t = 1
 			}
-			hit.Distance = time*float32(sh.Speed) + fraction
+			dir := [3]float32{vel[0], vel[1], vel[2]}
+			if l := float32(math.Sqrt(float64(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]))); l > 1e-9 {
+				dir = [3]float32{dir[0] / l, dir[1] / l, dir[2] / l}
+			}
 			return shellLanding{
 				Kind:     landingVehicle,
 				Point:    hit.Point,
 				Velocity: lerp3(vel, nextVel, t),
-				Distance: hit.Distance,
+				Distance: time*float32(sh.Speed) + fraction,
 				Time:     time + flightStep*t,
-				Hit:      hit,
+				Target:   idx,
+				VHit:     hit,
+				Dir:      dir,
 			}
 		}
 		if terrain != nil {

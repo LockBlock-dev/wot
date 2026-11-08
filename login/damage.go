@@ -8,6 +8,8 @@ import (
 	"net"
 
 	"github.com/LockBlock-dev/wot/entdef"
+	"strings"
+	"sync/atomic"
 )
 
 // Server-side shot resolution and the damage it does, for the synthetic
@@ -21,78 +23,17 @@ import (
 // `showDamageFromShot` / `onHealthChanged` / `showShotResults`, with the
 // method ids and argument types from the shipped 2.4.1 defs.
 
-// dummyPart is one of the dummy's hit parts: its collision box in the PART's
-// own frame, where that frame sits in the vehicle frame, and the armour of
-// each face in millimetres.
-//
-// The boxes are NOT guesses: they are the client's own `getBoundingBox(part)`,
-// which is what `DamageFromShotDecoder.decodeSegment` maps a hit point's
-// quantized fractions back through. Each is the `HKBodyFlagsData`
-// `minBounds_`/`maxBounds_` of the part's collision model, in the part's own
-// frame — the model's origin, which sits at the part's offset in the vehicle
-// frame.
-type dummyPart struct {
-	// Part is the client's `TankPartIndexes` index: 1 hull, 2 turret.
-	Part   uint8
-	Bounds [2][3]float32
-	// Offset is the part's origin in the vehicle frame, from the item defs.
-	Offset [3]float32
-	// Armour by face: front (+Z), side (±X), rear (-Z), top (+Y).
-	Front, Side, Rear, Top float32
-	// Device marks a part that is a module, not armour: a shell that
-	// penetrates it damages the module and does NO hull damage (the gun).
-	Device bool
-}
-
-// dummyParts is the TOG II's hull and turret.
-//
-// The hull is `Hull.havok`'s box, its origin at the chassis's
-// `<hullPosition>0 1.3553 0`. The turret is `Turret_01.havok`'s box, its origin
-// at the chassis's `<turretPositions><turret>0 0.704143 1.81585` — which is
-// relative to the HULL, not the vehicle, so it sits at 2.059 m and the turret
-// rises above the hull's 2.088 m top. Without it a shell aimed at the turret
-// passed over the hull box and did nothing at all.
-//
-// The armour is the item defs' per-material table: the hull's `armor_1` 76.2,
-// `armor_4` 50.8, `armor_9` 25.4; the turret's `armor_1` 114.3, `armor_3` 76.2,
-// `armor_4` 53.3, `armor_6` 19.
-var dummyParts = []dummyPart{
-	{
-		Part:   1, // TankPartIndexes.HULL
-		Bounds: [2][3]float32{{-1.5622, -0.8706, -5.2344}, {1.5622, 0.7324, 4.2737}},
-		Offset: [3]float32{0, 1.3553, 0},
-		Front:  76.2, Side: 76.2, Rear: 50.8, Top: 25.4,
-	},
-	{
-		Part:   2, // TankPartIndexes.TURRET
-		Bounds: [2][3]float32{{-1.025, -0.2735, -1.4434}, {1.025, 0.9986, 1.0816}},
-		Offset: [3]float32{0, 1.3553 + 0.704143, 1.81585},
-		Front:  114.3, Side: 76.2, Rear: 53.3, Top: 19,
-	},
-	{
-		// The gun is a DEVICE, not armour: a shell that penetrates its 25.4 mm
-		// damages the gun module and does no hull damage, which is why
-		// shooting a barrel shows a critical hit and no health bar movement.
-		// Box from `Gun_01.havok`, its origin at the turret's plus the
-		// chassis's `<gunPosition>0 0.46479 0.76407`.
-		Part:   3, // TankPartIndexes.GUN
-		Bounds: [2][3]float32{{-0.1589, -0.1617, -0.632}, {0.1589, 0.1617, 3.8129}},
-		Offset: [3]float32{0, 1.3553 + 0.704143 + 0.46479, 1.81585 + 0.76407},
-		Front:  25.4, Side: 25.4, Rear: 25.4, Top: 25.4,
-		Device: true,
-	},
-}
-
-// dummyHullBounds is the hull part's box, the bounds the hull's hit segment is
-// quantized over.
-var dummyHullBounds = dummyParts[0].Bounds
-
 // `VEHICLE_HIT_EFFECT` codes the client's `DamageFromShotDecoder` maps to an
 // effect group.
 const (
 	hitEffectPierced       uint8 = 4
 	hitEffectNotPierced    uint8 = 3
 	hitEffectDeviceDamaged uint8 = 6
+	// hitEffectRicochet is `FINAL_RICOCHET`: the shell bounced off the armour.
+	hitEffectRicochet uint8 = 2
+	// hitEffectPiercedNoDamage is `ARMOR_PIERCED_NO_DAMAGE`: through a screen
+	// only, missing the main armour behind it.
+	hitEffectPiercedNoDamage uint8 = 0
 )
 
 // `VEHICLE_HIT_FLAGS`, as the reference's `ShellHit` sets them.
@@ -101,6 +42,8 @@ const (
 	hitFlagArmorNotPierced uint32 = 0x20
 	hitFlagVehicleKilled   uint32 = 1
 	hitFlagExploded        uint32 = 0x2000
+	hitFlagRicochet        uint32 = 0x8
+	hitFlagScreenPierced   uint32 = 0x40
 	hitFlagsPierced        uint32 = hitFlagDirect | 0x100 | 0x10
 )
 
@@ -111,10 +54,18 @@ const damageSpread = 0.25
 // where it stands, and its own damage state. The dummy and every bot in the
 // battle is one, and the shell resolves against whichever is in its path.
 type botTarget struct {
-	entity    *Entity
-	id        uint32
-	pos       [3]float32
-	yaw       float32
+	entity *Entity
+	id     uint32
+	pos    [3]float32
+	yaw    float32
+	// collision is the client's collision mesh: the shell is traced through
+	// its triangles, so the hit point, the normal and the armour are the
+	// client's own. nil when the game's files are not available, and the
+	// target cannot be hit.
+	collision *vehicleCollision
+	// dead is set when the health reaches 0, so a flight does not have to read
+	// the health from another goroutine.
+	dead      atomic.Bool
 	health    int
 	maxHealth int
 	// stickers is the accumulated `damageStickers` (the shell holes); every
@@ -124,103 +75,6 @@ type botTarget struct {
 	infoIndex int
 	// modules is its module and crew state, nil until the first module hit.
 	modules []moduleState
-}
-
-// hitBox is an oriented box: the hull's collision volume for the trace.
-//
-// Center/Half are the trace volume in the vehicle frame; Origin is the HULL
-// PART's origin in the world, which is the frame the hit point's segment is
-// encoded in (the client decodes it against the part's own bounding box).
-type hitBox struct {
-	Center [3]float32
-	Half   [3]float32
-	Yaw    float32
-	Origin [3]float32
-	// Part is the client's `TankPartIndexes` index and Bounds the part's own
-	// box, both of which the hit-point segment carries; Armor is front, side,
-	// rear, top in millimetres.
-	Part   uint8
-	Bounds [2][3]float32
-	Armor  [4]float32
-	// Device marks a module part (the gun): a penetrating hit damages the
-	// module and does no hull damage.
-	Device bool
-	// Target is the index into the session's targets of the tank this box
-	// belongs to, so a hit names which one the shell met.
-	Target int
-}
-
-// intersect traces the ray origin+dir*t through the box. It returns the
-// nearest positive t, the world hit point and outward normal, the normal in
-// the box's own frame, and the face it hit (0 ±X, 1 ±Y, 2 ±Z).
-func (b hitBox) intersect(origin, dir [3]float32) (t float32, point, normal, localNormal [3]float32, face int, ok bool) {
-	// Into the box's frame.
-	lx := origin[0] - b.Center[0]
-	ly := origin[1] - b.Center[1]
-	lz := origin[2] - b.Center[2]
-	c, s := cos32(b.Yaw), sin32(b.Yaw)
-	ox := lx*c - lz*s
-	oz := lx*s + lz*c
-	dx := dir[0]*c - dir[2]*s
-	dz := dir[0]*s + dir[2]*c
-	o := [3]float32{ox, ly, oz}
-	d := [3]float32{dx, dir[1], dz}
-	half := b.Half
-
-	tmin := float32(-math.MaxFloat32)
-	tmax := float32(math.MaxFloat32)
-	face = -1
-	for i := 0; i < 3; i++ {
-		if abs32(d[i]) < 1e-6 {
-			if abs32(o[i]) > half[i] {
-				return 0, [3]float32{}, [3]float32{}, [3]float32{}, 0, false
-			}
-			continue
-		}
-		a := (-half[i] - o[i]) / d[i]
-		bb := (half[i] - o[i]) / d[i]
-		if a > bb {
-			a, bb = bb, a
-		}
-		if a > tmin {
-			tmin = a
-			face = i
-		}
-		if bb < tmax {
-			tmax = bb
-		}
-		if tmin > tmax {
-			return 0, [3]float32{}, [3]float32{}, [3]float32{}, 0, false
-		}
-	}
-	if tmax < 0 {
-		return 0, [3]float32{}, [3]float32{}, [3]float32{}, 0, false
-	}
-	if tmin < 0 {
-		tmin = 0
-	}
-	lp := [3]float32{o[0] + d[0]*tmin, o[1] + d[1]*tmin, o[2] + d[2]*tmin}
-	ln := [3]float32{}
-	switch face {
-	case 0:
-		ln[0] = sign32(lp[0])
-	case 1:
-		ln[1] = sign32(lp[1])
-	case 2:
-		ln[2] = sign32(lp[2])
-	}
-	// Back to world.
-	point = [3]float32{
-		b.Center[0] + lp[0]*c + lp[2]*s,
-		b.Center[1] + lp[1],
-		b.Center[2] - lp[0]*s + lp[2]*c,
-	}
-	normal = [3]float32{
-		ln[0]*c + ln[2]*s,
-		ln[1],
-		-ln[0]*s + ln[2]*c,
-	}
-	return tmin, point, normal, ln, face, true
 }
 
 // shotResult is what one shell does to the dummy.
@@ -247,107 +101,97 @@ type shotResult struct {
 	Target int
 }
 
-// resolveShot traces one shell against every part of the dummy and rolls its
-// penetration and damage against the NEAREST one it meets.
-func resolveShot(sh shellSpec, origin, dir [3]float32, boxes []hitBox) shotResult {
-	var res shotResult
-	for _, box := range boxes {
-		t, point, normal, localNormal, face, ok := box.intersect(origin, dir)
-		if !ok || (res.Hit && t >= res.Distance) {
-			continue
-		}
-		res = rollShot(sh, box, t, point, normal, localNormal, face, dir, float64(t))
+// rollVehicleHit is what a shell does to the armour it meets: it walks the
+// plates along its way (screens, tracks, the gun, then the main armour) and
+// returns the hit the client is shown, with the damage and the effect code.
+//
+// Ported from the reference's `armor::hit`: the outcome decides the damage,
+// and an HE shell that does not pierce explodes on the armour instead.
+func rollVehicleHit(sh shellSpec, target int, contact vehicleHit, dir [3]float32, distance float64, c *vehicleCollision, pos [3]float32, yaw float32) (shotResult, bool) {
+	impact, ok := armorHit(sh, float32(distance), 1, contact.Point, dir, c, pos, yaw)
+	if !ok {
+		return shotResult{}, false
 	}
-	return res
-}
-
-// rollShot rolls one hit on one part.
-func rollShot(sh shellSpec, box hitBox, t float32, point, normal, localNormal [3]float32, face int, dir [3]float32, distance float64) shotResult {
-	armor := box.armorForFace(face, localNormal)
-	// The impact angle: the cosine between the shell's path and the face's
-	// outward normal. A grazing hit meets more armour.
-	cos := abs32(dir[0]*normal[0] + dir[1]*normal[1] + dir[2]*normal[2])
-	if cos < 0.1 {
-		cos = 0.1
-	}
-	// The shell's penetration falls off with the distance it flew, and
-	// varies either way by its own randomization: a normal distribution,
-	// clamped to ±1 and scaled by `PenRandomization`.
-	pen := sh.penAt(distance) * (1 + clampF64(normalRandom()*0.5, -1, 1)*sh.PenRandomization)
-	// Normalization: an AP shell turns toward the armour's normal as it hits,
-	// more so when its caliber is over twice the armour (overmatch).
-	if sh.NormalizationAngle > 0 && cos < 1 {
-		norm := sh.NormalizationAngle
-		if armor > 0 && sh.Caliber > float64(armor)*2 {
-			norm *= 1.4 * sh.Caliber / (float64(armor) * 2)
-		}
-		angle := math.Acos(float64(cos)) - norm
-		if angle < 0 {
-			cos = 1
-		} else {
-			cos = float32(math.Cos(math.Min(angle, maxHitAngle)))
-		}
-	}
-	effective := armor / cos
-	// Ricochets: past the shell's own angle, unless it is an AP or APCR round
-	// meeting armour thinner than a third of its caliber.
-	ricochet := false
-	if sh.HasRicochetAngle && float64(cos) < sh.RicochetAngleCos {
-		thin := (sh.Kind == "ARMOR_PIERCING" || sh.Kind == "ARMOR_PIERCING_CR") && float64(armor)*3 < sh.Caliber
-		ricochet = !thin
-	}
+	h := impact.Hit
 	res := shotResult{
-		Hit:      true,
-		Target:   box.Target,
-		Point:    point,
-		Normal:   normal,
-		Distance: t,
-		Armor:    effective,
-		Pierced:  !ricochet && pen > float64(effective),
+		Hit:         true,
+		Target:      target,
+		Point:       h.Point,
+		Normal:      h.Normal,
+		Distance:    float32(distance),
+		Part:        h.Part,
+		Bounds:      h.Bounds,
+		Local:       h.LocalPoint,
+		LocalDir:    h.LocalDir,
+		LocalNormal: h.LocalNormal,
+		Face:        faceOf(h.LocalNormal),
+		Armor:       effectiveArmor(sh, h),
+		Pierced:     impact.Outcome == outcomePierced,
 	}
-	if box.Device {
-		// A module hit: the shell damages the device and the hull takes
-		// nothing. `ARMOR_PIERCED_DEVICE_DAMAGED` is the client's
-		// `VEHICLE_HIT_EFFECT` 6, which its feedback turns into a critical
-		// hit; a shell that does not get through the 25.4 mm is a plain
-		// non-penetration.
-		if res.Pierced {
+	// A device the shell got through (the gun, a track, the surveying device)
+	// is a module hit: the hull takes nothing and the client shows a critical
+	// hit. The game names them `gun`, `leftTrack`, `rightTrack` and
+	// `surveyingDevice`; a screen is an `armor_N` with a zero damage factor.
+	device := !strings.HasPrefix(h.GroupName, "armor_")
+	switch impact.Outcome {
+	case outcomePierced, outcomeScreens:
+		if device {
 			res.Effect = hitEffectDeviceDamaged
 			res.Flags = hitFlagsPierced
-		} else {
-			res.Effect = hitEffectNotPierced
-			res.Flags = hitFlagDirect | hitFlagArmorNotPierced
+			res.Damage = 0
+			return res, true
 		}
-		res.Damage = 0
-	} else if res.Pierced {
-		res.Damage = int(math.Round(sh.damageAt(distance) * (1 + (rand.Float64()*2-1)*damageSpread)))
+		if impact.Outcome == outcomeScreens {
+			// Through a screen only, missing the main armour behind it.
+			res.Effect = hitEffectPiercedNoDamage
+			res.Flags = hitFlagDirect | hitFlagScreenPierced
+			return res, true
+		}
+		res.Damage = int(math.Round(float64(impact.Damage) * (1 + (rand.Float64()*2-1)*damageSpread)))
 		res.Effect = hitEffectPierced
 		res.Flags = hitFlagsPierced
-	} else {
+	case outcomeRicochet:
+		res.Effect = hitEffectRicochet
+		res.Flags = hitFlagDirect | hitFlagRicochet
+	case outcomeNotPierced:
 		res.Effect = hitEffectNotPierced
 		res.Flags = hitFlagDirect | hitFlagArmorNotPierced
 		// An HE shell that does not pierce explodes on the armour: half its
 		// damage at the armour, less what the armour absorbs.
-		if sh.KindIndex == 1 {
-			if dmg := 0.5*sh.damageAt(distance) - 1.3*float64(effective); dmg > 0 {
+		if sh.isHE() {
+			if dmg := 0.5*sh.damageAt(distance) - 1.3*float64(res.Armor); dmg > 0 {
 				res.Damage = int(math.Round(dmg * (1 + (rand.Float64()*2-1)*damageSpread)))
 				res.Flags |= hitFlagExploded
 			}
 		}
 	}
-	// The hit point and direction in the hit PART's frame, which is what the
-	// client's hit-point segment is encoded over: the part's own origin, not
-	// the trace box's centre.
-	c, s := cos32(box.Yaw), sin32(box.Yaw)
-	lx := point[0] - box.Origin[0]
-	lz := point[2] - box.Origin[2]
-	res.Local = [3]float32{lx*c - lz*s, point[1] - box.Origin[1], lx*s + lz*c}
-	res.LocalDir = [3]float32{dir[0]*c - dir[2]*s, dir[1], dir[0]*s + dir[2]*c}
-	res.Part = box.Part
-	res.Bounds = box.Bounds
-	res.Face = face
-	res.LocalNormal = localNormal
-	return res
+	return res, true
+}
+
+// effectiveArmor is the thickness the shell met at its angle, for the log and
+// the HE explosion's absorption.
+func effectiveArmor(sh shellSpec, h vehicleHit) float32 {
+	if h.Material == nil {
+		return 0
+	}
+	cos := float32(1)
+	if h.Material.UseHitAngle {
+		cos = clampF32(-dot3(h.LocalDir, h.LocalNormal), 0, 1)
+	}
+	return penetrationArmor(sh, cos, *h.Material)
+}
+
+// faceOf names the box face a normal points out of (0 ±X, 1 ±Y, 2 ±Z), which
+// is what the module picker is keyed by.
+func faceOf(n [3]float32) int {
+	ax, ay, az := abs32(n[0]), abs32(n[1]), abs32(n[2])
+	switch {
+	case ax >= ay && ax >= az:
+		return 0
+	case ay >= az:
+		return 1
+	}
+	return 2
 }
 
 // maxHitAngle is the steepest impact the normalization may turn a shell to,
@@ -370,66 +214,6 @@ func clampF64(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
-}
-
-// armorForFace is the nominal armour of the face the shell met.
-func (b hitBox) armorForFace(face int, localNormal [3]float32) float32 {
-	switch face {
-	case 0:
-		return b.Armor[1]
-	case 1:
-		return b.Armor[3]
-	case 2:
-		if localNormal[2] > 0 {
-			return b.Armor[0]
-		}
-		return b.Armor[2]
-	}
-	return b.Armor[1]
-}
-
-// dummyBoxes is the dummy's parts at its spawn, in world space.
-func dummyBoxes(pos [3]float32, yaw float32) []hitBox {
-	out := make([]hitBox, 0, len(dummyParts))
-	c, s := cos32(yaw), sin32(yaw)
-	for _, p := range dummyParts {
-		min, max := p.Bounds[0], p.Bounds[1]
-		// The part frame's origin in the world.
-		origin := [3]float32{
-			pos[0] + p.Offset[0]*c + p.Offset[2]*s,
-			pos[1] + p.Offset[1],
-			pos[2] - p.Offset[0]*s + p.Offset[2]*c,
-		}
-		// The trace volume: the part frame's box centre, lifted by the part's
-		// offset and turned with the hull.
-		cx, cy, cz := (min[0]+max[0])/2, (min[1]+max[1])/2, (min[2]+max[2])/2
-		out = append(out, hitBox{
-			Center: [3]float32{
-				origin[0] + cx*c + cz*s,
-				origin[1] + cy,
-				origin[2] - cx*s + cz*c,
-			},
-			Half:   [3]float32{(max[0] - min[0]) / 2, (max[1] - min[1]) / 2, (max[2] - min[2]) / 2},
-			Yaw:    yaw,
-			Origin: origin,
-			Part:   p.Part,
-			Bounds: p.Bounds,
-			Armor:  [4]float32{p.Front, p.Side, p.Rear, p.Top},
-			Device: p.Device,
-		})
-	}
-	return out
-}
-
-// dummyBox is the hull part at its spawn, in world space.
-func dummyBox(pos [3]float32, yaw float32) hitBox {
-	return dummyBoxes(pos, yaw)[0]
-}
-
-// dummyBounds is the hull box in the HULL PART's frame, the bounds the
-// hit-point segment is quantized over.
-func dummyBounds() [2][3]float32 {
-	return dummyHullBounds
 }
 
 // encodeHitSegment packs a hit point's segment the way `VehicleHit
@@ -670,7 +454,7 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	s.mu.Lock()
 	terrain := st.terrain
 	s.mu.Unlock()
-	landing := flyShell(sh, marker.Position, v, terrain, targetBoxes(targets))
+	landing := flyShell(sh, marker.Position, v, terrain, targets)
 	// The aim and the muzzle are the two numbers that decide whether a shot at
 	// a top surface lands or sails over: the elevation is measured from the
 	// gun pivot above the CHASSIS origin, and the pitch is clamped to the
@@ -709,17 +493,26 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		}
 		return
 	}
-	res := landing.Hit
-	if res.Target < 0 || res.Target >= len(targets) {
+	if landing.Target < 0 || landing.Target >= len(targets) {
 		return
 	}
-	t := targets[res.Target]
+	t := targets[landing.Target]
 	s.mu.Lock()
 	oldHealth := t.health
 	maxHealth := t.maxHealth
 	s.mu.Unlock()
 	if oldHealth <= 0 {
 		return // a wreck takes no more shells
+	}
+	// What the shell does to the armour it meets: the plates it walks are the
+	// client's own triangles, so a screen stops it short of the hull and a
+	// ricochet names the plate it bounced off.
+	res, ok := rollVehicleHit(sh, landing.Target, landing.VHit, landing.Dir, float64(landing.Distance), t.collision, t.pos, t.yaw)
+	if !ok {
+		// It met no armour on its way (only a device, or a gap): the shell
+		// goes on, as the reference's `hit` returns None there.
+		s.logf("arena %d: shot %s met no armour on bot %d at %v", arenaID, sh.Name, t.id, landing.VHit.LocalPoint)
+		return
 	}
 	// The module or crewman behind the armour: a penetrating hit damages one,
 	// and the client is told which one (`onExtraHitted`) and, for a wrecked
@@ -896,22 +689,6 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 	}
 	s.logf("arena %d: shot %s hit bot %d part %d: %d damage (health %d -> %d, pierced=%v, armor=%.1f)",
 		arenaID, sh.Name, t.id, res.Part, damage, oldHealth, newHealth, res.Pierced, res.Armor)
-}
-
-// targetBoxes is every synthetic tank's hit boxes, tagged with the index of the
-// target they belong to. A wreck is left out: a dead tank is not a target.
-func targetBoxes(targets []*botTarget) []hitBox {
-	var out []hitBox
-	for i, t := range targets {
-		if t == nil || t.health <= 0 {
-			continue
-		}
-		for _, b := range dummyBoxes(t.pos, t.yaw) {
-			b.Target = i
-			out = append(out, b)
-		}
-	}
-	return out
 }
 
 // killVehiclesInfo marks the victim dead in the arena's `vehiclesInfo` and

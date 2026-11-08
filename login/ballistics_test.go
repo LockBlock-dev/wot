@@ -27,20 +27,20 @@ func TestShellFliesAndHitsTheDummy(t *testing.T) {
 		DamageNear: 300, DamageFar: 280, Kind: "ARMOR_PIERCING", KindIndex: 2,
 		Caliber: 76.2, Speed: 800, Gravity: 9.81, MaxDistance: 720,
 	}
-	boxes := dummyBoxes([3]float32{0, 0, 0}, 0)
+	targets := []*botTarget{{entity: NewEntity(100004, nil), id: 100004, collision: dummyHullVehicleCollision(), health: 1248, maxHealth: 1248}}
 	// From 100 m in front, at the hull's upper plate.
 	start := [3]float32{0, 1.6, 100}
 	dir := [3]float32{0, 0, -1}
 	vel := [3]float32{dir[0] * float32(sh.Speed), dir[1] * float32(sh.Speed), dir[2] * float32(sh.Speed)}
-	landing := flyShell(sh, start, vel, flatTerrain(), boxes)
+	landing := flyShell(sh, start, vel, flatTerrain(), targets)
 	if landing.Kind != landingVehicle {
 		t.Fatalf("landing kind %d, want a vehicle hit", landing.Kind)
 	}
 	if math.Abs(float64(landing.Distance-95.7)) > 2 {
 		t.Fatalf("distance = %.1f m, want ~95 m", landing.Distance)
 	}
-	if landing.Hit.Part != 1 {
-		t.Fatalf("part %d, want the hull", landing.Hit.Part)
+	if landing.VHit.Part != 1 {
+		t.Fatalf("part %d, want the hull", landing.VHit.Part)
 	}
 }
 
@@ -52,12 +52,12 @@ func TestShellFallsShortOfTheDummy(t *testing.T) {
 		DamageNear: 300, DamageFar: 280, Kind: "HIGH_EXPLOSIVE", KindIndex: 1,
 		Caliber: 76.2, Speed: 200, Gravity: 9.81, MaxDistance: 720,
 	}
-	boxes := dummyBoxes([3]float32{0, 0, 0}, 0)
+	targets := []*botTarget{{entity: NewEntity(100004, nil), id: 100004, collision: dummyHullVehicleCollision(), health: 1248, maxHealth: 1248}}
 	// Aimed 20 m above the ground, 300 m out: the drop over that flight is
 	// far more than 20 m.
 	start := [3]float32{0, 20, 300}
 	vel := [3]float32{0, 0, -float32(sh.Speed)}
-	landing := flyShell(sh, start, vel, flatTerrain(), boxes)
+	landing := flyShell(sh, start, vel, flatTerrain(), targets)
 	if landing.Kind != landingTerrain {
 		t.Fatalf("landing kind %d, want the ground", landing.Kind)
 	}

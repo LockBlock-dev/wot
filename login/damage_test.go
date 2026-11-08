@@ -580,7 +580,7 @@ func TestShotPacketsSurviveTheClientReader(t *testing.T) {
 	st := &clientState{
 		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
 		entityID: avatar.ID, avatar: avatar, vehicle: vehicle,
-		targets: []*botTarget{{entity: dummy, id: dummy.ID, pos: dummyPos, health: 1248, maxHealth: 1248, infoIndex: 1}},
+		targets: []*botTarget{{entity: dummy, id: dummy.ID, pos: dummyPos, collision: dummyHullVehicleCollision(), health: 1248, maxHealth: 1248, infoIndex: 1}},
 		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
 		ownVehicle: nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
 		postSeq:    100, postCumul: 3, tick: 1000,
@@ -663,7 +663,7 @@ func TestKillPacketsSurviveTheClientReader(t *testing.T) {
 	st := &clientState{
 		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
 		entityID: avatar.ID, avatar: avatar, vehicle: vehicle,
-		targets: []*botTarget{{entity: dummy, id: dummy.ID, pos: dummyPos, health: 10, maxHealth: 10, infoIndex: 1}},
+		targets: []*botTarget{{entity: dummy, id: dummy.ID, pos: dummyPos, collision: dummyHullVehicleCollision(), health: 10, maxHealth: 10, infoIndex: 1}},
 		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
 		ownVehicle:   nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},
 		infoComp:     nrlComponent{TypeID: AvatarVehiclesInfoNrlID, Node: 40, FirstChild: 41, Props: 1},
@@ -1040,8 +1040,8 @@ func TestShotsHitWhicheverBotIsInThePath(t *testing.T) {
 		accountID: 2, name: "admin", blockKey: "0123456789abcdef",
 		entityID: avatar.ID, avatar: avatar, vehicle: vehicle,
 		targets: []*botTarget{
-			{entity: near, id: near.ID, pos: at(12), health: 1000, maxHealth: 1000, infoIndex: 1},
-			{entity: far, id: far.ID, pos: at(30), health: 1000, maxHealth: 1000, infoIndex: 2},
+			{entity: near, id: near.ID, pos: at(12), collision: dummyHullVehicleCollision(), health: 1000, maxHealth: 1000, infoIndex: 1},
+			{entity: far, id: far.ID, pos: at(30), collision: dummyHullVehicleCollision(), health: 1000, maxHealth: 1000, infoIndex: 2},
 		},
 		gunSpec: spec, hull: hull, ammoList: ammo, loadedShell: shell, nextShell: shell,
 		ownVehicle: nrlComponent{TypeID: OwnVehicleNrlID, Node: 7, FirstChild: 8, Props: 23, Methods: 11},

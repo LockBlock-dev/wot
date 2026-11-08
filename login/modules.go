@@ -144,7 +144,7 @@ const moduleDamageShare = 0.5
 // 2 ±Z) and localNormal its outward normal in the part's frame, which is what
 // tells a front hit from a rear one. localY is the hit point's height in the
 // part's frame, which picks a track on a hull side.
-func pickModule(part uint8, face int, localNormal [3]float32, localY float32) string {
+func pickModule(part uint8, face int, localNormal [3]float32, localY float32, bounds [2][3]float32) string {
 	var table []moduleHit
 	switch part {
 	case 1:
@@ -162,7 +162,7 @@ func pickModule(part uint8, face int, localNormal [3]float32, localY float32) st
 		}
 		// A low hit on the hull's flank is a track, not an engine.
 		if face == 0 {
-			min, max := dummyParts[0].Bounds[0], dummyParts[0].Bounds[1]
+			min, max := bounds[0], bounds[1]
 			if localY < min[1]+(max[1]-min[1])*dummyTrackBand {
 				if localNormal[0] > 0 {
 					return "rightTrack0Health"
@@ -207,7 +207,7 @@ var fireChance = map[string]float64{
 // so.
 func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResult, damage int, attacker uint32) ([]byte, *fireStart) {
 	dummy := t.entity
-	name := pickModule(res.Part, res.Face, res.LocalNormal, res.Local[1])
+	name := pickModule(res.Part, res.Face, res.LocalNormal, res.Local[1], res.Bounds)
 	if name == "" {
 		return nil, nil
 	}

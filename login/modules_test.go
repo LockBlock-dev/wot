@@ -29,15 +29,15 @@ func TestModuleTablesCoverEveryPart(t *testing.T) {
 		}
 	}
 	// The gun's only module is the gun.
-	if got := pickModule(3, 2, [3]float32{0, 0, 1}, 0); got != "gunHealth" {
+	if got := pickModule(3, 2, [3]float32{0, 0, 1}, 0, dummyParts[0].Bounds); got != "gunHealth" {
 		t.Fatalf("gun hit picked %q, want gunHealth", got)
 	}
 	// A low hull-side hit is a track, not an engine.
 	low := dummyParts[0].Bounds[0][1] + 0.1
-	if got := pickModule(1, 0, [3]float32{1, 0, 0}, low); got != "rightTrack0Health" {
+	if got := pickModule(1, 0, [3]float32{1, 0, 0}, low, dummyParts[0].Bounds); got != "rightTrack0Health" {
 		t.Fatalf("low right-side hit picked %q, want rightTrack0Health", got)
 	}
-	if got := pickModule(1, 0, [3]float32{-1, 0, 0}, low); got != "leftTrack0Health" {
+	if got := pickModule(1, 0, [3]float32{-1, 0, 0}, low, dummyParts[0].Bounds); got != "leftTrack0Health" {
 		t.Fatalf("low left-side hit picked %q, want leftTrack0Health", got)
 	}
 }

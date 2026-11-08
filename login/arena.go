@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LockBlock-dev/wot/entdef"
+	"github.com/LockBlock-dev/wot/lobby"
 )
 
 // Arena entry and re-entry.
@@ -757,6 +758,7 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 				entity:    dv,
 				id:        dummyID,
 				pos:       enemy,
+				collision: targetCollision(h.Dummy.VehicleCompDescr),
 				health:    health,
 				maxHealth: health,
 				infoIndex: 1,
@@ -1961,6 +1963,17 @@ func (s *BaseAppServer) answerLeaveArena(conn Transport, from *net.UDPAddr, st *
 	return nil
 }
 
+// targetCollision resolves a vehicle's client collision model from its
+// compact descriptor, or nil when the game's files are not available (the
+// target then cannot be hit).
+func targetCollision(compDescr []byte) *vehicleCollision {
+	r, err := lobby.ResolveCompactDescr(compDescr, generatedVehicleTable())
+	if err != nil {
+		return nil
+	}
+	return VehicleCollisionFor(r.NationName, r.Vehicle)
+}
+
 // pendingBot is one synthetic vehicle waiting to be created.
 type pendingBot struct {
 	doc   ArenaPlayerDoc
@@ -2012,6 +2025,7 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 			entity:    e,
 			id:        b.id,
 			pos:       b.pos,
+			collision: targetCollision(b.doc.VehicleCompDescr),
 			health:    health,
 			maxHealth: health,
 			infoIndex: b.index,
