@@ -2066,9 +2066,28 @@ func (s *BaseAppServer) spawnPendingBots(conn Transport, st *clientState) int {
 		s.mu.Unlock()
 		return 0
 	}
+	// Never run ahead of the client's cumulative ack by more than its receive
+	// window. The bots are four packets each, and creating them as fast as the
+	// tick allows outran the client's acks: it buffered the later sequences,
+	// the earliest ones fell outside its window and were dropped on arrival,
+	// and the ack then stalled on a hole the server could never fill — the
+	// battle with a roster and no tanks.
+	const sendWindow = 16
+	if st.postSeq-st.postCumul >= sendWindow {
+		s.mu.Unlock()
+		return 0
+	}
 	n := botsPerSweep
 	if n > len(st.pendingBots) {
 		n = len(st.pendingBots)
+	}
+	// One bot is four packets; keep the sweep inside the window too.
+	if room := int(sendWindow - (st.postSeq - st.postCumul)); room < n*4 {
+		n = room / 4
+	}
+	if n <= 0 {
+		s.mu.Unlock()
+		return 0
 	}
 	batch := append([]pendingBot(nil), st.pendingBots[:n]...)
 	st.pendingBots = st.pendingBots[n:]
