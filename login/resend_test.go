@@ -197,8 +197,10 @@ func TestNoteReliableRetiresFromTheClientsCumul(t *testing.T) {
 	}
 	s.noteReliable(st, st.stage2Addr, dec)
 
-	if st.postCumul != 1 {
-		t.Fatalf("our cumulative ack moved to %d; the client's seq 0 must not advance it past 1", st.postCumul)
+	// The ack counts the client's reliable packets, one per packet: this is
+	// the first, so it moves to 2 from the setup's 1.
+	if st.postCumul != 2 {
+		t.Fatalf("our cumulative ack moved to %d, want 2 (one reliable packet counted)", st.postCumul)
 	}
 	if got := len(s.resend.byKey[st.resendKey]); got != 1 {
 		t.Fatalf("%d packets still queued, want 1 (seq 7 is not below the client's ack of 7)", got)

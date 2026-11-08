@@ -613,9 +613,9 @@ type clientState struct {
 	// is what the captured server does for 408 of 7591 ticks.
 	lastMarker    nrlGunMarker
 	lastMarkerSet bool
-	// clientCumul is the client's last cumulative ack (its own channel
-	// counter), which an unreliable packet's last four bytes must echo.
-	clientCumul uint32
+	// clientTotal is the client's channel send counter (its trailer's `seq`),
+	// which an unreliable packet's last four bytes must echo minus one.
+	clientTotal uint32
 	// unrelSeq is the arena tick's UNRELIABLE sequence, its own counter
 	// starting at 1. The client tracks the unreliable stream separately from
 	// the reliable one and drops a packet whose sequence does not advance, so
@@ -769,7 +769,7 @@ func (s *BaseAppServer) Admit(sess LoggedOnSession) {
 		entityID:    sess.SessionKey, // unique per session, never zero
 		resendKey:   fmt.Sprintf("session-%08x", sess.SessionKey),
 		unrelSeq:    1, // the unreliable stream's own counter starts at 1
-		clientCumul: 1, // the client's channel counter starts at 1
+		clientTotal: 1, // the client's channel counter starts at 1
 		blockKey:    sess.BlockKey,
 		name:        sess.Name,
 		accountName: sess.Name, // the Account entity's `name` property
@@ -1512,29 +1512,26 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// channel exactly while the client is entering the battle.
 	if cumul > 0 {
 		s.resend.ack(st.resendKey, cumul)
-		// The client's own channel counter. Its `processFilteredPacket`
-		// requires an UNRELIABLE packet's last four bytes to equal
-		// `(this - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7), so it has to be echoed
-		// back — sending our own ack there fails the check and every tick is
-		// dropped as "out-of-order unreliable".
-		s.mu.Lock()
-		st.clientCumul = cumul
-		s.mu.Unlock()
 	}
 	if !hasSeq || clear[0]&0x10 == 0 {
 		return
 	}
 	s.mu.Lock()
-	// A reliable seq is a small monotonic counter. A frame whose trailer
-	// we mis-sliced (a shape the fork adds later) would otherwise push
-	// the watermark to a garbage value, and every frame we mint after
-	// that carries an out-of-range cumulative ack the client rejects:
+	// The ack counts the client's RELIABLE packets, one per packet. Its
+	// trailer's `seq` is not that counter: it is the channel's total send
+	// count (reliable and unreliable both), which runs far ahead — using it
+	// made every packet we sent carry an ack the client rejected:
 	//
-	//   UDPChannel::handleCumulativeAck: Got out-of-range endSeq #...
+	//   UDPChannel::handleCumulativeAck: Received ACK for packets not yet
+	//   sent. endSeq: #467 outSeq: #87
 	//   Error 'REASON_CORRUPTED_PACKET'
-	if wm := seq + 1; wm > st.postCumul && wm <= st.postCumul+256 {
-		st.postCumul = wm
-	}
+	//
+	// (0x142d34d40: `(channel->0x154 - endSeq) & 0x0FFFFFFF > 0x8000000` is
+	// the rejection, and 0x154 is the channel's reliable out counter.)
+	st.postCumul++
+	// The channel's total send count is what an unreliable packet's last four
+	// bytes must echo (`processFilteredPacket`), so keep it too.
+	st.clientTotal = seq
 	s.mu.Unlock()
 }
 
@@ -1735,12 +1732,10 @@ func (s *BaseAppServer) sendUnreliableLocked(conn Transport, to *net.UDPAddr, st
 	// `processFilteredPacket` compares them to `(channel->0x194 - 1) &
 	// 0x0FFFFFFF`, and 0x194 is the counter its send path increments
 	// (0x14005050b: `mov 0x194(%rax),%ecx; add $1; mov %ecx,0x194(%rax)`).
-	// `postCumul` is that counter plus one — `noteReliable` stores `seq+1` —
-	// so the echo is `postCumul - 1`. Our own reliable-send count (the aux)
-	// and our ack of its seqs are different numbers and never match.
+	// That is the trailer's `seq` it sends, which `noteReliable` keeps.
 	cumul := uint32(0)
-	if st.postCumul > 0 {
-		cumul = (st.postCumul - 1) & 0x0FFFFFFF
+	if st.clientTotal > 0 {
+		cumul = (st.clientTotal - 1) & 0x0FFFFFFF
 	}
 	s.mu.Unlock()
 	pkt, err := buildChannelPacket(st.blockKey, flagsUnrel, app, auxFor(relSent), seq, cumul)

@@ -833,8 +833,10 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(ans[6:10]); got != uint32(0) {
 		t.Logf("poll counter 1 = %d", got)
 	}
-	if got := binary.LittleEndian.Uint32(ans[len(ans)-4:]); got != 5 {
-		t.Fatalf("poll answer cumul %d, want 5 (poll at seq 4)", got)
+	// The ack counts the client's RELIABLE packets: four of the five it sent
+	// here (one is an unreliable auth), not its trailer's seq.
+	if got := binary.LittleEndian.Uint32(ans[len(ans)-4:]); got != 4 {
+		t.Fatalf("poll answer cumul %d, want 4 (reliable packets received)", got)
 	}
 	// Season select (genuine idx 1209: DoCmdInt2(225, 121, 0, 0) at
 	// reliable seq 6): we hold no garage, so the genuine failure small
@@ -863,8 +865,8 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	if !bytes.Equal(errAns[9:12], []byte{0, 0, 0}) {
 		t.Fatalf("season error after-req bytes %x, want 00 00 00", errAns[9:12])
 	}
-	if got := binary.LittleEndian.Uint32(errAns[len(errAns)-4:]); got != 7 {
-		t.Fatalf("season answer cumul %d, want 7 (season at seq 6)", got)
+	if got := binary.LittleEndian.Uint32(errAns[len(errAns)-4:]); got != 5 {
+		t.Fatalf("season answer cumul %d, want 5 (reliable packets received)", got)
 	}
 
 	cancel()
@@ -1170,9 +1172,9 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		unrelSeq:  1,
 		postSeq:   42, // reliable sends so far: the aux word's source
 		postCumul: 7,
-		// The client's own channel counter, which an unreliable packet's last
-		// four bytes must echo (minus one).
-		clientCumul: 7,
+		// The client's own channel send counter, which an unreliable packet's
+		// last four bytes must echo (minus one).
+		clientTotal: 7,
 	}
 	pos := [3]float32{336.83, -5.05, 686.5}
 	dir := [3]float32{0.02, -0.004, 3.13}
@@ -1211,7 +1213,7 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		// The last four bytes of an UNRELIABLE packet echo the CLIENT's send
 		// counter minus one: its `processFilteredPacket` compares them to
 		// `(channel->0x194 - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7) and drops the
-		// packet otherwise. `postCumul` is that counter plus one.
+		// packet otherwise.
 		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != 6 {
 			t.Fatalf("frame %d cumul %d, want the client's counter minus one (6)", i, cumul)
 		}
