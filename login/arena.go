@@ -596,15 +596,17 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: probe 2, stopping after the geometry", from, h.ArenaID)
 		return seq, nil
 	}
-	// The capture's entry ships the arena settings as an off-channel fragment
-	// chain right after CreateBasePlayer (three chains of pickles beginning
-	// `80 02 7d 71 ... "epic_config"`). We send the same document in the lobby
-	// flood, but the battle app reads it from its own stream, so the entry
-	// carries it too.
+	// The capture's entry ships the arena settings as a fragment chain right
+	// after CreateBasePlayer (chains of pickles beginning `80 02 7d 71 ...
+	// "epic_config"`). We send the same document in the lobby flood, but the
+	// battle app reads it from its own stream, so the entry carries it too.
+	// The chain is on-channel, so it takes real sequence numbers.
 	if len(s.settings) > 0 {
-		if err := s.sendArenaSettings(conn, from, st); err != nil {
+		n, err := s.sendArenaSettings(conn, from, st, seq, cumul)
+		if err != nil {
 			return seq, err
 		}
+		seq = nextSeqAfter(seq, n)
 	}
 	// The capture's entry carries avatar updates (0x32/0x34/0x3c) for the
 	// player's entity before the entities are created: they anchor the
@@ -2380,29 +2382,37 @@ func arenaVehicleIDs(h *ArenaHandoff) []uint32 {
 	return ids
 }
 
-// sendArenaSettings ships the arena settings document to the battle app as an
-// off-channel fragment chain, which is how the capture's entry carries it:
-// three chains of pickles beginning `80 02 7d 71 … "epic_config"`.
+// sendArenaSettings ships the arena settings document to the battle app as a
+// fragment chain, which is how the capture's entry carries it: chains of
+// pickles beginning `80 02 7d 71 … "epic_config"`.
 //
-// These frames are NOT part of the reliable sequence space — the capture's
-// flood frames carry flags 0x0078 (no ON_CHANNEL) and their own chain range —
-// so they do not consume a sequence number and are not tracked for resend.
-func (s *BaseAppServer) sendArenaSettings(conn Transport, from *net.UDPAddr, st *clientState) error {
-	// Off-channel flags (0x0078): these frames are NOT in the connection's
-	// reliable sequence space. Sending them through the on-channel flags made
-	// them share the entry's sequence numbers, and the client then rejected
-	// the entry's own cumulative ack.
-	frames, err := BuildFramesFlags(st.blockKey, s.settings, DefaultBulkPayload, 0, offChannelFragmentFlags)
+// The captured frames are `0x0078` — ON_CHANNEL | RELIABLE | SEQ | FRAGMENT,
+// the same shape as the flood burst, with the 12-byte (first, last, seq)
+// trailer. They are therefore IN the connection's reliable sequence space:
+// they take real sequence numbers and must be tracked for resend like any
+// other reliable send.
+//
+// This used to send `0x0470` instead — the same word with CUMUL added and
+// ON_CHANNEL dropped — on the theory that the chain lived outside the
+// sequence space. The client rejected every frame with
+// "Cumulative ack was not on a channel" (it needs a channel for a CUMUL
+// footer, and an off-channel frame has none), so the arena settings were
+// never actually delivered: the battle ran on the client's defaults. The
+// flags also claimed a 16-byte trailer while the builder writes 12.
+func (s *BaseAppServer) sendArenaSettings(conn Transport, from *net.UDPAddr, st *clientState, seq, cumul uint32) (uint32, error) {
+	frames, err := BuildFrames(st.blockKey, s.settings, DefaultBulkPayload, seq)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	st.sendMu.Lock()
 	defer st.sendMu.Unlock()
-	for _, frame := range frames {
+	for i, frame := range frames {
 		if _, err := conn.WriteToUDP(frame, from); err != nil {
-			return err
+			return uint32(i), err
 		}
+		s.resend.track(st.resendKey, from.String(), seq+uint32(i), frame)
 	}
-	s.logf("stage2 %s: arena settings chain %d B in %d frame(s)", from, len(s.settings), len(frames))
-	return nil
+	s.logf("stage2 %s: arena settings chain %d B in %d frame(s) (seq %d..%d)",
+		from, len(s.settings), len(frames), seq, seq+uint32(len(frames))-1)
+	return uint32(len(frames)), nil
 }

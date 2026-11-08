@@ -924,3 +924,57 @@ func TestArenaEntrySequenceHasNoHoles(t *testing.T) {
 		t.Fatalf("%d distinct sequences over %d..%d, want %d", got, lo, hi, want)
 	}
 }
+
+// TestArenaSettingsChainIsOnChannel pins the shape of the entry's arena-settings
+// chain against the capture.
+//
+// The captured frames are 0x0078 — ON_CHANNEL | RELIABLE | SEQ | FRAGMENT, the
+// same word the flood burst uses, with the 12-byte (first, last, seq) trailer.
+// They are in the connection's reliable sequence space, so they take real
+// sequence numbers and the entry must advance past them.
+//
+// This used to send 0x0470 — CUMUL added, ON_CHANNEL dropped — which the client
+// rejects outright with "Cumulative ack was not on a channel" (a CUMUL footer
+// needs a channel, and an off-channel frame has none). Every settings frame was
+// discarded, so the battle silently ran on the client's defaults.
+func TestArenaSettingsChainIsOnChannel(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	st := &clientState{accountID: 2, name: "admin", blockKey: "0123456789abcdef", entityID: 0x1234}
+	// Long enough for several frames, so the chain's sequence accounting is
+	// exercised rather than a single-frame special case.
+	s.settings = bytes.Repeat([]byte("epic_config"), 300)
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40030}
+	tr := &fakeTransport{}
+	const firstSeq = 7
+	n, err := s.sendArenaSettings(tr, addr, st, firstSeq, 3)
+	if err != nil {
+		t.Fatalf("sendArenaSettings: %v", err)
+	}
+	if n == 0 || int(n) != len(tr.snapshot()) {
+		t.Fatalf("%d sequence numbers for %d frames", n, len(tr.snapshot()))
+	}
+	for i, w := range tr.snapshot() {
+		clear, err := DecryptChannel(st.blockKey, w)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		flags := binary.LittleEndian.Uint16(clear[0:2])
+		if flags != bulkFlags {
+			t.Fatalf("frame %d flags %#04x, want %#04x (ON|REL|SEQ|FRAGMENT, the captured shape)",
+				i, flags, bulkFlags)
+		}
+		if flags&chFlagOnChannel == 0 {
+			t.Fatalf("frame %d is off-channel: the client rejects a CUMUL footer without a channel", i)
+		}
+		// The 12-byte trailer the builder writes must be the one the flags
+		// claim, or the client reads four bytes of payload as footers.
+		if tr := ChannelTrailerLen(flags); tr != 12 {
+			t.Fatalf("frame %d flags claim a %d B trailer, want 12", i, tr)
+		}
+		first, last, seq, ok := fragRange(clear)
+		if !ok || first != firstSeq || last != firstSeq+uint32(n)-1 || seq != firstSeq+uint32(i) {
+			t.Fatalf("frame %d range [%d,%d] seq %d, want [%d,%d] seq %d",
+				i, first, last, seq, firstSeq, firstSeq+uint32(n)-1, firstSeq+uint32(i))
+		}
+	}
+}
