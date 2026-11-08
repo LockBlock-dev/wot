@@ -596,6 +596,16 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: probe 2, stopping after the geometry", from, h.ArenaID)
 		return seq, nil
 	}
+	// The capture's entry ships the arena settings as an off-channel fragment
+	// chain right after CreateBasePlayer (three chains of pickles beginning
+	// `80 02 7d 71 ... "epic_config"`). We send the same document in the lobby
+	// flood, but the battle app reads it from its own stream, so the entry
+	// carries it too.
+	if len(s.settings) > 0 {
+		if err := s.sendArenaSettings(conn, from, st); err != nil {
+			return seq, err
+		}
+	}
 	// The capture's entry carries avatar updates (0x32/0x34/0x3c) for the
 	// player's entity before the entities are created: they anchor the
 	// player's position so the first entity update is not the only thing that
@@ -2303,4 +2313,27 @@ func arenaVehicleIDs(h *ArenaHandoff) []uint32 {
 		ids = append(ids, h.VehicleID+1)
 	}
 	return ids
+}
+
+// sendArenaSettings ships the arena settings document to the battle app as an
+// off-channel fragment chain, which is how the capture's entry carries it:
+// three chains of pickles beginning `80 02 7d 71 … "epic_config"`.
+//
+// These frames are NOT part of the reliable sequence space — the capture's
+// flood frames carry flags 0x0078 (no ON_CHANNEL) and their own chain range —
+// so they do not consume a sequence number and are not tracked for resend.
+func (s *BaseAppServer) sendArenaSettings(conn Transport, from *net.UDPAddr, st *clientState) error {
+	frames, err := BuildFrames(st.blockKey, s.settings, DefaultBulkPayload, 0)
+	if err != nil {
+		return err
+	}
+	st.sendMu.Lock()
+	defer st.sendMu.Unlock()
+	for _, frame := range frames {
+		if _, err := conn.WriteToUDP(frame, from); err != nil {
+			return err
+		}
+	}
+	s.logf("stage2 %s: arena settings chain %d B in %d frame(s)", from, len(s.settings), len(frames))
+	return nil
 }
