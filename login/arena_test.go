@@ -754,3 +754,39 @@ func TestPrebattleLength(t *testing.T) {
 		t.Errorf("a bad value gave %v, want the default 3s", got)
 	}
 }
+
+// TestArenaInfoIDIsPastTheVehicles pins the AvatarInfo's entity id: it must not
+// collide with a vehicle's. The player is `VehicleID`, the dummy `+1` and the
+// synthetic tanks `+2` onwards, so an id inside that range collides with the
+// first bot — the client then resolves that bot's appearance to the AvatarInfo
+// and its `isPlayerVehicle` lookup throws, leaving the bot with no model.
+func TestArenaInfoIDIsPastTheVehicles(t *testing.T) {
+	s := tokenTestServer(t, nil)
+	const bots = 28
+	h := &ArenaHandoff{
+		ArenaID:     9,
+		SpaceID:     9,
+		ArenaTypeID: 1,
+		Map:         "spaces/01_karelia",
+		Player:      ArenaPlayerDoc{AccountID: 2, Name: "admin", Team: 1},
+		VehicleID:   100003,
+	}
+	for i := 0; i < bots; i++ {
+		h.Bots = append(h.Bots, ArenaPlayerDoc{AccountID: int64(100 + i), Name: "bot", Team: uint8(1 + i%2)})
+	}
+	info, _, err := s.arenaInfoApp(&clientState{}, h, newNrlNodeAlloc(), nil)
+	if err != nil {
+		t.Skipf("no defs: %v", err)
+	}
+	// Every vehicle id the battle uses.
+	used := map[uint32]string{h.VehicleID: "player", h.VehicleID + 1: "dummy"}
+	for i := 0; i < bots; i++ {
+		used[h.VehicleID+2+uint32(i)] = "bot"
+	}
+	if what, clash := used[info.ID]; clash {
+		t.Fatalf("the AvatarInfo's id %d collides with the %s", info.ID, what)
+	}
+	if info.ID <= h.VehicleID+1+uint32(bots) {
+		t.Errorf("the AvatarInfo's id %d is inside the vehicles' range (up to %d)", info.ID, h.VehicleID+1+uint32(bots))
+	}
+}

@@ -1733,7 +1733,12 @@ func (s *BaseAppServer) arenaInfoApp(st *clientState, h *ArenaHandoff, alloc *nr
 	}
 	id := h.InfoID
 	if id == 0 {
-		id = h.VehicleID + 2
+		// Past every vehicle: the player is `VehicleID`, the dummy `+1` and
+		// the synthetic tanks `+2` onwards, so an id inside that range
+		// collides with the first bot — the client then resolves the bot's
+		// appearance to this entity and its `isPlayerVehicle` lookup throws,
+		// which leaves the bot without a model.
+		id = h.VehicleID + 2 + uint32(len(h.Bots))
 	}
 	e := NewEntity(id, typ)
 	for _, p := range typ.Properties {
