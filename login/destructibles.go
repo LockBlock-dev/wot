@@ -410,16 +410,23 @@ func (s *BaseAppServer) createDestructibleChunk(conn Transport, from *net.UDPAdd
 	if err != nil {
 		return err
 	}
-	seq, cumul := s.nextSeq(st)
-	if err := s.sendReliableEntity(conn, from, st, create, seq, cumul); err != nil {
+	// Two packets, two sequence numbers, minted and sent under one lock.
+	// Minting one and sending two left the session's counter a number behind,
+	// so the next sender re-used a sequence the client had already seen and
+	// dropped it as a duplicate.
+	sel, err := EncodeSelectEntity(id)
+	if err != nil {
 		return err
 	}
-	seq++
-	if sel, serr := EncodeSelectEntity(id); serr == nil {
-		if err := s.sendReliableEntity(conn, from, st, sel, seq, cumul); err != nil {
-			return err
-		}
-		seq++
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeqN(st, 2)
+	err = s.sendReliableLocked(conn, from, st, create, seq, cumul)
+	if err == nil {
+		err = s.sendReliableLocked(conn, from, st, sel, seq+1, cumul)
+	}
+	st.sendMu.Unlock()
+	if err != nil {
+		return err
 	}
 	// The chunk's entity is created here and entered when the client comes
 	// near it, like every other entity.
