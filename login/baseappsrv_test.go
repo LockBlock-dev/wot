@@ -1170,6 +1170,9 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		unrelSeq:  1,
 		postSeq:   42, // reliable sends so far: the aux word's source
 		postCumul: 7,
+		// The client's own channel counter, which an unreliable packet's last
+		// four bytes must echo (minus one).
+		clientCumul: 7,
 	}
 	pos := [3]float32{336.83, -5.05, 686.5}
 	dir := [3]float32{0.02, -0.004, 3.13}
@@ -1205,8 +1208,13 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		if seq := binary.LittleEndian.Uint32(clear[n-8 : n-4]); seq != uint32(1+i) {
 			t.Fatalf("frame %d seq %d, want %d (the unreliable counter, not the reliable one)", i, seq, 1+i)
 		}
-		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != 7 {
-			t.Fatalf("frame %d cumul %d, want the client's watermark 7", i, cumul)
+		// The last four bytes of an UNRELIABLE packet are not our ack: the
+		// client's `processFilteredPacket` compares them to
+		// `(itsChannelCounter - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7) and drops
+		// the packet otherwise. Here the client's counter is 7, so the echo is
+		// 6.
+		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != 6 {
+			t.Fatalf("frame %d cumul %d, want the echoed client counter 6", i, cumul)
 		}
 		body := clear[2 : n-12]
 		if len(body) != len(app) {

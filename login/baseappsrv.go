@@ -613,6 +613,9 @@ type clientState struct {
 	// is what the captured server does for 408 of 7591 ticks.
 	lastMarker    nrlGunMarker
 	lastMarkerSet bool
+	// clientCumul is the client's last cumulative ack (its own channel
+	// counter), which an unreliable packet's last four bytes must echo.
+	clientCumul uint32
 	// unrelSeq is the arena tick's UNRELIABLE sequence, its own counter
 	// starting at 1. The client tracks the unreliable stream separately from
 	// the reliable one and drops a packet whose sequence does not advance, so
@@ -766,6 +769,7 @@ func (s *BaseAppServer) Admit(sess LoggedOnSession) {
 		entityID:    sess.SessionKey, // unique per session, never zero
 		resendKey:   fmt.Sprintf("session-%08x", sess.SessionKey),
 		unrelSeq:    1, // the unreliable stream's own counter starts at 1
+		clientCumul: 1, // the client's channel counter starts at 1
 		blockKey:    sess.BlockKey,
 		name:        sess.Name,
 		accountName: sess.Name, // the Account entity's `name` property
@@ -1508,6 +1512,14 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// channel exactly while the client is entering the battle.
 	if cumul > 0 {
 		s.resend.ack(st.resendKey, cumul)
+		// The client's own channel counter. Its `processFilteredPacket`
+		// requires an UNRELIABLE packet's last four bytes to equal
+		// `(this - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7), so it has to be echoed
+		// back — sending our own ack there fails the check and every tick is
+		// dropped as "out-of-order unreliable".
+		s.mu.Lock()
+		st.clientCumul = cumul
+		s.mu.Unlock()
 	}
 	if !hasSeq || clear[0]&0x10 == 0 {
 		return
@@ -1719,7 +1731,13 @@ func (s *BaseAppServer) sendUnreliableLocked(conn Transport, to *net.UDPAddr, st
 	seq := st.unrelSeq
 	st.unrelSeq++
 	relSent := st.postSeq
-	cumul := st.postCumul
+	// The last four bytes echo the client's own channel counter minus one,
+	// which is what its `processFilteredPacket` compares against; `postCumul`
+	// (our ack of ITS seqs) is a different stream and never matches.
+	cumul := uint32(0)
+	if st.clientCumul > 0 {
+		cumul = (st.clientCumul - 1) & 0x0FFFFFFF
+	}
 	s.mu.Unlock()
 	pkt, err := buildChannelPacket(st.blockKey, flagsUnrel, app, auxFor(relSent), seq, cumul)
 	if err != nil {
