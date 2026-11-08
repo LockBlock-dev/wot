@@ -522,10 +522,30 @@ func TestBaseAppStageLoopback(t *testing.T) {
 		t.Fatalf("flood first fragment range [%d,%d] seq %d ok=%v (the client needs seq == first)", first, last, seq, ok)
 	}
 
-	// --- post-flood chain: drain the burst, then the session dict. ---
-	// The burst is the authored chain; the session dict follows it, then
-	// the tick stream takes over. Every frame must decrypt under OUR
-	// session key.
+	// --- drain the rest of the burst, then acknowledge it. ---
+	// What follows the burst — the session dict, the stats small, the
+	// Account's own entry — addresses the Account entity the burst creates,
+	// so the server holds it until the client has the whole chain. A
+	// fragment that is not the chain's first is DISCARDED by the client, so
+	// sending them earlier is an entity method for an entity it does not
+	// have (`MF_ASSERT_DEV FAILED: pEntity`).
+	for got := first; got < last; got++ {
+		pkt := readDatagram(t, c2, 5*time.Second)
+		clear := decryptTest(t, blockKey, pkt)
+		if len(clear) < 14 || clear[0]&0x20 == 0 {
+			t.Fatalf("burst frame after %d: unexpected %dB %x", got, len(pkt), clear[:min(len(clear), 12)])
+		}
+	}
+	ackPkt, err := buildChannelPacket(blockKey, flagsUnrel, nil, auxFor(1), 1, last+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.WriteToUDP(ackPkt, udpLocal(s2)); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- post-flood chain: the session dict, then the tick stream. ---
+	// Every frame must decrypt under OUR session key.
 	deadline := time.Now().Add(20 * time.Second)
 	var dictPkt []byte
 	burst := 0
@@ -557,11 +577,13 @@ func TestBaseAppStageLoopback(t *testing.T) {
 	// The channel delivers in order: the dict must take the seq right
 	// after the chain, or everything after it stalls in the client's
 	// receive window and is never ACKed.
-	// burst counts the frames drained after the first one, which the
-	// test read above.
-	if want := floodFirstSeq + 1 + uint32(burst); dictSeq != want {
+	if want := last + 1; dictSeq != want {
 		t.Fatalf("session dict seq %d, want %d (the seq right after the chain)", dictSeq, want)
 	}
+	// The dict's cumul is the client's watermark when it goes out. The ack
+	// datagram releases the chain before its own seq is folded in, so this is
+	// still auth1's seq 0 + 1 — behind the client's counter, which is always
+	// safe.
 	if got := binary.LittleEndian.Uint32(dictClear[len(dictClear)-4:]); got != 1 {
 		t.Fatalf("session dict cumul %d, want 1 (auth1 is reliable seq 0)", got)
 	}

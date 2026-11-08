@@ -594,6 +594,14 @@ type clientState struct {
 	// tree holds it, so its properties and client methods can be updated
 	// through the `0x26`/`0x25` stream after it is created.
 	ownVehicle nrlComponent
+	// postFloodPending is set between the flood burst and the client's
+	// acknowledgement of it; postFloodAckSeq is the burst's last sequence
+	// number, so "cumul > postFloodAckSeq" means the client has the whole
+	// chain. What follows the burst — the session dict, the stats small and
+	// the Account's own entry — all address the Account entity the burst
+	// creates, so it waits for that ack.
+	postFloodPending bool
+	postFloodAckSeq  uint32
 	// markerBaseTicks counts the gun markers sent this battle, so the first
 	// nrlBaseMarkerTicks of them can carry the base snapshot (see
 	// nrlMarkerElement).
@@ -1524,6 +1532,24 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// channel exactly while the client is entering the battle.
 	if cumul > 0 {
 		s.resend.ack(st.resendKey, cumul)
+		// The flood burst's acknowledgement releases what follows it. The
+		// client acks in UNRELIABLE datagrams, so this cannot live behind the
+		// RELIABLE check below.
+		s.mu.Lock()
+		runPost := st.postFloodPending && cumul > st.postFloodAckSeq
+		if runPost {
+			st.postFloodPending = false
+		}
+		conn := st.conn
+		s.mu.Unlock()
+		if runPost {
+			if conn == nil {
+				conn = s.stage2
+			}
+			if err := s.sendPostFlood(conn, from, st); err != nil {
+				s.logf("stage2 %s: post-flood chain: %v", from, err)
+			}
+		}
 	}
 	if !hasSeq || clear[0]&0x10 == 0 {
 		return
@@ -4563,19 +4589,6 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 		return nil
 	}
 	st.flooded = true
-	// The session dict acks the client's reliable auth1 (seq 0 → cumul
-	// 1). The cumulative ack is "last processed peer reliable seq + 1",
-	// so it can only ever be what THIS client has sent — st.postCumul is
-	// the live watermark (noteReliable). A cumul ahead of the client's
-	// own outbound seq makes it drop the frame outright:
-	//
-	//   UDPChannel::handleCumulativeAck: Received ACK for packets not
-	//   yet sent. endSeq: #3 outSeq: #2
-	//   Error 'REASON_CORRUPTED_PACKET'
-	dictCumul := st.postCumul
-	if dictCumul < 1 {
-		dictCumul = 1
-	}
 	s.mu.Unlock()
 
 	// Author this session's bundle and split it into the fragment chain.
@@ -4601,10 +4614,58 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 		}
 	}
 	lastSeq := floodFirstSeq + uint32(len(frames)) - 1
-	for _, frame := range frames {
+	for i, frame := range frames {
 		if _, err := conn.WriteToUDP(frame, from); err != nil {
 			return err
 		}
+		// Track every fragment for retransmission. This is the one reliable
+		// send in the tree that used to go out untracked, and the cost is
+		// severe: the client DISCARDS a fragment that is not the chain's
+		// first (`processOrderedPacket`: "Bundle (#%u,#%u) is missing packets
+		// before #%u" → RETURN_FOR_CORRUPTED_PACKET), so losing frame 1 loses
+		// the whole flood — including the `createBasePlayer` that recreates
+		// the Account entity on this connection. The client then calls a
+		// method on an entity it does not have and dies with
+		// `MF_ASSERT_DEV FAILED: pEntity` (bw_entities.cpp:1103), which is
+		// exactly the crash a leave produced.
+		s.resend.track(st.resendKey, from.String(), floodFirstSeq+uint32(i), frame)
+	}
+	// Everything after the burst selects the Account entity the burst creates
+	// and calls methods on it. It must not go out until the client has
+	// ACKNOWLEDGED the burst: a fragment that is not the chain's first is
+	// discarded outright by the client, so a lost frame 1 means no Account —
+	// and a `1a 76` that selects it then dies with
+	// `MF_ASSERT_DEV FAILED: pEntity` (bw_entities.cpp:1103). That is the
+	// crash a leave produced. The burst is retransmitted now, so waiting for
+	// the ack is bounded by one resend timeout.
+	s.mu.Lock()
+	st.postFloodPending = true
+	st.postFloodAckSeq = lastSeq
+	s.mu.Unlock()
+	s.logf("stage2 %s: flood burst %d frames, %d B bundle (seq %d..%d, waiting for the ack)",
+		from, len(frames), len(stream), floodFirstSeq, lastSeq)
+	return nil
+}
+
+// sendPostFlood emits what follows the flood burst: the session dict, the stats
+// small and the Account's own entry. It runs once the client has acknowledged
+// the burst, because all three address the Account entity the burst creates.
+func (s *BaseAppServer) sendPostFlood(conn Transport, from *net.UDPAddr, st *clientState) error {
+	// The session dict acks the client's reliable auth1 (seq 0 → cumul 1).
+	// The cumulative ack is "last processed peer reliable seq + 1", so it can
+	// only ever be what THIS client has sent — st.postCumul is the live
+	// watermark (noteReliable). A cumul ahead of the client's own outbound seq
+	// makes it drop the frame outright:
+	//
+	//   UDPChannel::handleCumulativeAck: Received ACK for packets not
+	//   yet sent. endSeq: #3 outSeq: #2
+	//   Error 'REASON_CORRUPTED_PACKET'
+	s.mu.Lock()
+	lastSeq := st.postFloodAckSeq
+	dictCumul := st.postCumul
+	s.mu.Unlock()
+	if dictCumul < 1 {
+		dictCumul = 1
 	}
 
 	// Session dict: the 1a/76 small behind a [13][40] tick head. It rides
@@ -4666,7 +4727,7 @@ func (s *BaseAppServer) serveBulk(conn Transport, from *net.UDPAddr, st *clientS
 	st.tickPeriod = PostTickPeriod
 	st.postAt = time.Now().Add(PostTickPeriod)
 	s.mu.Unlock()
-	s.logf("stage2 %s: flood burst %d frames, %d B bundle", from, len(frames), len(stream))
+	s.logf("stage2 %s: post-flood chain sent (seq %d..%d)", from, lastSeq+1, next-1)
 	return nil
 }
 
