@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/LockBlock-dev/wot/entdef"
+	"os"
 )
 
 // A space's static models, what its `space.bin` places: each placed model of
@@ -74,23 +75,8 @@ type staticScene struct {
 
 // loadStaticScene reads a space's static models, their collision triangles in
 // the world.
-func loadStaticScene(mapPkg, spaceDir string, visibilityMask uint32) (*staticScene, error) {
-	zr, err := zip.OpenReader(mapPkg)
-	if err != nil {
-		return nil, err
-	}
-	defer zr.Close()
-	files := map[string]*zip.File{}
-	for _, f := range zr.File {
-		files[f.Name] = f
-	}
-	read := func(name string) ([]byte, error) {
-		f := files[name]
-		if f == nil {
-			return nil, fmt.Errorf("statics: no %s", name)
-		}
-		return readZipFile(f)
-	}
+func loadStaticScene(res *staticResources, spaceDir string, visibilityMask uint32) (*staticScene, error) {
+	read := res.read
 	bin, err := read(spaceDir + "/space.bin")
 	if err != nil {
 		return nil, err
@@ -224,6 +210,9 @@ func (s *staticScene) segmentHit(from, to [3]float32) (staticTriangle, float32, 
 	best := float32(-1)
 	var bestTri staticTriangle
 	for _, t := range s.trianglesIn(min, max) {
+		if t.Kind == bodyRemains {
+			continue
+		}
 		f, _, ok := segmentTriangle(from, delta, t.Vertices)
 		if !ok {
 			continue
@@ -529,12 +518,18 @@ func readSpaceBin(b []byte) (map[uint32]string, []spaceInstance, []spaceModel, e
 	return stringsTable, instances, models, nil
 }
 
-// transformPoint applies a row-major 4x4 to a point.
+// transformPoint applies a space's 4x4 to a point.
+//
+// The matrix is column-major, as the reference reads it
+// (`Mat4::from_cols_array`): the first three columns are the model's scaled
+// axes and the fourth its translation, which is the LAST four floats. Reading
+// it row-major drops the translation and stacks every model of the space on
+// the origin, which is an invisible wall in the middle of the map.
 func transformPoint(m [16]float32, p [3]float32) [3]float32 {
 	return [3]float32{
-		m[0]*p[0] + m[1]*p[1] + m[2]*p[2] + m[3],
-		m[4]*p[0] + m[5]*p[1] + m[6]*p[2] + m[7],
-		m[8]*p[0] + m[9]*p[1] + m[10]*p[2] + m[11],
+		m[0]*p[0] + m[4]*p[1] + m[8]*p[2] + m[12],
+		m[1]*p[0] + m[5]*p[1] + m[9]*p[2] + m[13],
+		m[2]*p[0] + m[6]*p[1] + m[10]*p[2] + m[14],
 	}
 }
 
@@ -615,6 +610,11 @@ func (h *hull) deepestOverlap(scene *staticScene, bounds [2][3]float32) ([2]floa
 		[3]float32{middle[0] - reach, low, middle[1] - reach},
 		[3]float32{middle[0] + reach, high, middle[1] + reach},
 	) {
+		// What a destroyed module leaves (`c_` bodies) is not there until it
+		// is destroyed: colliding with it is an invisible wall.
+		if t.Kind == bodyRemains {
+			continue
+		}
 		if abs32(t.Normal[1]) >= sin32(wallAngle) {
 			continue
 		}
@@ -761,6 +761,117 @@ func visibilityMask(settings []byte, gameplay string) uint32 {
 	return 1 // ctf
 }
 
+// staticSearchPackages are the packages a space's shared models live in, in
+// the order the game itself resolves them: `paths.xml`'s `<Package>` list,
+// filtered to the ones an SD client mounts.
+//
+// A space's `space.bin` names its models by path, but only some of their
+// `.havok` files ship in the map's own package: the buildings, rocks and
+// vegetation are in the shared content ones, and a loader that reads only the
+// map package leaves most of the map without collision (you drive through
+// rocks).
+var (
+	staticSearchOnce sync.Once
+	staticSearchList []string
+)
+
+// staticSearchOrder is the package list, read once.
+func staticSearchOrder() []string {
+	staticSearchOnce.Do(func() {
+		root := filepath.Dir(filepath.Dir(MapPackagesDir))
+		raw, err := os.ReadFile(filepath.Join(root, "paths.xml"))
+		if err != nil {
+			return
+		}
+		text := string(raw)
+		for {
+			i := strings.Index(text, "<Package")
+			if i < 0 {
+				break
+			}
+			j := strings.Index(text[i:], "</Package>")
+			if j < 0 {
+				break
+			}
+			entry := text[i : i+j]
+			text = text[i+j:]
+			// The type attribute: an SD client mounts the ones that list `sd`.
+			if k := strings.Index(entry, `type="`); k >= 0 {
+				types := entry[k+6:]
+				if e := strings.Index(types, `"`); e >= 0 {
+					types = types[:e]
+				}
+				if !strings.Contains(types, "sd") {
+					continue
+				}
+			}
+			if k := strings.Index(entry, ">"); k >= 0 {
+				if path := strings.TrimSpace(entry[k+1:]); path != "" {
+					staticSearchList = append(staticSearchList, filepath.Base(path))
+				}
+			}
+		}
+	})
+	return staticSearchList
+}
+
+// sharedZipCache holds the opened shared packages, by name. They are large
+// (1.5 GB each) but a zip's central directory is small, and every battle on
+// any map reuses them.
+var sharedZipCache sync.Map // name -> *zip.ReadCloser
+
+// staticResources resolves a resource path for one space: its own package
+// first, then the shared content packages, opened lazily.
+type staticResources struct {
+	mapFiles map[string]*zip.File
+	shared   []map[string]*zip.File
+	opened   int
+}
+
+// read resolves one path.
+func (r *staticResources) read(path string) ([]byte, error) {
+	if f := r.mapFiles[path]; f != nil {
+		return readZipFile(f)
+	}
+	for {
+		for _, files := range r.shared {
+			if f := files[path]; f != nil {
+				return readZipFile(f)
+			}
+		}
+		order := staticSearchOrder()
+		if r.opened >= len(order) {
+			return nil, fmt.Errorf("statics: %s is in no package", path)
+		}
+		name := order[r.opened]
+		r.opened++
+		zr := openSharedZip(name)
+		if zr == nil {
+			continue
+		}
+		files := make(map[string]*zip.File, len(zr.File))
+		for _, f := range zr.File {
+			files[f.Name] = f
+		}
+		r.shared = append(r.shared, files)
+	}
+}
+
+// openSharedZip opens one shared package, once per process.
+func openSharedZip(name string) *zip.ReadCloser {
+	if v, ok := sharedZipCache.Load(name); ok {
+		zr, _ := v.(*zip.ReadCloser)
+		return zr
+	}
+	zr, err := zip.OpenReader(filepath.Join(MapPackagesDir, name))
+	if err != nil {
+		sharedZipCache.Store(name, (*zip.ReadCloser)(nil))
+		return nil
+	}
+	sharedZipCache.Store(name, zr)
+	return zr
+}
+
 // staticsCache holds one static scene per space: loading a map's collision
 // takes a moment, and every battle on it shares the triangles.
 var staticsCache sync.Map
@@ -796,13 +907,14 @@ func loadStaticSceneFor(pkg, spacePath string) (*staticScene, error) {
 		return nil, err
 	}
 	defer zr.Close()
+	res := &staticResources{mapFiles: make(map[string]*zip.File, len(zr.File))}
 	var settings []byte
 	for _, f := range zr.File {
+		res.mapFiles[f.Name] = f
 		if f.Name == spacePath+"/space.settings" {
 			settings, _ = readZipFile(f)
-			break
 		}
 	}
 	mask := visibilityMask(settings, "ctf")
-	return loadStaticScene(pkg, spacePath, mask)
+	return loadStaticScene(res, spacePath, mask)
 }

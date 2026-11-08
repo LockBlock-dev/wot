@@ -109,8 +109,11 @@ const (
 	// onSpotSpeed is the speed below which a turning hull counts as turning on
 	// the spot.
 	onSpotSpeed float32 = 0.5
-	// boundsMargin keeps the hull this far inside the map's bounds, in metres.
-	boundsMargin float32 = 2.0
+	// boundsMargin keeps the hull's centre this far inside the map's bounds,
+	// in metres. It is zero: the official server stops the hull's CENTRE at
+	// the red line, so a tank can hang a track over it. A margin pushed the
+	// whole hull inside and made the line feel like a wall.
+	boundsMargin float32 = 0
 	// edgeFriction is the share of the speed into the map's edge the tracks
 	// lose along it.
 	edgeFriction float32 = 0.5
