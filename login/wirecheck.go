@@ -50,68 +50,19 @@ func (s msgShape) String() string {
 // say which entity it addresses. `ParseClientApp` therefore tries each entity
 // and keeps the one that consumes the app exactly.
 func clientShape(d *entdef.Dispatch, ent string, id byte) (msgShape, string, error) {
-	switch id {
-	case elResetEntities:
-		return msgShape{fixed: true, size: 1}, "resetEntities", nil
-	// `enableEntities` is 0x0B in the CLIENT->SERVER table, not this one; the
-	// same value is `createEntity` here. It is never sent by the server, so it
-	// has no shape to resolve.
-	case elSelectPlayerEntity:
-		return msgShape{fixed: true, size: 0}, "selectPlayerEntity", nil
-	case 0x44:
-		// switchBaseApp: FIXED 9, `[ip4][port BE][salt u16 LE][reset]`. It is
-		// a connection-level element, not an entity one, so it is resolved
-		// here rather than against the entity table.
-		return msgShape{fixed: true, size: 9}, "switchBaseApp", nil
-	case elUpdateFrequency:
-		return msgShape{fixed: true, size: 7}, "updateFrequency", nil
-	case elTickSync:
-		return msgShape{fixed: true, size: 1}, "tickSync", nil
-	case elCreateBasePlayer:
-		return msgShape{width: 2}, "createBasePlayer", nil
-	case elCreateCellPlayer:
-		return msgShape{width: 2}, "createCellPlayer", nil
-	case elSpaceData, elAddSpaceGeometryMapping,
-		elCreateEntity, elCreateEntityDetailed, elLeaveAoI, elUpdateEntity:
-		return msgShape{width: 2}, "spaceData", nil
-	case elEnterAoI:
-		return msgShape{fixed: true, size: 5}, "enterAoI", nil
-	case elEnterAoIOnVehicle:
-		return msgShape{fixed: true, size: 9}, "enterAoIOnVehicle", nil
-	case elSetVehicle:
-		return msgShape{fixed: true, size: 8}, "setVehicle", nil
-	case elSelectEntity:
-		return msgShape{fixed: true, size: 4}, "selectEntity", nil
-	case elForcedPosition:
-		return msgShape{fixed: true, size: 38}, "forcedPosition", nil
-	case elRelativePosition:
-		return msgShape{fixed: true, size: 12}, "relativePosition", nil
-	case elAvatarUpdatePlayerDetailed:
-		return msgShape{fixed: true, size: 25}, "avatarUpdatePlayerDetailed", nil
-	case elAvatarUpdateAliasDetailed:
-		return msgShape{fixed: true, size: 26}, "avatarUpdateAliasDetailed", nil
-	case elAvatarUpdateTargetingInfo:
-		// Avatar.updateTargetingInfo: nine FLOAT32, no entity id. The client's
-		// Python takes the entity id plus ten floats, so this element cannot
-		// reach it — the gun is driven through the `OwnVehicle` component's
-		// `targetingInfo` property instead, whose setter calls the Python
-		// method with the id. The size here is the def's, which is what the
-		// client's own method table carries: sending 44 bytes leaves the
-		// trailing eight to be read as the next element id and the client
-		// drops the packet as REASON_CORRUPTED_PACKET.
-		return msgShape{fixed: true, size: 36}, "updateTargetingInfo", nil
-	case elNrlCreateNode:
-		return msgShape{width: 2}, "nrlCreateNode", nil
-	case elNrlUpdateNodeFlag:
-		// Payload-less by design: it consumes one record from the NRL
-		// stream, so it carries no length field at all.
-		return msgShape{fixed: true, size: 0}, "nrlUpdateNodeFlag", nil
-	case elNrlData:
-		return msgShape{width: 2}, "nrlData", nil
-	case 0x45:
-		return msgShape{width: 2}, "resourceHeader", nil
-	case 0x46:
-		return msgShape{width: 2}, "resourceFragment", nil
+	// Every connection-level element (below the entity method base) comes from
+	// the client's own table: its id, its name and how its payload is framed.
+	// The table is the whole server-to-client set, 0x00..0x4D, so an element
+	// this server grows a builder for is checked without touching this file.
+	if id < entityMethodBase {
+		spec, ok := clientElementByID[id]
+		if !ok {
+			return msgShape{}, "", fmt.Errorf("element %#02x is not in the client's table", id)
+		}
+		if spec.Length.Fixed >= 0 {
+			return msgShape{fixed: true, size: spec.Length.Fixed}, spec.Name, nil
+		}
+		return msgShape{width: 2}, spec.Name, nil
 	}
 	e := d.Entity(ent)
 	if e == nil {
