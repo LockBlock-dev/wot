@@ -1211,6 +1211,7 @@ func (s *BaseAppServer) sendArenaPeriod(conn Transport, from *net.UDPAddr, st *c
 	if period == ArenaPeriodBattle {
 		s.mu.Lock()
 		st.battleStarted = true
+		st.battlePeriodAt = time.Now()
 		s.mu.Unlock()
 	}
 	s.logf("stage2 %s: arena %d period → %d (len %d, seq %d, cumul %d, %dB)",

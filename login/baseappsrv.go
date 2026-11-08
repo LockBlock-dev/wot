@@ -382,6 +382,12 @@ type clientState struct {
 	// clientMoveTimeout is how long the server trusts that report before it
 	// takes the hull back.
 	clientMoveAt time.Time
+	// battlePeriodAt is when the BATTLE period was last sent, and
+	// clientOnArena is set when the client shows it applied it: its
+	// `__setIsOnArena` calls `moveVehicle`, so a `vehicle_moveWith` after the
+	// BATTLE send means the client is on the arena.
+	battlePeriodAt time.Time
+	clientOnArena  bool
 	// battleEnded is set once the AFTERBATTLE period has gone out.
 	battleEnded bool
 	// overturned is set once the player's hull has ended up on its side or its
@@ -2153,6 +2159,12 @@ func (s *BaseAppServer) answerGunTrack(conn Transport, from *net.UDPAddr, st *cl
 // stepped on the arena tick, not here: the client sends a flag byte whenever the
 // driver changes gear or direction, and the movement itself is continuous.
 func (s *BaseAppServer) answerMoveWith(st *clientState, call postCall) error {
+	// A movement command proves the client applied the BATTLE period: its
+	// `Avatar.moveVehicle` returns early unless `isOnArena`, and that is only
+	// true for the BATTLE period.
+	s.mu.Lock()
+	st.clientOnArena = true
+	s.mu.Unlock()
 	if len(call.Args) == 0 || call.Args[0].Kind != entdef.VUint {
 		return nil
 	}
@@ -3067,6 +3079,12 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		s.checkOverturn(conn, from, st, arenaID)
 		// One side wiped out, or the timer up, ends the battle.
 		s.checkBattleEnd(conn, from, st, arenaID)
+		// The BATTLE period again until the client shows it applied it: a
+		// period update that lands before the client's handler is ready is
+		// dropped, and the client then sits in the battle with `isOnArena`
+		// false and no driving. The official server re-sends rather than
+		// trusting one send.
+		s.repeatBattlePeriod(conn, from, st, arenaID)
 
 		// A failed write is one lost update, not the end of the battle: the
 		// next tick carries the position again.

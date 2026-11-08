@@ -2,6 +2,7 @@ package login
 
 import (
 	"net"
+	"time"
 )
 
 // The battle's end: one side wiped out, or the timer running out, sends the
@@ -86,3 +87,44 @@ func (s *BaseAppServer) checkBattleEnd(conn Transport, from *net.UDPAddr, st *cl
 // battleLength is how long a battle runs before the timer ends it, in seconds:
 // the BATTLE period's own 1500.
 const battleLength = 1500
+
+// repeatBattlePeriod re-sends the BATTLE period until the client proves it
+// applied it, every two seconds for the first half minute. The proof is a
+// `vehicle_moveWith`: the client's `Avatar.moveVehicle` returns early unless
+// `isOnArena`, which only the BATTLE period sets.
+func (s *BaseAppServer) repeatBattlePeriod(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64) {
+	s.mu.Lock()
+	if !st.battleStarted || st.clientOnArena || st.battleEnded || st.arena == nil {
+		s.mu.Unlock()
+		return
+	}
+	wait := time.Since(st.battlePeriodAt)
+	elapsed := time.Since(st.battlePeriodAt)
+	avatar := st.avatar
+	s.mu.Unlock()
+	if avatar == nil || wait < 2*time.Second || elapsed > 30*time.Second {
+		return
+	}
+	// The period's own end time is the battle's length from when it started.
+	el, err := arenaPeriodUpdateFull(avatar, ArenaPeriodBattle, arenaPeriodEnd(st.tick, 1500), 1500, []float64{10, 10})
+	if err != nil {
+		return
+	}
+	var app []byte
+	if sel, serr := EncodeSelectEntity(avatar.ID); serr == nil {
+		app = append(app, sel...)
+	}
+	app = append(app, el...)
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, app, seq, cumul)
+	st.sendMu.Unlock()
+	if err != nil {
+		s.logf("arena %d: BATTLE period re-send: %v", arenaID, err)
+		return
+	}
+	s.mu.Lock()
+	st.battlePeriodAt = time.Now()
+	s.mu.Unlock()
+	s.logf("arena %d: BATTLE period re-sent — the client has not shown it applied it yet", arenaID)
+}
