@@ -87,3 +87,26 @@ func TestMapRotationGivesADifferentMapEachBattle(t *testing.T) {
 		t.Error("an empty rotation gave a map")
 	}
 }
+
+// TestEventMapVariantsAreNotRandomBattles pins the exclusion of the event
+// variants whose display names are event names, not map names: "Oder" and
+// "Westfall" (the Normandy 1944 event) and the Halloween "Baie aux Huîtres"
+// and "Avant-poste".
+func TestEventMapVariantsAreNotRandomBattles(t *testing.T) {
+	for _, name := range []string{
+		"108_normandy_nom", "14_siegfried_line_nom",
+		"121_lost_paradise_v", "128_last_frontier_v",
+	} {
+		if isRandomBattleMap(name) {
+			t.Errorf("%s is an event variant and must not be a random-battle map", name)
+		}
+	}
+	for _, name := range []string{
+		"01_karelia", "06_ensk_big", "99_poland", "120_graf_zeppelin",
+		"112_eiffel_tower_ctf", "95_lost_city_ctf",
+	} {
+		if !isRandomBattleMap(name) {
+			t.Errorf("%s is a standard map and must stay in the rotation", name)
+		}
+	}
+}

@@ -47,7 +47,19 @@ var specialModeMarkers = []string{
 	"_sm24", "_sm25",
 	"_hw25", "_hw",
 	"_scc",
+	// Event variants of standard maps. Their display names are event names,
+	// not map names: `108_normandy_nom` is "Oder" and `14_siegfried_line_nom`
+	// is "Westfall" (the Normandy 1944 event), and `121_lost_paradise_v` /
+	// `128_last_frontier_v` are the Halloween event's "Baie aux Huîtres" and
+	// "Avant-poste". None of them is a random-battle map.
+	"_nom",
+	"_wt",
+	"_nb",
 }
+
+// specialModeSuffixes are the endings that mark an event variant. They are
+// checked as suffixes because `_v` alone would match inside ordinary names.
+var specialModeSuffixes = []string{"_v"}
 
 // isRandomBattleMap reports whether a map's name is a standard random-battle
 // one.
@@ -55,6 +67,11 @@ func isRandomBattleMap(name string) bool {
 	lower := strings.ToLower(name)
 	for _, marker := range specialModeMarkers {
 		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	for _, suffix := range specialModeSuffixes {
+		if strings.HasSuffix(lower, suffix) {
 			return false
 		}
 	}
