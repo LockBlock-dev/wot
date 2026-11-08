@@ -755,10 +755,11 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 	// track, to break its visual (`startOrUpdateExtraFromOutside`).
 	var moduleEls []byte
 	var fire *fireStart
+	var boom *detonation
 	if res.Pierced {
 		// The shell's own damage, not the HP damage: a device hit (the gun)
 		// deals no HP damage but still wrecks the device.
-		moduleEls, fire = s.damageModule(t, arenaID, res, int(sh.Damage), attacker)
+		moduleEls, fire, boom = s.damageModule(t, arenaID, res, int(sh.Damage), attacker)
 	}
 	if maxHealth <= 0 {
 		maxHealth = 1000
@@ -770,6 +771,11 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 	newHealth := oldHealth - damage
 	if newHealth < 0 {
 		newHealth = 0
+	}
+	// An ammo rack detonation destroys the tank with the special health the
+	// client reads as the explosion, whatever the hit points left.
+	if boom != nil {
+		newHealth = boom.health
 	}
 	// A tank whose crew is all dead is dead, whatever its hit points.
 	if newHealth > 0 && s.allCrewDead(t) {
@@ -783,7 +789,7 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 		}
 	}
 	flags := res.Flags
-	if newHealth == 0 && damage > 0 {
+	if newHealth <= 0 && damage > 0 {
 		flags |= hitFlagVehicleKilled
 	}
 	segment := encodeHitSegment(res.Bounds, res.Local, res.LocalDir, res.Part, res.Effect)
@@ -855,7 +861,7 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 		}
 	}
 	// A kill also goes into the arena's `vehiclesInfo`.
-	if newHealth == 0 && damage > 0 {
+	if newHealth <= 0 && damage > 0 {
 		if el := s.killVehiclesInfo(st, t.infoIndex, attacker); len(el) > 0 {
 			victimApp = append(victimApp, el...)
 		}
@@ -890,7 +896,7 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 		details := packDamage(uint64(damage), 0 /* ATTACK_REASON.SHOT */, uint64(battleLogShellType(sh.Kind)), -1)
 		events = append(events, battleEvent{eventType: battleEventDamage, targetID: t.id, details: details, count: uint16(damage)})
 	}
-	if newHealth == 0 && damage > 0 {
+	if newHealth <= 0 && damage > 0 {
 		events = append(events, battleEvent{eventType: battleEventKill, targetID: t.id, details: packDamage(uint64(damage), 0, uint64(battleLogShellType(sh.Kind)), -1), count: 1})
 	}
 	if len(events) > 0 {

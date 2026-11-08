@@ -55,7 +55,7 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		LocalNormal: [3]float32{0, 0, 1},
 		Point:       [3]float32{0, 2.5, 3},
 	}
-	el, _ := s.damageModule(tgt, 1, res, 200, 1)
+	el, _, _ := s.damageModule(tgt, 1, res, 200, 1)
 	if len(el) == 0 {
 		t.Fatal("no client call for a module hit")
 	}
@@ -67,11 +67,11 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		t.Fatalf("gun HP = %v, want it reduced", m.HP)
 	}
 	// A second hit wrecks it and no further damage is taken.
-	el, _ = s.damageModule(tgt, 1, res, 200, 1)
+	el, _, _ = s.damageModule(tgt, 1, res, 200, 1)
 	if m, _ = moduleStateByName(tgt, "gunHealth"); !m.Destroyed {
 		t.Fatalf("gun state = %+v, want destroyed", m)
 	}
-	if el, _ = s.damageModule(tgt, 1, res, 200, 1); len(el) != 0 {
+	if el, _, _ = s.damageModule(tgt, 1, res, 200, 1); len(el) != 0 {
 		t.Fatal("a wrecked module took another hit")
 	}
 	// The track's destruction is the one with a visual: the extra start.
@@ -82,7 +82,7 @@ func TestModuleDamageDestroysAndReports(t *testing.T) {
 		Local:       [3]float32{1.5, dummyParts[0].Bounds[0][1] + 0.1, 0},
 		Point:       [3]float32{1.5, 0.6, 0},
 	}
-	if el, _ := s.damageModule(t2, 1, trackRes, 400, 1); len(el) == 0 {
+	if el, _, _ := s.damageModule(t2, 1, trackRes, 400, 1); len(el) == 0 {
 		t.Fatal("no track hit call")
 	}
 	if m, _ := moduleStateByName(t2, "rightTrack0Health"); !m.Destroyed {
@@ -122,7 +122,7 @@ func TestModuleCallsSurviveTheClientReader(t *testing.T) {
 		dummy.Set(p.Name, entdef.ZeroValue(p.Type))
 	}
 	tgt := &botTarget{entity: dummy, id: dummy.ID}
-	el, _ := s.damageModule(tgt, 1, shotResult{
+	el, _, _ := s.damageModule(tgt, 1, shotResult{
 		Hit: true, Pierced: true, Part: 3, Face: 2,
 		LocalNormal: [3]float32{0, 0, 1},
 		Point:       [3]float32{0, 2.5, 3},
@@ -220,5 +220,34 @@ func TestFireInfoCarriesTheDeviceAndAttacker(t *testing.T) {
 	}
 	if f, _ := v.Get("startTime"); f.Float != 1700000000 {
 		t.Fatalf("startTime = %v, want 1700000000", f.Float)
+	}
+}
+
+// TestAmmoBayDetonates pins the ammo rack: destroying it destroys the tank with
+// the special health the client reads as the detonation, not a plain wreck.
+func TestAmmoBayDetonates(t *testing.T) {
+	s := &BaseAppServer{}
+	tgt := &botTarget{entity: NewEntity(100004, nil), id: 100004, health: 1000, maxHealth: 1000}
+	// Enough damage to take the ammo bay's 220 HP down in one hit.
+	res := shotResult{Hit: true, Part: 1, Face: 2, LocalNormal: [3]float32{0, 0, 1}, Local: [3]float32{0, 1, 0}}
+	// The module a hit lands on is rolled, so keep hitting until the ammo bay
+	// comes up.
+	var boom *detonation
+	for i := 0; i < 200 && boom == nil; i++ {
+		_, _, boom = s.damageModule(tgt, 1, res, 100000, 42)
+	}
+	if boom == nil {
+		t.Fatal("the ammo bay did not detonate")
+	}
+	if boom.health != ammoBayExplodedHealth {
+		t.Errorf("health = %d, want %d", boom.health, ammoBayExplodedHealth)
+	}
+	// The client's own `SPECIAL_VEHICLE_HEALTH.AMMO_BAY_EXPLODED` is `-1 ^ 12`.
+	if ammoBayExplodedHealth != -13 {
+		t.Errorf("AMMO_BAY_EXPLODED = %d, want -13", ammoBayExplodedHealth)
+	}
+	// A destroyed ammo bay takes no more hits.
+	if _, _, again := s.damageModule(tgt, 1, res, 100000, 42); again != nil {
+		t.Error("a wrecked ammo bay detonated twice")
 	}
 }

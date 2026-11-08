@@ -205,15 +205,15 @@ var fireChance = map[string]float64{
 // module is DESTROYED (a broken track, the only extra whose client side has a
 // visual) — plus a fire when the wreck is a flammable one and the roll says
 // so.
-func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResult, damage int, attacker uint32) ([]byte, *fireStart) {
+func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResult, damage int, attacker uint32) ([]byte, *fireStart, *detonation) {
 	dummy := t.entity
 	name := pickModule(res.Part, res.Face, res.LocalNormal, res.Local[1], res.Bounds)
 	if name == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	idx := moduleIndex(name)
 	if idx < 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The module state is the TARGET's, not the session's: every synthetic
 	// tank has its own tracks, engine and crew, so a shot at one cannot wreck
@@ -226,7 +226,7 @@ func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResul
 	}
 	m := &t.modules[idx]
 	if m.Destroyed {
-		return nil, nil // a wrecked module takes no more hits
+		return nil, nil, nil // a wrecked module takes no more hits
 	}
 	amount := float32(damage) * moduleDamageShare
 	if amount < 1 {
@@ -255,7 +255,13 @@ func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResul
 		out = append(out, el...)
 	}
 	if !destroyed {
-		return out, nil
+		return out, nil, nil
+	}
+	// The ammo rack going up destroys the tank outright: the client is sent
+	// the special health that makes it show the detonation rather than a plain
+	// wreck (`SPECIAL_VEHICLE_HEALTH.AMMO_BAY_EXPLODED`).
+	if name == "ammoBayHealth" {
+		return out, nil, &detonation{health: ammoBayExplodedHealth}
 	}
 	// A destroyed track breaks its visual: `TrackHealth._start` calls
 	// `addCrashedTrack`. The extra's args are unused, so a pickled None.
@@ -269,9 +275,19 @@ func (s *BaseAppServer) damageModule(t *botTarget, arenaID uint64, res shotResul
 	}
 	// A wrecked engine or fuel tank can set the tank alight.
 	if chance, ok := fireChance[name]; ok && rand.Float64() < chance {
-		return out, &fireStart{Extra: dummyModules[idx].Extra, Attacker: attacker}
+		return out, &fireStart{Extra: dummyModules[idx].Extra, Attacker: attacker}, nil
 	}
-	return out, nil
+	return out, nil, nil
+}
+
+// ammoBayExplodedHealth is `SPECIAL_VEHICLE_HEALTH.AMMO_BAY_EXPLODED` (-1 ^ 12):
+// the health the client reads as "the ammo rack went up".
+const ammoBayExplodedHealth = -1 ^ 12
+
+// detonation is an ammo rack blowing up: the tank is destroyed with the special
+// health that shows it.
+type detonation struct {
+	health int
 }
 
 // allCrewDead reports whether every crewman of the dummy is dead, which kills
