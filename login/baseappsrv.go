@@ -378,6 +378,9 @@ type clientState struct {
 	// ignored until the session binds its new one: the client closes that
 	// socket, and a straggler must not drag `stage2Addr` back to it.
 	leaveAddr string
+	// equipmentID is the consumable the client last activated, which its
+	// application point then lands.
+	equipmentID uint16
 	// arenaTime is how long the battle has been running, in seconds, and ramAt
 	// is when each synthetic tank last rammed the player, so one contact is
 	// not counted twice.
@@ -3441,6 +3444,10 @@ func (s *BaseAppServer) answerPostCall(conn Transport, from *net.UDPAddr, st *cl
 			return s.answerShoot(conn, from, st)
 		case "vehicle_changeSetting":
 			return s.answerChangeSetting(conn, from, st, call)
+		case "activateEquipment":
+			return s.answerActivateEquipment(conn, from, st, call)
+		case "setEquipmentApplicationPoint":
+			return s.answerEquipmentPoint(conn, from, st, call)
 		case "accountUnitClient_create", "accountUnitClient_join",
 			"accountUnitClient_doCmd", "accountUnitClient_sendInvites",
 			"accountUnitClient_setRosterSlots":
