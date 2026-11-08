@@ -810,7 +810,14 @@ func EntityPropertyRun(e *Entity) ([]byte, error) {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q has no value",
 				e.ID, e.Type.Name, p.Name)
 		}
-		body.WriteByte(byte(i))
+		// The property INDEX is a u16 in this run, not a byte: the client's
+		// `createEntity` reads `[count u8][index u16][value]...` (the
+		// reference's `EntityDescription::readStreamToDict` walks it the same
+		// way). Writing one byte shifted every value by one and the client
+		// rejected the whole entity — the AvatarInfo never existed.
+		var idx [2]byte
+		binary.LittleEndian.PutUint16(idx[:], uint16(i))
+		body.Write(idx[:])
 		if err := c.Write(&body, p.Type, v); err != nil {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q: %w",
 				e.ID, e.Type.Name, p.Name, err)
@@ -927,7 +934,14 @@ func BasePropertyRun(e *Entity) ([]byte, error) {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q has no value",
 				e.ID, e.Type.Name, p.Name)
 		}
-		body.WriteByte(byte(i))
+		// The property INDEX is a u16 in this run, not a byte: the client's
+		// `createEntity` reads `[count u8][index u16][value]...` (the
+		// reference's `EntityDescription::readStreamToDict` walks it the same
+		// way). Writing one byte shifted every value by one and the client
+		// rejected the whole entity — the AvatarInfo never existed.
+		var idx [2]byte
+		binary.LittleEndian.PutUint16(idx[:], uint16(i))
+		body.Write(idx[:])
 		if err := c.Write(&body, p.Type, v); err != nil {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q: %w",
 				e.ID, e.Type.Name, p.Name, err)
@@ -969,7 +983,14 @@ func EntityPropertyRunLevel(e *Entity, inner bool) ([]byte, error) {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q has no value",
 				e.ID, e.Type.Name, p.Name)
 		}
-		body.WriteByte(byte(i))
+		// The property INDEX is a u16 in this run, not a byte: the client's
+		// `createEntity` reads `[count u8][index u16][value]...` (the
+		// reference's `EntityDescription::readStreamToDict` walks it the same
+		// way). Writing one byte shifted every value by one and the client
+		// rejected the whole entity — the AvatarInfo never existed.
+		var idx [2]byte
+		binary.LittleEndian.PutUint16(idx[:], uint16(i))
+		body.Write(idx[:])
 		if err := c.Write(&body, p.Type, v); err != nil {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q: %w",
 				e.ID, e.Type.Name, p.Name, err)
@@ -1057,7 +1078,14 @@ func EntityPropertyRunNames(e *Entity, names ...string) ([]byte, error) {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q has no value",
 				e.ID, e.Type.Name, p.Name)
 		}
-		body.WriteByte(byte(i))
+		// The property INDEX is a u16 in this run, not a byte: the client's
+		// `createEntity` reads `[count u8][index u16][value]...` (the
+		// reference's `EntityDescription::readStreamToDict` walks it the same
+		// way). Writing one byte shifted every value by one and the client
+		// rejected the whole entity — the AvatarInfo never existed.
+		var idx [2]byte
+		binary.LittleEndian.PutUint16(idx[:], uint16(i))
+		body.Write(idx[:])
 		if err := c.Write(&body, p.Type, v); err != nil {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q: %w",
 				e.ID, e.Type.Name, p.Name, err)
@@ -1124,7 +1152,14 @@ func EntityPropertyRunExcept(e *Entity, inner bool, skip ...string) ([]byte, err
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q has no value",
 				e.ID, e.Type.Name, p.Name)
 		}
-		body.WriteByte(byte(i))
+		// The property INDEX is a u16 in this run, not a byte: the client's
+		// `createEntity` reads `[count u8][index u16][value]...` (the
+		// reference's `EntityDescription::readStreamToDict` walks it the same
+		// way). Writing one byte shifted every value by one and the client
+		// rejected the whole entity — the AvatarInfo never existed.
+		var idx [2]byte
+		binary.LittleEndian.PutUint16(idx[:], uint16(i))
+		body.Write(idx[:])
 		if err := c.Write(&body, p.Type, v); err != nil {
 			return nil, fmt.Errorf("wotlogin: entity %d (%s): property %q: %w",
 				e.ID, e.Type.Name, p.Name, err)
