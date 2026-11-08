@@ -12,16 +12,21 @@ import (
 const DefaultBulkPayload = 1223
 
 // bulkFlags is the flags word the flood's fragment frames use:
-// ON_CHANNEL | RELIABLE | HAS_SEQUENCE | IS_FRAGMENT (0x0078), whose
+// RELIABLE | HAS_SEQUENCE | HAS_CUMULATIVE_ACK | IS_FRAGMENT (0x0078), whose
 // trailer is the 12 B (first, last, seq) range.
-const bulkFlags = chFlagOnChannel | chFlagReliable | chFlagSequence | chFlagFragment
+//
+// NOT on-channel: every genuine 1252 B flood frame in the captures carries
+// 0x0078, while the entry's own frames carry 0x0478. Setting ON_CHANNEL here
+// made our fragments 0x0470 and the client refused the chain.
+const bulkFlags = chFlagReliable | chFlagSequence | chFlagCumulAck | chFlagFragment
 
 // FrameSize is the datagram size a payload of n bytes produces: prefix,
 // flags, payload, the 12 B fragment trailer, and the Blowfish magic +
 // wastage + padding that rounds the cipher input up to a block.
 func FrameSize(n int) int {
-	pad := (bfBlockSize - ((n + 2 + 12 + 5) % bfBlockSize)) % bfBlockSize
-	return 4 + 2 + n + 12 + pad + 5
+	// 16 B trailer: [first][last][seq][cumul] — the flags carry SEQ|CUMUL|FRAGMENT.
+	pad := (bfBlockSize - ((n + 2 + 16 + 5) % bfBlockSize)) % bfBlockSize
+	return 4 + 2 + n + 16 + pad + 5
 }
 
 // BuildFrames splits a bundle stream into the stage-2 flood's fragment
@@ -33,6 +38,12 @@ func FrameSize(n int) int {
 // than by arrival order. The last frame is short when the stream does not
 // divide evenly.
 func BuildFrames(blockKey string, stream []byte, payloadCap int, firstSeq uint32) ([][]byte, error) {
+	return BuildFramesCumul(blockKey, stream, payloadCap, firstSeq, 0)
+}
+
+// BuildFramesCumul is BuildFrames with an explicit cumulative ack for the
+// fragment trailer's last word.
+func BuildFramesCumul(blockKey string, stream []byte, payloadCap int, firstSeq, cumul uint32) ([][]byte, error) {
 	if payloadCap <= 0 {
 		payloadCap = DefaultBulkPayload
 	}
@@ -59,12 +70,16 @@ func BuildFrames(blockKey string, stream []byte, payloadCap int, firstSeq uint32
 		binary.LittleEndian.PutUint16(tmp[:2], bulkFlags)
 		clear = append(clear, tmp[:2]...)
 		clear = append(clear, payload...)
-		// Trailer order, read off the capture: (first, last, seq).
+		// Trailer order, read off the capture: (first, last, seq, cumul).
+		// The flags carry SEQ|CUMUL|FRAGMENT, so the trailer is 16 B — the
+		// cumulative ack is the last word.
 		binary.LittleEndian.PutUint32(tmp[:], firstSeq)
 		clear = append(clear, tmp[:]...)
 		binary.LittleEndian.PutUint32(tmp[:], last)
 		clear = append(clear, tmp[:]...)
 		binary.LittleEndian.PutUint32(tmp[:], firstSeq+uint32(i))
+		clear = append(clear, tmp[:]...)
+		binary.LittleEndian.PutUint32(tmp[:], cumul)
 		clear = append(clear, tmp[:]...)
 
 		enc, err := encryptBlowfish(blockKey, clear)
@@ -106,8 +121,8 @@ func ReadFrames(blockKey string, frames [][]byte) ([]byte, error) {
 		if n < 2+tr {
 			return nil, fmt.Errorf("wotlogin: read frames: frame %d truncated", i)
 		}
-		first := binary.LittleEndian.Uint32(clear[n-12 : n-8])
-		seq := binary.LittleEndian.Uint32(clear[n-4:])
+		first := binary.LittleEndian.Uint32(clear[n-16 : n-12])
+		seq := binary.LittleEndian.Uint32(clear[n-8 : n-4])
 		frags = append(frags, frag{first: first, seq: seq, payload: clear[2 : n-tr]})
 	}
 	// Order by position in the chain, not by arrival.
