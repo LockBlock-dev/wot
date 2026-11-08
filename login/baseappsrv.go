@@ -1731,13 +1731,13 @@ func (s *BaseAppServer) sendUnreliableLocked(conn Transport, to *net.UDPAddr, st
 	seq := st.unrelSeq
 	st.unrelSeq++
 	relSent := st.postSeq
-	// The last four bytes echo the client's own channel counter minus one,
-	// which is what its `processFilteredPacket` compares against; `postCumul`
-	// (our ack of ITS seqs) is a different stream and never matches.
-	cumul := uint32(0)
-	if st.clientCumul > 0 {
-		cumul = (st.clientCumul - 1) & 0x0FFFFFFF
-	}
+	// The last four bytes are the SAME word as the aux: the channel's
+	// reliable-send counter minus one. The client's `processFilteredPacket`
+	// compares them to `(channel->0x194 - 1) & 0x0FFFFFFF`, where 0x194 is
+	// that counter — so the echo must be our own send count, not our ack of
+	// its seqs (which is what the reliable packets carry, and a different
+	// stream).
+	cumul := (relSent - 1) & 0x0FFFFFFF
 	s.mu.Unlock()
 	pkt, err := buildChannelPacket(st.blockKey, flagsUnrel, app, auxFor(relSent), seq, cumul)
 	if err != nil {
