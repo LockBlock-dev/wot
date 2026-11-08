@@ -1105,7 +1105,11 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// to the player's — and only that one property is modelled here; the
 	// client defaults the static components' properties.
 	if tt := s.cfg.Dispatch.Entity("TeamInfo"); tt != nil {
-		teamID := h.VehicleID + 3
+		// Past every vehicle and the AvatarInfo: the player is `VehicleID`,
+		// the dummy `+1`, the synthetic tanks `+2` onwards and the AvatarInfo
+		// `+2+len(bots)`, so an id inside that range collides with a bot and
+		// the client's entity table ends up holding the wrong entity.
+		teamID := h.VehicleID + 3 + uint32(len(h.Bots))
 		te := NewEntity(teamID, tt)
 		for _, p := range tt.Properties {
 			te.Set(p.Name, entdef.ZeroValue(p.Type))

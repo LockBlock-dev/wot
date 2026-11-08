@@ -790,3 +790,28 @@ func TestArenaInfoIDIsPastTheVehicles(t *testing.T) {
 		t.Errorf("the AvatarInfo's id %d is inside the vehicles' range (up to %d)", info.ID, h.VehicleID+1+uint32(bots))
 	}
 }
+
+// TestArenaEntityIDsArePastTheVehicles pins every non-vehicle entity's id: the
+// player is `VehicleID`, the dummy `+1` and the synthetic tanks `+2` onwards,
+// so an id inside that range collides with a bot and the client's entity table
+// ends up holding the wrong entity — which is how the AvatarInfo and the
+// TeamInfo both hid the battle's tanks.
+func TestArenaEntityIDsArePastTheVehicles(t *testing.T) {
+	const bots = 28
+	const vehicleID = 100003
+	used := map[uint32]string{vehicleID: "player", vehicleID + 1: "dummy"}
+	for i := 0; i < bots; i++ {
+		used[vehicleID+2+uint32(i)] = "bot"
+	}
+	// The ids the entry allocates, as `enterArenaEntities` computes them.
+	infoID := vehicleID + 2 + uint32(bots)
+	teamID := vehicleID + 3 + uint32(bots)
+	for name, id := range map[string]uint32{"AvatarInfo": infoID, "TeamInfo": teamID} {
+		if what, clash := used[id]; clash {
+			t.Errorf("the %s's id %d collides with the %s", name, id, what)
+		}
+	}
+	if infoID == teamID {
+		t.Errorf("the AvatarInfo and the TeamInfo share id %d", infoID)
+	}
+}
