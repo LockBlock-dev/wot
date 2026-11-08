@@ -1207,13 +1207,16 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		if seq := binary.LittleEndian.Uint32(clear[n-8 : n-4]); seq != uint32(1+i) {
 			t.Fatalf("frame %d seq %d, want %d (the unreliable counter, not the reliable one)", i, seq, 1+i)
 		}
-		// The last four bytes are the FILTERED channel's own sequence: the
-		// client's `processFilteredPacket` compares them to
-		// `(channel->0x194 - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7), where 0x194
-		// is the filtered channel's accepted counter. Ours counts the packets
-		// we send, so the echo is that count minus one: 0, 1, 2, …
-		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != uint32(i) {
-			t.Fatalf("frame %d cumul %d, want the filtered sequence %d", i, cumul, i)
+		// The last four bytes are the cumulative ACK of the CLIENT's stream —
+		// the same footer field the reliable sends carry, fed straight to
+		// `handleCumulativeAck`. It must be the client's watermark, not a
+		// counter of our own: the captured server's 1060 battle ticks all read
+		// cumul = clientSeq + 1 exactly (aux 22 / relSent-1 22, cumul 1 /
+		// clientSeq 0). Putting our tick counter here made every tick an
+		// "ACK for packets not yet sent", which the client discarded as
+		// REASON_CORRUPTED_PACKET.
+		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != uint32(7) {
+			t.Fatalf("frame %d cumul %d, want the client watermark 7", i, cumul)
 		}
 		body := clear[2 : n-12]
 		if len(body) != len(app) {
@@ -1264,5 +1267,54 @@ func TestPostCallsSkipsRequestEntityUpdate(t *testing.T) {
 	}
 	if calls[0].Cmd != 100 || calls[1].Cmd != 501 {
 		t.Fatalf("cmds = %d, %d, want 100 then 501", calls[0].Cmd, calls[1].Cmd)
+	}
+}
+
+// clientReliablePacket is one client datagram with a [seq][cumul] trailer, the
+// shape noteReliable reads.
+func clientReliablePacket(seq, cumul uint32) []byte {
+	p := []byte{0x58, 0x04, 0x02, 0x00, 0x00} // ON|RELIABLE|SEQ|CUMUL + 3 B app
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], seq)
+	p = append(p, b[:]...)
+	binary.LittleEndian.PutUint32(b[:], cumul)
+	return append(p, b[:]...)
+}
+
+// TestCumulativeAckFollowsTheClientChannel pins the two rules the ack obeys,
+// both read off the captured server's 1060 battle ticks, where the ack is
+// exactly clientSeq+1 every single time.
+//
+// A lower ack is safe — it retires less — and the client builds a FRESH channel
+// for the battle app whose counter restarts at 0. Keeping the lobby's value
+// because the drop was smaller than a window made the battle's first ack "for
+// packets not yet sent", which the client discards as REASON_CORRUPTED_PACKET:
+// every tick was dropped, so no unreliable NRL base snapshot ever arrived and
+// every later volatile delta failed with "no base snapshot found".
+func TestCumulativeAckFollowsTheClientChannel(t *testing.T) {
+	s := &BaseAppServer{resend: newResendQueue(0, 0)}
+	st := &clientState{resendKey: "session-1"}
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40020}
+	ack := func(seq uint32) uint32 {
+		s.noteReliable(st, addr, clientReliablePacket(seq, 0))
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return st.postCumul
+	}
+	// The lobby's last counter.
+	if got := ack(24); got != 25 {
+		t.Fatalf("ack after seq 24 = %d, want 25", got)
+	}
+	// The battle app's fresh channel restarts at 0: follow it DOWN.
+	if got := ack(0); got != 1 {
+		t.Fatalf("ack after a fresh channel's seq 0 = %d, want 1 (the lobby value must not survive)", got)
+	}
+	if got := ack(39); got != 40 {
+		t.Fatalf("ack after seq 39 = %d, want 40", got)
+	}
+	// A mis-sliced trailer must not jump forward: the client rejects an ack for
+	// packets it has not sent.
+	if got := ack(0xFF8D0038); got != 40 {
+		t.Fatalf("ack after a garbage seq = %d, want 40 (a far-forward jump is refused)", got)
 	}
 }

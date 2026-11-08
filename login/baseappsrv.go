@@ -1543,13 +1543,20 @@ func (s *BaseAppServer) noteReliable(st *clientState, from *net.UDPAddr, clear [
 	// carrying it as "ACK for packets not yet sent". Steps larger than a
 	// window are ignored; a seq far BELOW the watermark is a fresh channel
 	// (the client builds one for the battle app) and restarts both counters.
+	// Follow the client's counter, DOWNWARD included. A lower ack is always
+	// safe — it just retires less — and the client builds a fresh channel for
+	// the battle app whose counter restarts at 0. The captured server's ack is
+	// exactly `clientSeq + 1` on all 1060 battle ticks, with no watermark
+	// behaviour at all; keeping the lobby's value because the drop was smaller
+	// than a window is what made the battle's first ack "for packets not yet
+	// sent".
+	//
+	// Only a jump far AHEAD is refused: that is a mis-sliced trailer, and the
+	// client rejects an ack for packets it has not sent (a garbage seq once
+	// pushed it to 0xFF8D0039 and every packet carrying it was dropped).
 	wm := seq + 1
-	switch {
-	case wm > st.postCumul && wm-st.postCumul <= 256:
+	if !(wm > st.postCumul && wm-st.postCumul > 256) {
 		st.postCumul = wm
-	case wm < st.postCumul && st.postCumul-wm > 256:
-		st.postCumul = wm
-		st.unrelSeq = 1
 	}
 	s.mu.Unlock()
 }
@@ -1767,14 +1774,21 @@ func (s *BaseAppServer) sendUnreliableLocked(conn Transport, to *net.UDPAddr, st
 	seq := st.unrelSeq
 	st.unrelSeq++
 	relSent := st.postSeq
-	// The last four bytes are the FILTERED channel's own sequence: the
-	// client's `processFilteredPacket` compares them to `(channel->0x194 - 1)
-	// & 0x0FFFFFFF` (0x142d4c9c7..d7) and drops the packet otherwise, and
-	// 0x194 is the filtered channel's ACCEPTED counter — it starts at 1 and
-	// advances once per packet it takes. So the server's side is a plain
-	// monotonic counter of the unreliable packets it sends, one less than the
-	// count: 0, 1, 2, … — which is `unrelSeq - 1`.
-	cumul := (seq - 1) & 0x0FFFFFFF
+	// The cumulative-ack word is the CLIENT's watermark, exactly as on the
+	// reliable sends — it is the same footer field, and the client feeds it
+	// straight to `handleCumulativeAck`.
+	//
+	// This used to carry `unrelSeq - 1`, on the theory that the filtered
+	// channel's own sequence lived in the last four bytes. It does not: the
+	// filtered word is the AUX footer, four bytes earlier, and on the captured
+	// server AUX is `relSent - 1` while the last word tracks the client's
+	// reliable seq exactly (aux 22 / relSent-1 22, cumul 1 / clientSeq 0, and
+	// so on for all 1060 ticks of the capture). Putting the tick counter there
+	// made every tick an "ACK for packets not yet sent": the client discarded
+	// it as REASON_CORRUPTED_PACKET, so no tick and no unreliable NRL base
+	// snapshot ever arrived, and every later delta then failed with "no base
+	// snapshot found".
+	cumul := st.postCumul
 	s.mu.Unlock()
 	pkt, err := buildChannelPacket(st.blockKey, flagsUnrel, app, auxFor(relSent), seq, cumul)
 	if err != nil {
