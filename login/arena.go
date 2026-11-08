@@ -2323,7 +2323,11 @@ func arenaVehicleIDs(h *ArenaHandoff) []uint32 {
 // flood frames carry flags 0x0078 (no ON_CHANNEL) and their own chain range —
 // so they do not consume a sequence number and are not tracked for resend.
 func (s *BaseAppServer) sendArenaSettings(conn Transport, from *net.UDPAddr, st *clientState) error {
-	frames, err := BuildFrames(st.blockKey, s.settings, DefaultBulkPayload, 0)
+	// Off-channel flags (0x0078): these frames are NOT in the connection's
+	// reliable sequence space. Sending them through the on-channel flags made
+	// them share the entry's sequence numbers, and the client then rejected
+	// the entry's own cumulative ack.
+	frames, err := BuildFramesFlags(st.blockKey, s.settings, DefaultBulkPayload, 0, offChannelFragmentFlags)
 	if err != nil {
 		return err
 	}

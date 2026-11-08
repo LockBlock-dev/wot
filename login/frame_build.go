@@ -16,6 +16,13 @@ const DefaultBulkPayload = 1223
 // trailer is the 12 B (first, last, seq) range.
 const bulkFlags = chFlagOnChannel | chFlagReliable | chFlagSequence | chFlagFragment
 
+// offChannelFragmentFlags is the flags word the capture's arena-settings
+// chains carry: 0x0078 = RELIABLE | SEQ | CUMUL | FRAGMENT, with NO
+// ON_CHANNEL. They live outside the connection's reliable sequence space, so
+// sending them through bulkFlags (which sets ON_CHANNEL and therefore shares
+// the entry's sequence numbers) makes the client reject the entry's ack.
+const offChannelFragmentFlags = chFlagReliable | chFlagSequence | chFlagCumulAck | chFlagFragment
+
 // FrameSize is the datagram size a payload of n bytes produces: prefix,
 // flags, payload, the 12 B fragment trailer, and the Blowfish magic +
 // wastage + padding that rounds the cipher input up to a block.
@@ -33,6 +40,12 @@ func FrameSize(n int) int {
 // than by arrival order. The last frame is short when the stream does not
 // divide evenly.
 func BuildFrames(blockKey string, stream []byte, payloadCap int, firstSeq uint32) ([][]byte, error) {
+	return BuildFramesFlags(blockKey, stream, payloadCap, firstSeq, bulkFlags)
+}
+
+// BuildFramesFlags is BuildFrames with an explicit flags word, for chains that
+// live outside the connection's reliable sequence space.
+func BuildFramesFlags(blockKey string, stream []byte, payloadCap int, firstSeq uint32, flags uint16) ([][]byte, error) {
 	if payloadCap <= 0 {
 		payloadCap = DefaultBulkPayload
 	}
@@ -56,7 +69,7 @@ func BuildFrames(blockKey string, stream []byte, payloadCap int, firstSeq uint32
 
 		clear := make([]byte, 0, 2+len(payload)+12)
 		var tmp [4]byte
-		binary.LittleEndian.PutUint16(tmp[:2], bulkFlags)
+		binary.LittleEndian.PutUint16(tmp[:2], flags)
 		clear = append(clear, tmp[:2]...)
 		clear = append(clear, payload...)
 		// Trailer order, read off the capture: (first, last, seq).
