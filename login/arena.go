@@ -596,18 +596,24 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: probe 2, stopping after the geometry", from, h.ArenaID)
 		return seq, nil
 	}
-	// The capture's entry ships the arena settings as a fragment chain right
-	// after CreateBasePlayer (chains of pickles beginning `80 02 7d 71 ...
-	// "epic_config"`). We send the same document in the lobby flood, but the
-	// battle app reads it from its own stream, so the entry carries it too.
-	// The chain is on-channel, so it takes real sequence numbers.
-	if len(s.settings) > 0 {
-		n, err := s.sendArenaSettings(conn, from, st, seq, cumul)
-		if err != nil {
-			return seq, err
-		}
-		seq = nextSeqAfter(seq, n)
-	}
+	// The capture's entry also ships an arena-settings fragment chain
+	// (`selectPlayerEntity` + `updateArena`, the pickle beginning `80 02 7d 71
+	// … "epic_config"`). We do NOT send it: the element wrapping is not
+	// decoded, and sending the document without it makes the client parse the
+	// pickle as elements and die with
+	// `MF_ASSERT_DEV FAILED: pCurr_ + nBytes <= pEnd_` (memory_stream.hpp:434)
+	// the moment the battle space loads.
+	//
+	// What is known, from `captures/proxy-20261031-1358.hex` chain 4..9:
+	// `updateArena` is client method 58 (element 0x88) and takes
+	// `(UINT8 period, STRING data)`; the chain's later elements are
+	// `1a 88 25 03 23 78 9c …` — length 0x25, period 3, string length 0x23,
+	// zlib — the same shape our own period updates use and the client accepts.
+	// The FIRST element is `1a 88 ff db 04 00 00 00 80 02 7d 71 …`, period 0
+	// with a raw (uncompressed) pickle, and its length field matches none of
+	// the encodings tried so far. Until it does, the battle runs on the
+	// settings the lobby flood already delivered.
+
 	// The capture's entry carries avatar updates (0x32/0x34/0x3c) for the
 	// player's entity before the entities are created: they anchor the
 	// player's position so the first entity update is not the only thing that
@@ -2380,39 +2386,4 @@ func arenaVehicleIDs(h *ArenaHandoff) []uint32 {
 		ids = append(ids, h.VehicleID+1)
 	}
 	return ids
-}
-
-// sendArenaSettings ships the arena settings document to the battle app as a
-// fragment chain, which is how the capture's entry carries it: chains of
-// pickles beginning `80 02 7d 71 … "epic_config"`.
-//
-// The captured frames are `0x0078` — ON_CHANNEL | RELIABLE | SEQ | FRAGMENT,
-// the same shape as the flood burst, with the 12-byte (first, last, seq)
-// trailer. They are therefore IN the connection's reliable sequence space:
-// they take real sequence numbers and must be tracked for resend like any
-// other reliable send.
-//
-// This used to send `0x0470` instead — the same word with CUMUL added and
-// ON_CHANNEL dropped — on the theory that the chain lived outside the
-// sequence space. The client rejected every frame with
-// "Cumulative ack was not on a channel" (it needs a channel for a CUMUL
-// footer, and an off-channel frame has none), so the arena settings were
-// never actually delivered: the battle ran on the client's defaults. The
-// flags also claimed a 16-byte trailer while the builder writes 12.
-func (s *BaseAppServer) sendArenaSettings(conn Transport, from *net.UDPAddr, st *clientState, seq, cumul uint32) (uint32, error) {
-	frames, err := BuildFrames(st.blockKey, s.settings, DefaultBulkPayload, seq)
-	if err != nil {
-		return 0, err
-	}
-	st.sendMu.Lock()
-	defer st.sendMu.Unlock()
-	for i, frame := range frames {
-		if _, err := conn.WriteToUDP(frame, from); err != nil {
-			return uint32(i), err
-		}
-		s.resend.track(st.resendKey, from.String(), seq+uint32(i), frame)
-	}
-	s.logf("stage2 %s: arena settings chain %d B in %d frame(s) (seq %d..%d)",
-		from, len(s.settings), len(frames), seq, seq+uint32(len(frames))-1)
-	return uint32(len(frames)), nil
 }
