@@ -676,8 +676,10 @@ func TestKillPacketsSurviveTheClientReader(t *testing.T) {
 	if err := s.answerShoot(tr, addr, st); err != nil {
 		t.Fatalf("answerShoot: %v", err)
 	}
-	if st.targets[0].health != 0 {
-		t.Fatalf("dummy health = %d, want 0 (the shot must kill it)", st.targets[0].health)
+	// A kill can carry a special negative health (a detached turret, an ammo
+	// rack detonation), so anything not positive is dead.
+	if st.targets[0].health > 0 {
+		t.Fatalf("dummy health = %d, want it dead (the shot must kill it)", st.targets[0].health)
 	}
 	if st.infoKills != 1 {
 		t.Fatalf("kills = %d, want 1", st.infoKills)

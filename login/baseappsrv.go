@@ -378,6 +378,9 @@ type clientState struct {
 	// ignored until the session binds its new one: the client closes that
 	// socket, and a straggler must not drag `stage2Addr` back to it.
 	leaveAddr string
+	// overturned is set once the player's hull has ended up on its side or its
+	// roof, so the death is only sent once.
+	overturned bool
 	// equipmentID is the consumable the client last activated, which its
 	// application point then lands.
 	equipmentID uint16
@@ -3045,6 +3048,8 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		// one more, and the client is shown the impact. It runs outside the
 		// hull's lock because it sends.
 		s.ramTick(conn, from, st, arenaID, float32(dt))
+		// A hull on its side or its roof is out of the battle.
+		s.checkOverturn(conn, from, st, arenaID)
 
 		// A failed write is one lost update, not the end of the battle: the
 		// next tick carries the position again.
