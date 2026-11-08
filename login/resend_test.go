@@ -2,6 +2,7 @@ package login
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -107,14 +108,27 @@ func TestResendNilIsSafe(t *testing.T) {
 
 // fakeTransport records what the server writes.
 type fakeTransport struct {
+	// mu guards the two slices: some entries start a goroutine that keeps
+	// sending (the period updates and the turret tracker), so a test that
+	// inspects what went out must not read them while it writes.
+	mu     sync.Mutex
 	writes [][]byte
 	addrs  []*net.UDPAddr
 }
 
 func (f *fakeTransport) WriteToUDP(b []byte, addr *net.UDPAddr) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.writes = append(f.writes, append([]byte(nil), b...))
 	f.addrs = append(f.addrs, addr)
 	return len(b), nil
+}
+
+// snapshot is the packets written so far, safe against a concurrent sender.
+func (f *fakeTransport) snapshot() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]byte(nil), f.writes...)
 }
 func (f *fakeTransport) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) { return 0, nil, nil }
 func (f *fakeTransport) SetReadDeadline(t time.Time) error               { return nil }

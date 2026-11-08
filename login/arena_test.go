@@ -854,23 +854,40 @@ func TestArenaEntrySequenceHasNoHoles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enterArenaSpace: %v", err)
 	}
-	// The bots are created by the sweep, not the entry, and the sweep is gated
-	// on the client's ack. There is no client here, so acknowledge the entry
-	// the way one would. The caller is what publishes the entry's final
-	// sequence to the session, so do that here too.
-	s.resend.ack(st.resendKey, seq)
+	// The caller publishes the entry's final sequence to the session.
+	s.mu.Lock()
 	st.postSeq = seq
-	s.spawnPendingBots(tr, st)
-	if got := len(st.pendingBots); got != 0 {
-		t.Fatalf("%d bots still queued, want 0 (the sweep takes them all)", got)
+	s.mu.Unlock()
+
+	// The bots are created by the sweep, not the entry, and the sweep is gated
+	// on the client's ack. There is no client here, so acknowledge what has
+	// gone out and sweep until the queue is empty, the way the ticks would.
+	for i := 0; i < 32; i++ {
+		s.mu.Lock()
+		next := st.postSeq
+		left := len(st.pendingBots)
+		s.mu.Unlock()
+		if left == 0 {
+			break
+		}
+		s.resend.ack(st.resendKey, next)
+		s.spawnPendingBots(tr, st)
 	}
-	next := st.postSeq
+	s.mu.Lock()
+	left := len(st.pendingBots)
+	s.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d bots still queued; the sweep never ran", left)
+	}
 
 	// Every reliable, on-channel packet the entry put on the wire, by the
 	// sequence number in its trailer. Fragment frames carry the same seq in
-	// the same place (the 8 bytes before the end).
+	// the same place (the 8 bytes before the end). The entry starts its own
+	// goroutine for the period updates, so take one consistent snapshot and
+	// ignore anything it appends afterwards.
+	var lo, hi uint32
 	sent := map[uint32]bool{}
-	for _, w := range tr.writes {
+	for _, w := range tr.snapshot() {
 		clear, err := DecryptChannel(st.blockKey, w)
 		if err != nil {
 			t.Fatalf("DecryptChannel: %v", err)
@@ -882,18 +899,28 @@ func TestArenaEntrySequenceHasNoHoles(t *testing.T) {
 		if flags&chFlagReliable == 0 || flags&chFlagOnChannel == 0 {
 			continue // the settings chain and the unreliable ticks
 		}
-		sent[binary.LittleEndian.Uint32(clear[len(clear)-8:])] = true
+		n := binary.LittleEndian.Uint32(clear[len(clear)-8:])
+		if !sent[n] {
+			sent[n] = true
+			if lo == 0 || n < lo {
+				lo = n
+			}
+			if n > hi {
+				hi = n
+			}
+		}
 	}
-	for want := uint32(firstSeq); want < next; want++ {
+	if lo != firstSeq {
+		t.Fatalf("the first reliable packet is seq %d, want %d", lo, firstSeq)
+	}
+	for want := lo; want <= hi; want++ {
 		if !sent[want] {
 			t.Fatalf("sequence %d was allocated but never sent: the client's ack "+
 				"stops in front of it and everything behind it never arrives "+
-				"(allocated %d..%d, sent %d packets)", want, firstSeq, next-1, len(sent))
+				"(sent %d packets over %d..%d)", want, len(sent), lo, hi)
 		}
 	}
-	for seq := range sent {
-		if seq < firstSeq || seq >= next {
-			t.Fatalf("sequence %d was sent but is outside the entry's %d..%d", seq, firstSeq, next-1)
-		}
+	if got, want := uint32(len(sent)), hi-lo+1; got != want {
+		t.Fatalf("%d distinct sequences over %d..%d, want %d", got, lo, hi, want)
 	}
 }
