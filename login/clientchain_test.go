@@ -99,10 +99,10 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	if _, err := s.enterArenaEntities(tr2, addr, st, h, 10, 10); err != nil {
 		t.Fatalf("enterArenaEntities: %v", err)
 	}
-	// The Avatar goes out alone; the rest waits for the client's socket
-	// rebind, which is what the genuine server does.
-	if len(tr2.writes) != 1 {
-		t.Fatalf("%d packets, want 1 (the Avatar)", len(tr2.writes))
+	// The Avatar and the entry's head go out; the rest waits for the client's
+	// socket rebind, which is what the genuine server does.
+	if len(tr2.writes) != 2 {
+		t.Fatalf("%d packets, want 2 (the Avatar and the head)", len(tr2.writes))
 	}
 	tr3 := &fakeTransport{}
 	if _, err := s.enterArenaSpace(tr3, addr, st, h, 11, 10); err != nil {

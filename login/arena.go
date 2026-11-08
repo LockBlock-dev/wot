@@ -487,6 +487,17 @@ func (s *BaseAppServer) enterArenaEntities(conn Transport, from *net.UDPAddr, st
 	seq++
 	s.logf("stage2 %s: CreateBasePlayer %dB (entity %d, element id %d, Avatar, arena %d)",
 		from, len(avatar), st.entityID, entity.ID, h.ArenaID)
+	// The capture's entry carries these right after CreateBasePlayer:
+	// tickSyncPeriodic, cellAppResumed and selectPlayerEntity. They are what
+	// tells the client the tick cadence and that the player entity is the one
+	// the following entity methods apply to.
+	head := EncodeTickSyncPeriodic(0, 0)
+	head = append(head, EncodeCellAppResumed()...)
+	head = append(head, EncodeSelectPlayerEntity()...)
+	if err := s.sendReliableEntity(conn, from, st, head, seq, cumul); err != nil {
+		return seq, err
+	}
+	seq++
 	// The rest waits for the client's next datagram: it rebinds its UDP
 	// socket when the battle app is created, so anything sent now goes to
 	// the port it is tearing down.

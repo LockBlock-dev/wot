@@ -170,13 +170,14 @@ func TestEnterArenaSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enterArenaEntities: %v", err)
 	}
-	// The Avatar goes out alone; the rest waits for the client's socket
+	// The Avatar and the entry's head (tickSyncPeriodic + cellAppResumed +
+	// selectPlayerEntity) go out; the rest waits for the client's socket
 	// rebind.
-	if seq != 11 {
-		t.Fatalf("seq = %d, want 11 (one frame)", seq)
+	if seq != 12 {
+		t.Fatalf("seq = %d, want 12 (the Avatar and the head)", seq)
 	}
-	if len(tr2.writes) != 1 {
-		t.Fatalf("%d writes, want 1 (the Avatar)", len(tr2.writes))
+	if len(tr2.writes) != 2 {
+		t.Fatalf("%d writes, want 2 (the Avatar and the head)", len(tr2.writes))
 	}
 	if st.arenaNext == nil {
 		t.Fatal("the rest of the entry was not held back")
@@ -194,8 +195,8 @@ func TestEnterArenaSequence(t *testing.T) {
 	// the hull attitude, the update frequency, WAITING, then the TeamInfo
 	// create/enter pair. BATTLE is NOT here: it waits for the client's
 	// `setClientReady`.
-	if seq != 29 {
-		t.Fatalf("seq = %d, want 29 (eighteen more frames)", seq)
+	if seq != 30 {
+		t.Fatalf("seq = %d, want 30 (nineteen more frames)", seq)
 	}
 	if len(tr3.writes) != 18 {
 		t.Fatalf("%d writes, want 18 (space, cell, controlEntity, Vehicle x4, AvatarInfo x3, OwnVehicle, vehicleHealthInfo, select, auxPhysics, frequency, WAITING, TeamInfo x2)", len(tr3.writes))
