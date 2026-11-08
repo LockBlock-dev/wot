@@ -38,7 +38,7 @@ func TestPostDoCmdFromDefs(t *testing.T) {
 	}
 	for _, c := range cases {
 		clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, c.call)...)
-		call, ok := srv.postDoCmd(clear, k2)
+		call, ok := srv.postDoCmd(nil, clear, k2)
 		if !ok {
 			t.Fatalf("%s: not decoded", c.name)
 		}
@@ -63,7 +63,7 @@ func TestPostDoCmdFromDefs(t *testing.T) {
 
 	// A foreign stage key must not resolve, with or without the defs.
 	clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, lobby.DoCmdInt3(1, 2, 3, 4, 5))...)
-	if _, ok := srv.postDoCmd(clear, k2^1); ok {
+	if _, ok := srv.postDoCmd(nil, clear, k2^1); ok {
 		t.Error("foreign key accepted")
 	}
 }
@@ -93,8 +93,8 @@ func TestPostDoCmdDefsAndFallbackAgree(t *testing.T) {
 	}
 	for i, c := range calls {
 		clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, c)...)
-		a, okA := withDefs.postDoCmd(clear, k2)
-		b, okB := plain.postDoCmd(clear, k2)
+		a, okA := withDefs.postDoCmd(nil, clear, k2)
+		b, okB := plain.postDoCmd(nil, clear, k2)
 		if okA != okB {
 			t.Fatalf("call %d: defs ok=%v, fallback ok=%v", i, okA, okB)
 		}
@@ -126,7 +126,7 @@ func TestPostDoCmdRejectsLengthMismatch(t *testing.T) {
 	// Corrupt the element length: the defs say 28, the wire now says 20.
 	clear[8] = 0x14
 	clear[9] = 0x00
-	if _, ok := srv.postDoCmd(clear, k2); ok {
+	if _, ok := srv.postDoCmd(nil, clear, k2); ok {
 		t.Fatal("a length the defs contradict was accepted")
 	}
 }
@@ -145,7 +145,7 @@ func TestPostDoCmdNamesFromDefs(t *testing.T) {
 	srv := &BaseAppServer{cfg: BaseAppConfig{Dispatch: d}}
 	k2 := uint32(0x99aabbcc)
 	clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, lobby.DoCmdInt3(1, 100, 0, 0, 0))...)
-	call, ok := srv.postDoCmd(clear, k2)
+	call, ok := srv.postDoCmd(nil, clear, k2)
 	if !ok {
 		t.Fatal("not decoded")
 	}

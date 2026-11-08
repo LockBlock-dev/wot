@@ -1731,13 +1731,17 @@ func (s *BaseAppServer) sendUnreliableLocked(conn Transport, to *net.UDPAddr, st
 	seq := st.unrelSeq
 	st.unrelSeq++
 	relSent := st.postSeq
-	// The last four bytes are the SAME word as the aux: the channel's
-	// reliable-send counter minus one. The client's `processFilteredPacket`
-	// compares them to `(channel->0x194 - 1) & 0x0FFFFFFF`, where 0x194 is
-	// that counter — so the echo must be our own send count, not our ack of
-	// its seqs (which is what the reliable packets carry, and a different
-	// stream).
-	cumul := (relSent - 1) & 0x0FFFFFFF
+	// The last four bytes echo the CLIENT's own send counter minus one: its
+	// `processFilteredPacket` compares them to `(channel->0x194 - 1) &
+	// 0x0FFFFFFF`, and 0x194 is the counter its send path increments
+	// (0x14005050b: `mov 0x194(%rax),%ecx; add $1; mov %ecx,0x194(%rax)`).
+	// `postCumul` is that counter plus one — `noteReliable` stores `seq+1` —
+	// so the echo is `postCumul - 1`. Our own reliable-send count (the aux)
+	// and our ack of its seqs are different numbers and never match.
+	cumul := uint32(0)
+	if st.postCumul > 0 {
+		cumul = (st.postCumul - 1) & 0x0FFFFFFF
+	}
 	s.mu.Unlock()
 	pkt, err := buildChannelPacket(st.blockKey, flagsUnrel, app, auxFor(relSent), seq, cumul)
 	if err != nil {
@@ -1944,7 +1948,7 @@ func (c postCall) Name() string {
 // Sync and poll share the doCmdInt3 element, so ONLY the command field
 // tells them apart — matching on the element id alone answers every poll
 // as a sync.
-func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
+func (s *BaseAppServer) postDoCmd(st *clientState, clear []byte, key2 uint32) (postCall, bool) {
 	if len(clear) < 14 || clear[2] != 0x02 {
 		return postCall{}, false
 	}
@@ -1981,7 +1985,16 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 				s.logf("post-flood base elem=%#02x argLen=%d avatarMethod=none", elemID, len(body))
 			}
 		}
-		for _, name := range []string{"Account", "Avatar"} {
+		// In a battle the Avatar owns the base slots the client uses: the
+		// Account's method at the same slot is a different one whose length
+		// can match, and it then answers a battle call as an account command
+		// (measured: the client's `logStreamCorruption` decoded as
+		// `doCmdInt3` and got a queue-info pickle back).
+		order := []string{"Account", "Avatar"}
+		if st != nil && st.entered {
+			order = []string{"Avatar", "Account"}
+		}
+		for _, name := range order {
 			if acct := s.cfg.Dispatch.Entity(name); acct != nil {
 				if m := acct.MethodByID(entdef.CompBase, int(elemID)-baseMethodElementID); m != nil {
 					// The defs say how long the call is; a mismatch means this
@@ -2036,7 +2049,7 @@ func (s *BaseAppServer) postDoCmd(clear []byte, key2 uint32) (postCall, bool) {
 // (100), the shop sync (300) and the dossier sync (600) — and each one
 // has a waitForSync() on the client side, so all of them must be
 // answered, not just the leading one.
-func (s *BaseAppServer) postCalls(clear []byte, key2 uint32) []postCall {
+func (s *BaseAppServer) postCalls(st *clientState, clear []byte, key2 uint32) []postCall {
 	if len(clear) < 14 || clear[2] != 0x02 {
 		return nil
 	}
@@ -3447,7 +3460,7 @@ func (s *BaseAppServer) servePostFlood(conn Transport, from *net.UDPAddr, st *cl
 		s.acceptClientMove(st, pos, yaw, pitch, roll, onGround)
 		return nil
 	}
-	calls := s.postCalls(clear, st.stage2Key)
+	calls := s.postCalls(st, clear, st.stage2Key)
 	if len(calls) == 0 {
 		return nil // acks and anything else: no answer (genuine parity)
 	}

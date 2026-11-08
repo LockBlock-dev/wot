@@ -269,18 +269,18 @@ func TestBaseAppPostDoCmd(t *testing.T) {
 	}
 	for _, c := range cases {
 		clear := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, c.call)...)
-		call, ok := srv.postDoCmd(clear, k2)
+		call, ok := srv.postDoCmd(nil, clear, k2)
 		if !ok || call.Req != c.req || call.Cmd != c.cmd {
 			t.Fatalf("%s: postDoCmd = %d/%d, %v; want %d/%d, true", c.name, call.Req, call.Cmd, ok, c.req, c.cmd)
 		}
 		// A foreign stage key must not resolve.
-		if _, ok := srv.postDoCmd(clear, k2^1); ok {
+		if _, ok := srv.postDoCmd(nil, clear, k2^1); ok {
 			t.Fatalf("%s: foreign key accepted", c.name)
 		}
 	}
 	// Token bundles (0x8a requestToken) carry no doCmdInt3 head.
 	tok := append([]byte{0x58, 0x04}, lobby.BuildLobbyBundle(k2, lobby.BuildRequestToken(2, 5))...)
-	if _, ok := srv.postDoCmd(tok, k2); ok {
+	if _, ok := srv.postDoCmd(nil, tok, k2); ok {
 		t.Fatal("requestToken bundle matched a doCmdInt3")
 	}
 }
@@ -1132,7 +1132,7 @@ func TestPostCallsReadsEveryCallInTheBundle(t *testing.T) {
 	// A reliable trailer: [seq][cumul], so the walk must stop before it.
 	clear = append(clear, 0, 0, 0, 0, 0, 0, 0, 0)
 
-	calls := srv.postCalls(clear, k2)
+	calls := srv.postCalls(nil, clear, k2)
 	if len(calls) != 3 {
 		t.Fatalf("%d calls decoded, want 3 (sync, shop, dossiers)", len(calls))
 	}
@@ -1145,7 +1145,7 @@ func TestPostCallsReadsEveryCallInTheBundle(t *testing.T) {
 			t.Fatalf("call %d = %d/%d, want %d/%d", i, calls[i].Req, calls[i].Cmd, w.req, w.cmd)
 		}
 	}
-	if got := srv.postCalls(clear, k2^1); len(got) != 0 {
+	if got := srv.postCalls(nil, clear, k2^1); len(got) != 0 {
 		t.Fatalf("foreign stage key decoded %d calls", len(got))
 	}
 }
@@ -1208,13 +1208,12 @@ func TestArenaTickPositionsRideTheUnreliableStream(t *testing.T) {
 		if seq := binary.LittleEndian.Uint32(clear[n-8 : n-4]); seq != uint32(1+i) {
 			t.Fatalf("frame %d seq %d, want %d (the unreliable counter, not the reliable one)", i, seq, 1+i)
 		}
-		// The last four bytes of an UNRELIABLE packet are the SAME word as
-		// the aux: the channel's reliable-send counter minus one. The client's
-		// `processFilteredPacket` compares them to
+		// The last four bytes of an UNRELIABLE packet echo the CLIENT's send
+		// counter minus one: its `processFilteredPacket` compares them to
 		// `(channel->0x194 - 1) & 0x0FFFFFFF` (0x142d4c9c7..d7) and drops the
-		// packet otherwise.
-		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != (uint32(42)-1)&0x0FFFFFFF {
-			t.Fatalf("frame %d cumul %#x, want the reliable-send counter %#x", i, cumul, (uint32(42)-1)&0x0FFFFFFF)
+		// packet otherwise. `postCumul` is that counter plus one.
+		if cumul := binary.LittleEndian.Uint32(clear[n-4:]); cumul != 6 {
+			t.Fatalf("frame %d cumul %d, want the client's counter minus one (6)", i, cumul)
 		}
 		body := clear[2 : n-12]
 		if len(body) != len(app) {
@@ -1259,7 +1258,7 @@ func TestPostCallsSkipsRequestEntityUpdate(t *testing.T) {
 	app = append(app, lobby.DoCmdInt3(225, lobby.CmdReqServerStats, 0, 0, 0)...)
 	clear := append([]byte{0x58, 0x04}, app...)
 	clear = append(clear, make([]byte, 8)...)
-	calls := s.postCalls(clear, k2)
+	calls := s.postCalls(nil, clear, k2)
 	if len(calls) != 2 {
 		t.Fatalf("%d calls, want 2 (the syncs before and after the requestEntityUpdate run)", len(calls))
 	}

@@ -62,7 +62,7 @@ func TestDefsAgreeWithPostDoCmd(t *testing.T) {
 		}
 		// The hand-written reader's view (no dispatch configured).
 		plain := &BaseAppServer{}
-		call, ok := plain.postDoCmd(clear, 0)
+		call, ok := plain.postDoCmd(nil, clear, 0)
 		if !ok {
 			// postDoCmd checks the session key; re-read the ids directly
 			// so the comparison does not depend on it.
