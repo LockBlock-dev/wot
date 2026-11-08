@@ -194,9 +194,28 @@ func faceOf(n [3]float32) int {
 	return 2
 }
 
-// maxGroundRicochets is how many times a shell may skim off the ground before
-// it stops.
-const maxGroundRicochets = 3
+// maxRicochets is how many times a shell may ricochet — off armour or off the
+// ground — before it stops: the reference's `MAX_RICOCHETS`.
+const maxRicochets = 3
+
+// ricochetStandoff is how far before the point it hit a ricocheted shell goes
+// on from, in metres, so that it does not meet that same plate again: the
+// reference's `RICOCHET_STANDOFF`.
+const ricochetStandoff = 0.001
+
+// ricochetStart is where a ricocheted shell goes on from: just before the
+// point it bounced off, along its incoming path.
+func ricochetStart(point, velocity [3]float32) [3]float32 {
+	l := float32(math.Sqrt(float64(velocity[0]*velocity[0] + velocity[1]*velocity[1] + velocity[2]*velocity[2])))
+	if l < 1e-6 {
+		return point
+	}
+	return [3]float32{
+		point[0] - velocity[0]/l*ricochetStandoff,
+		point[1] - velocity[1]/l*ricochetStandoff,
+		point[2] - velocity[2]/l*ricochetStandoff,
+	}
+}
 
 // groundRicochetAngle is the largest angle between a shell's path and the
 // ground it ricochets off, in radians: the reference's `GROUND.ricochet_angle`,
@@ -455,11 +474,15 @@ func showShotResultsElement(avatar *Entity, vehicleID uint32, flags uint32) ([]b
 
 // showTracerElement is `Avatar.showTracer`: the shell the client draws flying
 // from the gun.
-func showTracerElement(avatar *Entity, shooter uint32, shotID int32, sh shellSpec, start, velocity [3]float32) ([]byte, error) {
+func showTracerElement(avatar *Entity, shooter uint32, shotID int32, sh shellSpec, start, velocity [3]float32, ricochet bool, flightRange float32) ([]byte, error) {
+	var ricochetFlag uint64
+	if ricochet {
+		ricochetFlag = 1
+	}
 	args := []entdef.Value{
 		{Kind: entdef.VInt, Int: int64(shooter)},
 		{Kind: entdef.VInt, Int: int64(shotID)},
-		{Kind: entdef.VUint, Uint: 0}, // not a ricochet
+		{Kind: entdef.VUint, Uint: ricochetFlag},
 		{Kind: entdef.VUint, Uint: uint64(sh.EffectsIndex)},
 		{Kind: entdef.VUint, Uint: 255}, // no prefab effect
 		{Kind: entdef.VUint, Uint: uint64(sh.KindIndex)},
@@ -467,7 +490,7 @@ func showTracerElement(avatar *Entity, shooter uint32, shotID int32, sh shellSpe
 		vec3Value(start),
 		vec3Value(velocity),
 		{Kind: entdef.VFloat, Float: sh.Gravity},
-		{Kind: entdef.VFloat, Float: sh.MaxDistance},
+		{Kind: entdef.VFloat, Float: float64(flightRange)},
 		{Kind: entdef.VUint, Uint: 0},
 		{Kind: entdef.VUint, Uint: 0},
 	}
@@ -545,103 +568,151 @@ func (s *BaseAppServer) applyShot(conn Transport, from *net.UDPAddr, st *clientS
 		}
 		return false
 	}
-	// The shell's flight. An AP or APCR shell that meets the ground at a
-	// grazing angle skims off it and goes on, with less penetration, up to
-	// `maxGroundRicochets` times.
-	start := marker.Position
-	penFactor := float32(1)
-	flew := float32(0)
-	ricochets := 0
-	var landing shellLanding
-	for {
-		landing = flyShell(sh, start, v, terrain, targets, statics, onStatic)
-		landing.Distance += flew
-		if landing.Kind != landingTerrain || ricochets >= maxGroundRicochets {
-			break
-		}
-		normal := [3]float32{0, 1, 0}
-		if terrain != nil {
-			if n, ok := terrain.NormalAt(landing.Point[0], landing.Point[2]); ok {
-				normal = n
-			}
-		}
-		if !ricochetsOffGround(sh, landing.Velocity, normal) {
-			break
-		}
-		s.logf("arena %d: shot %s ricochets off the ground at %v, %.0f%% of its penetration left",
-			arenaID, sh.Name, landing.Point, penFactor*100)
-		v = reflect(landing.Velocity, normal)
-		start = [3]float32{
-			landing.Point[0] + normal[0]*0.05,
-			landing.Point[1] + normal[1]*0.05,
-			landing.Point[2] + normal[2]*0.05,
-		}
-		penFactor *= ricochetPenFactor(sh)
-		flew = landing.Distance
-		ricochets++
-	}
 	// The aim and the muzzle are the two numbers that decide whether a shot at
 	// a top surface lands or sails over: the elevation is measured from the
 	// gun pivot above the CHASSIS origin, and the pitch is clamped to the
 	// gun's own limits.
 	s.logf("arena %d: shot %s aim=%v gunYaw=%.3f gunPitch=%.3f muzzle=%v",
 		arenaID, sh.Name, aimWorld, yaw, pitch, marker.Position)
-	if landing.Kind != landingVehicle {
-		// A miss: the client drew its own shot, so only the end and, for the
-		// ground or a wall, the explosion go out. `explodeProjectile`'s shot
-		// id is flagged unknown (`| 0x40000000`) so the client shows it from
-		// these arguments alone.
-		var app []byte
-		app = append(app, EncodeSelectPlayerEntity()...)
-		if el, err := stopTracerElement(avatar, shotID, landing.Point); err == nil {
-			app = append(app, el...)
+	// The shell's flight, with its ricochets. A shell that meets armour at too
+	// shallow an angle, or that skims the ground, goes on: it is reflected at
+	// the same speed, keeps a share of its penetration, and may do it again —
+	// up to `maxRicochets` times, the reference's `MAX_RICOCHETS`.
+	start := marker.Position
+	velocity := v
+	penFactor := float32(1)
+	flew := float32(0)
+	ricochets := 0
+	for {
+		// The leg's range: what is left of the shell's.
+		remaining := float32(sh.MaxDistance) - flew
+		if remaining <= 0 {
+			return
 		}
-		if landing.Kind == landingTerrain || landing.Kind == landingStatic {
-			if el, err := explodeProjectileElement(avatar, uint32(shotID)|0x40000000, sh, landing); err == nil {
-				app = append(app, el...)
+		leg := sh
+		leg.MaxDistance = float64(remaining)
+		landing := flyShell(leg, start, velocity, terrain, targets, statics, onStatic)
+		landing.Distance += flew
+		switch landing.Kind {
+		case landingVehicle:
+			if landing.Target < 0 || landing.Target >= len(targets) {
+				return
 			}
-			// An HE shell explodes where it lands: the vehicles whose main
-			// armour the blast reaches take its damage, the shooter's own
-			// aside.
-			if sh.isHE() {
-				s.splash(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, targets, landing.Point)
+			t := targets[landing.Target]
+			// What the shell does to the armour it meets: the plates it walks
+			// are the client's own triangles, so a screen stops it short of
+			// the hull and a ricochet names the plate it bounced off.
+			res, ok := rollVehicleHit(sh, landing.Target, landing.VHit, landing.Dir, float64(landing.Distance), penFactor, t.collision, t.pos, t.yaw)
+			if !ok {
+				// It met no armour on its way (only a device, or a gap): the
+				// shell goes on, as the reference's `hit` returns None there.
+				s.logf("arena %d: shot %s met no armour on bot %d at %v", arenaID, sh.Name, t.id, landing.VHit.LocalPoint)
+				return
 			}
+			// The client sees the impact and the shooter's marker whether the
+			// shell stops or goes on.
+			s.applyDamage(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, t, res)
+			if res.Effect != hitEffectRicochet || ricochets >= maxRicochets {
+				return
+			}
+			// Off the plate: the shell goes on at the same speed, with less
+			// penetration, from just before the point it hit.
+			velocity = reflect(landing.Velocity, res.Normal)
+			start = ricochetStart(landing.Point, landing.Velocity)
+			penFactor *= ricochetPenFactor(sh)
+			flew = landing.Distance
+			ricochets++
+			s.logf("arena %d: shot %s ricochets off bot %d part %d at %v, %.0f%% of its penetration left",
+				arenaID, sh.Name, t.id, res.Part, landing.Point, penFactor*100)
+			if err := s.sendRicochetTracer(conn, from, st, avatar, attacker, shotID, sh, start, velocity, remaining); err != nil {
+				s.logf("arena %d: ricochet tracer: %v", arenaID, err)
+			}
+		case landingTerrain, landingStatic:
+			// The explosion, and the blast for an HE shell.
+			s.sendImpact(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, targets, landing)
+			if landing.Kind != landingTerrain || ricochets >= maxRicochets {
+				return
+			}
+			normal := [3]float32{0, 1, 0}
+			if terrain != nil {
+				if n, ok := terrain.NormalAt(landing.Point[0], landing.Point[2]); ok {
+					normal = n
+				}
+			}
+			if !ricochetsOffGround(sh, landing.Velocity, normal) {
+				return
+			}
+			// A shallow hit on the ground: the shell skims off it and goes on.
+			velocity = reflect(landing.Velocity, normal)
+			start = ricochetStart(landing.Point, landing.Velocity)
+			penFactor *= ricochetPenFactor(sh)
+			flew = landing.Distance
+			ricochets++
+			s.logf("arena %d: shot %s ricochets off the ground at %v, %.0f%% of its penetration left",
+				arenaID, sh.Name, landing.Point, penFactor*100)
+			if err := s.sendRicochetTracer(conn, from, st, avatar, attacker, shotID, sh, start, velocity, remaining); err != nil {
+				s.logf("arena %d: ricochet tracer: %v", arenaID, err)
+			}
+		default:
+			// Out of range: the client's own shot already ended there.
+			return
 		}
-		if len(app) > 0 {
-			st.sendMu.Lock()
-			seq, cumul := s.nextSeq(st)
-			err := s.sendReliableLocked(conn, from, st, app, seq, cumul)
-			st.sendMu.Unlock()
-			if err != nil {
-				s.logf("arena %d: miss: %v", arenaID, err)
-			} else if landing.Kind == landingTerrain {
-				s.logf("arena %d: shot %s landed on the ground at %v after %.0f m",
-					arenaID, sh.Name, landing.Point, landing.Distance)
-			} else if landing.Kind == landingStatic {
-				s.logf("arena %d: shot %s stopped on a static model at %v after %.0f m",
-					arenaID, sh.Name, landing.Point, landing.Distance)
-			} else {
-				s.logf("arena %d: shot %s flew its %.0f m and landed at %v",
-					arenaID, sh.Name, landing.Distance, landing.Point)
-			}
+	}
+}
+
+// sendImpact is a shell ending on the ground or a wall: the tracer's end, the
+// explosion the client draws, and the blast an HE shell's explosion carries.
+func (s *BaseAppServer) sendImpact(conn Transport, from *net.UDPAddr, st *clientState, arenaID uint64, sh shellSpec, shotID int32, attacker uint32, vehicle, avatar *Entity, marker nrlGunMarker, targets []*botTarget, landing shellLanding) {
+	// The client drew its own shot, so only the end and, for the ground or a
+	// wall, the explosion go out. `explodeProjectile`'s shot id is flagged
+	// unknown (`| 0x40000000`) so the client shows it from these arguments
+	// alone.
+	var app []byte
+	app = append(app, EncodeSelectPlayerEntity()...)
+	if el, err := stopTracerElement(avatar, shotID, landing.Point); err == nil {
+		app = append(app, el...)
+	}
+	if el, err := explodeProjectileElement(avatar, uint32(shotID)|0x40000000, sh, landing); err == nil {
+		app = append(app, el...)
+	}
+	if len(app) > 0 {
+		st.sendMu.Lock()
+		seq, cumul := s.nextSeq(st)
+		err := s.sendReliableLocked(conn, from, st, app, seq, cumul)
+		st.sendMu.Unlock()
+		if err != nil {
+			s.logf("arena %d: impact: %v", arenaID, err)
+		} else if landing.Kind == landingTerrain {
+			s.logf("arena %d: shot %s landed on the ground at %v after %.0f m",
+				arenaID, sh.Name, landing.Point, landing.Distance)
+		} else {
+			s.logf("arena %d: shot %s stopped on a static model at %v after %.0f m",
+				arenaID, sh.Name, landing.Point, landing.Distance)
 		}
-		return
 	}
-	if landing.Target < 0 || landing.Target >= len(targets) {
-		return
+	// An HE shell explodes where it lands: the vehicles whose main armour the
+	// blast reaches take its damage, the shooter's own aside.
+	if sh.isHE() {
+		s.splash(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, targets, landing.Point)
 	}
-	t := targets[landing.Target]
-	// What the shell does to the armour it meets: the plates it walks are the
-	// client's own triangles, so a screen stops it short of the hull and a
-	// ricochet names the plate it bounced off.
-	res, ok := rollVehicleHit(sh, landing.Target, landing.VHit, landing.Dir, float64(landing.Distance), penFactor, t.collision, t.pos, t.yaw)
-	if !ok {
-		// It met no armour on its way (only a device, or a gap): the shell
-		// goes on, as the reference's `hit` returns None there.
-		s.logf("arena %d: shot %s met no armour on bot %d at %v", arenaID, sh.Name, t.id, landing.VHit.LocalPoint)
-		return
+}
+
+// sendRicochetTracer tells the client the shell went on: a new tracer of the
+// same shot, flagged as a ricochet, from where it bounced, with what is left of
+// its range.
+func (s *BaseAppServer) sendRicochetTracer(conn Transport, from *net.UDPAddr, st *clientState, avatar *Entity, attacker uint32, shotID int32, sh shellSpec, start, velocity [3]float32, remaining float32) error {
+	var app []byte
+	app = append(app, EncodeSelectPlayerEntity()...)
+	el, err := showTracerElement(avatar, attacker, shotID, sh, start, velocity, true, remaining)
+	if err != nil {
+		return err
 	}
-	s.applyDamage(conn, from, st, arenaID, sh, shotID, attacker, vehicle, avatar, marker, t, res)
+	app = append(app, el...)
+	st.sendMu.Lock()
+	seq, cumul := s.nextSeq(st)
+	err = s.sendReliableLocked(conn, from, st, app, seq, cumul)
+	st.sendMu.Unlock()
+	return err
 }
 
 // applyDamage applies one shell's result to one target and sends the packets:
@@ -777,7 +848,7 @@ func (s *BaseAppServer) applyDamage(conn Transport, from *net.UDPAddr, st *clien
 	}
 	// The shooter's own view: the shell and the hit marker.
 	avatarApp = append(avatarApp, EncodeSelectPlayerEntity()...)
-	if el, err := showTracerElement(avatar, attacker, shotID, sh, marker.Position, marker.Velocity); err == nil {
+	if el, err := showTracerElement(avatar, attacker, shotID, sh, marker.Position, marker.Velocity, false, float32(sh.MaxDistance)); err == nil {
 		avatarApp = append(avatarApp, el...)
 	}
 	if el, err := stopTracerElement(avatar, shotID, res.Point); err == nil {

@@ -214,7 +214,7 @@ func TestDamageMethodCalls(t *testing.T) {
 		t.Fatalf("showShotResults id = %#x, want %#x", el[0], want)
 	}
 
-	el, err = showTracerElement(avatar, 42, 1, shellSpec{Caliber: 76.2, KindIndex: 2, Speed: 800, Gravity: 9.81, MaxDistance: 720}, [3]float32{0, 2, 20}, [3]float32{0, 0, -800})
+	el, err = showTracerElement(avatar, 42, 1, shellSpec{Caliber: 76.2, KindIndex: 2, Speed: 800, Gravity: 9.81, MaxDistance: 720}, [3]float32{0, 2, 20}, [3]float32{0, 0, -800}, false, 720)
 	if err != nil {
 		t.Fatalf("showTracer: %v", err)
 	}

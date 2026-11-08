@@ -323,7 +323,10 @@ func ricochetsOff(sh shellSpec, hitAngleCos float32, m material) bool {
 	if !m.CheckCaliberForRicochet || !kindChecks {
 		return true
 	}
-	return float64(m.Armor)*3 < sh.Caliber
+	// A caliber of more than three times the armour overmatches it: no
+	// ricochet. Exactly three times still ricochets (the reference's
+	// `armor * 3.0 >= shot.caliber`).
+	return float64(m.Armor)*3 >= sh.Caliber
 }
 
 // penetrationArmor is `_computePenetrationArmor`: the thickness a shell goes

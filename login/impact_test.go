@@ -1,6 +1,8 @@
 package login
 
 import (
+	"bytes"
+	"encoding/binary"
 	"math"
 	"testing"
 )
@@ -96,5 +98,92 @@ func TestStaticEffectMaterial(t *testing.T) {
 		if got := staticEffectMaterial(staticTriangle{Body: name}); got != want {
 			t.Errorf("%s = %d, want %d", name, got, want)
 		}
+	}
+}
+
+// TestVehicleRicochetGoesOn pins a shell bouncing off armour: the outcome is a
+// ricochet with no damage, the velocity is mirrored off the plate's normal at
+// the same speed, and the shell goes on from just before the point it hit with
+// a share of its penetration — the reference's `Shot::ricochet`.
+func TestVehicleRicochetGoesOn(t *testing.T) {
+	// A 2 m box, its +Z face square on to a shell flying nearly parallel to it.
+	box := hitBox{
+		Bounds: [2][3]float32{{-1, 0, -1}, {1, 2, 1}},
+		Armor:  [4]float32{40, 40, 40, 40},
+		Part:   1,
+	}
+	tgt := &botTarget{pos: [3]float32{0, 0, 12}, collision: boxCollision(box), health: 1000, maxHealth: 1000}
+	sh := shellSpec{
+		Kind: "ARMOR_PIERCING", KindIndex: 2, Caliber: 76.2,
+		Pen: 200, PenNear: 200, PenFar: 200, Damage: 300, DamageNear: 300, DamageFar: 300,
+		HasRicochetAngle: true, RicochetAngleCos: math.Cos(70 * math.Pi / 180),
+	}
+	// From 10 m to the left, 0.2 m in front of the face, so the path crosses it
+	// at about one degree.
+	from := [3]float32{-10, 1, 13.2}
+	dir := [3]float32{1, 0, -0.02}
+	l := float32(math.Sqrt(float64(dir[0]*dir[0] + dir[2]*dir[2])))
+	dir = [3]float32{dir[0] / l, 0, dir[2] / l}
+	to := [3]float32{from[0] + dir[0]*20, from[1], from[2] + dir[2]*20}
+	h, ok := tgt.collision.firstHit(tgt.pos, tgt.yaw, from, to)
+	if !ok {
+		t.Fatal("the shell missed the box")
+	}
+	res, ok := rollVehicleHit(sh, 0, h, dir, float64(h.Distance), 1, tgt.collision, tgt.pos, tgt.yaw)
+	if !ok {
+		t.Fatal("the shell met no armour")
+	}
+	if res.Effect != hitEffectRicochet {
+		t.Fatalf("effect = %d, want a ricochet", res.Effect)
+	}
+	if res.Damage != 0 {
+		t.Fatalf("damage = %d, want 0: a ricochet does no damage", res.Damage)
+	}
+	// The velocity mirrors off the plate's normal, at the same speed.
+	v := [3]float32{dir[0] * 800, 0, dir[2] * 800}
+	reflected := reflect(v, res.Normal)
+	speedIn := math.Hypot(float64(v[0]), float64(v[2]))
+	speedOut := math.Hypot(float64(reflected[0]), float64(reflected[2]))
+	if math.Abs(speedIn-speedOut) > 0.01 {
+		t.Errorf("speed %v -> %v, want the same", speedIn, speedOut)
+	}
+	if reflected[2] <= 0 {
+		t.Errorf("reflected velocity %v, want it away from the face (+Z)", reflected)
+	}
+	// The shell goes on from just before the point it hit.
+	start := ricochetStart(h.Point, v)
+	if d := dist3(start, h.Point); math.Abs(float64(d-ricochetStandoff)) > 1e-6 {
+		t.Errorf("standoff = %v, want %v", d, ricochetStandoff)
+	}
+	// What it keeps of its penetration.
+	if got := ricochetPenFactor(sh); got != 0.75 {
+		t.Errorf("AP keeps %v of its penetration, want 0.75", got)
+	}
+}
+
+// TestRicochetTracerCarriesTheFlagAndRange pins the tracer the client gets for
+// the continuing shell: it is flagged as a ricochet and carries what is left of
+// the shell's range, not the whole of it.
+func TestRicochetTracerCarriesTheFlagAndRange(t *testing.T) {
+	d := testDispatch(t)
+	avatarType := d.Entity("Avatar")
+	if avatarType == nil {
+		t.Fatal("defs have no Avatar")
+	}
+	avatar := NewEntity(100003, avatarType)
+	sh := shellSpec{Caliber: 76.2, KindIndex: 2, EffectsIndex: 16, Gravity: 9.81, MaxDistance: 720}
+	el, err := showTracerElement(avatar, 42, 7, sh, [3]float32{0, 1, 0}, [3]float32{0, 0, -800}, true, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The ricochet flag is the third argument, a UINT: 1 for a ricochet.
+	if !bytes.Contains(el, []byte{0x01, 0x00, 0x00, 0x00}) && !bytes.Contains(el, []byte{0x01}) {
+		t.Fatalf("tracer = % x, want the ricochet flag", el)
+	}
+	// The range argument is the remaining 500 m, as a float32.
+	var want [4]byte
+	binary.LittleEndian.PutUint32(want[:], math.Float32bits(500))
+	if !bytes.Contains(el, want[:]) {
+		t.Fatalf("tracer = % x, want the remaining range 500", el)
 	}
 }
