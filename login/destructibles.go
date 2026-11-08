@@ -421,13 +421,13 @@ func (s *BaseAppServer) createDestructibleChunk(conn Transport, from *net.UDPAdd
 		}
 		seq++
 	}
-	if enter, serr := EncodeEnterAoI(id, 0); serr == nil {
-		if err := s.sendReliableEntity(conn, from, st, enter, seq, cumul); err != nil {
-			return err
-		}
-	}
+	// The chunk's entity is created here and entered when the client comes
+	// near it, like every other entity.
 	s.mu.Lock()
 	dc.entity = e
+	if st.interest != nil {
+		st.interest.add(id, pos, false)
+	}
 	s.mu.Unlock()
 	s.logf("arena %d: AreaDestructibles %d created for chunk %d (%d fragiles, %d modules, %d trees, %d columns)",
 		arenaID, id, chunkID, len(fragiles), len(modules), len(trees), len(columns))

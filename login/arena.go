@@ -469,6 +469,10 @@ func (s *BaseAppServer) enterArenaEntities(conn Transport, from *net.UDPAddr, st
 	}
 	s.mu.Lock()
 	st.avatar = entity
+	// The client's interest starts empty; the Avatar is always held, and the
+	// tanks and destructibles register as they are created.
+	st.interest = newInterest([3]float32{})
+	st.interest.add(entity.ID, [3]float32{}, true)
 	s.mu.Unlock()
 	if err := s.sendReliableEntity(conn, from, st, avatar, seq, cumul); err != nil {
 		return seq, err
@@ -601,7 +605,9 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	// `set_remoteCamera` wants `ownVehicle`, so sending them here kills every
 	// property after them — `publicInfo` included, which is what left the tank
 	// with no descriptor. They ride the update below instead.
-	props, err := EntityPropertyRunNames(vehicle, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag", "physicsMode")
+	// The player's own tank: `owner` is true, so its OWN_CLIENT properties
+	// (`isMyVehicle`) are part of the run.
+	props, err := EntityPropertyRunFor(vehicle, true, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag", "physicsMode")
 	// WOT_ARENA_PROBE=3 bisects the property run: the vehicle is created with
 	// `publicInfo` alone. If the client then builds its descriptor, the run is
 	// desyncing before it; if it still comes back empty, the dict's own
@@ -667,6 +673,11 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		return seq, err
 	}
 	seq++
+	s.mu.Lock()
+	if st.interest != nil {
+		st.interest.add(vehicle.ID, spawn, true)
+	}
+	s.mu.Unlock()
 	// Control authority over the player's own tank. The captured server never
 	// sends this, but without it this client's vehicle physics is never
 	// stepped: the simulation callbacks never fire, `movementSignals` stays 0
@@ -830,6 +841,11 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		}
 		seq++
 	}
+	s.mu.Lock()
+	if st.interest != nil {
+		st.interest.add(info.ID, [3]float32{}, true)
+	}
+	s.mu.Unlock()
 	if len(infoApp) > DefaultBulkPayload {
 		// The whole vehicle list in one element: it has to be fragmented, and
 		// the chain consumes one sequence number per frame.
@@ -846,6 +862,11 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 	}
 	s.logf("stage2 %s: AvatarInfo %d created (createEntityDetailed %dB, NRL %dB, %d vehicles)",
 		from, info.ID, len(icreate), len(infoApp), len(vehicles))
+	// Everything is created; what the client HOLDS is the interest's call.
+	// The tanks around the player enter now, the rest as it drives.
+	if err := s.refreshInterest(conn, from, st); err != nil {
+		s.logf("stage2 %s: arena %d: interest: %v", from, h.ArenaID, err)
+	}
 
 	// The player's own tank gets its `OwnVehicle` component: the client only
 	// turns its turret once it knows how fast it can, and it reads the
@@ -2065,7 +2086,8 @@ func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr
 	if pi, ok := e.Props["publicInfo"]; ok {
 		e.Set("publicInfo", dictSet(pi, "index", entdef.Value{Kind: entdef.VUint, Uint: uint64(infoIndex)}))
 	}
-	props, err := EntityPropertyRunNames(e, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag")
+	// A synthetic tank is nobody's own: its OWN_CLIENT properties are left out.
+	props, err := EntityPropertyRunFor(e, false, "publicInfo", "health", "isCrewActive", "avatarID", "dogTag")
 	if err != nil {
 		return nil, entdef.Value{}, err
 	}
@@ -2089,11 +2111,13 @@ func (s *BaseAppServer) createSyntheticVehicle(conn Transport, from *net.UDPAddr
 		}
 		seq++
 	}
-	if enter, err := EncodeEnterAoI(e.ID, 0); err == nil {
-		if err := s.sendReliableEntity(conn, from, st, enter, seq, cumul); err != nil {
-			return nil, entdef.Value{}, err
-		}
+	// The entity is created here; whether the client holds it is the interest's
+	// call, so a tank on the far side of the map is not in its table.
+	s.mu.Lock()
+	if st.interest != nil {
+		st.interest.add(id, pos, false)
 	}
+	s.mu.Unlock()
 	return e, vehicleInfoValue(infoType, doc, id, infoIndex, pos[0], pos[2]), nil
 }
 

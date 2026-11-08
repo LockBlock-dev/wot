@@ -1066,6 +1066,36 @@ func EntityPropertyRunNames(e *Entity, names ...string) ([]byte, error) {
 	return body.Bytes(), nil
 }
 
+// EntityPropertyRunFor is EntityPropertyRunNames filtered by audience: a
+// property the receiving client may not see is left out, and the run's count
+// shrinks with it.
+//
+// The audience is the defs' distribution flags: `isMyVehicle` and the
+// `OwnVehicle` component are OWN_CLIENT, so a roster that sent them to every
+// client would tell each player that every tank is theirs. owner says whether
+// the receiving client owns the entity.
+func EntityPropertyRunFor(e *Entity, owner bool, names ...string) ([]byte, error) {
+	if e == nil || e.Type == nil {
+		return nil, fmt.Errorf("wotlogin: property run: no entity type")
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	var keep []string
+	for i := range e.Type.Properties {
+		p := &e.Type.Properties[i]
+		if !want[p.Name] {
+			continue
+		}
+		if !p.Audience.Reaches(owner) {
+			continue
+		}
+		keep = append(keep, p.Name)
+	}
+	return EntityPropertyRunNames(e, keep...)
+}
+
 // EntityPropertyRunExcept is EntityPropertyRunLevel with the named properties
 // left out.
 func EntityPropertyRunExcept(e *Entity, inner bool, skip ...string) ([]byte, error) {

@@ -672,3 +672,75 @@ func (e *Entity) finish() {
 	}
 	e.CSProps = order
 }
+
+// Audience is who a client property or method reaches, from its distribution
+// flags: the BigWorld `DATA_OTHER_CLIENT` / `DATA_OWN_CLIENT` pair, which the
+// defs spell `ALL_CLIENTS`, `OTHER_CLIENTS` and `OWN_CLIENT`.
+//
+// A server that serves one client can ignore it; a roster cannot: a vehicle's
+// `isMyVehicle` and the `OwnVehicle` component are the owner's, and sending
+// them to every client tells each player that every tank is theirs.
+type Audience uint8
+
+const (
+	// AudienceAll is `ALL_CLIENTS`: every client in the AoI.
+	AudienceAll Audience = iota
+	// AudienceOther is `OTHER_CLIENTS`: every client except the entity's owner.
+	AudienceOther
+	// AudienceOwn is `OWN_CLIENT`: the entity's owner only.
+	AudienceOwn
+	// AudienceNone is server-side only (BASE, CELL_PRIVATE): never on the wire.
+	AudienceNone
+)
+
+func (a Audience) String() string {
+	switch a {
+	case AudienceAll:
+		return "all"
+	case AudienceOther:
+		return "other"
+	case AudienceOwn:
+		return "own"
+	}
+	return "none"
+}
+
+// Audience is the property's audience.
+func (p Property) Audience() Audience {
+	switch {
+	case p.Flags&flagOwnClient != 0 && p.Flags&flagOtherClient != 0:
+		return AudienceAll
+	case p.Flags&flagOtherClient != 0:
+		return AudienceOther
+	case p.Flags&flagOwnClient != 0:
+		return AudienceOwn
+	}
+	return AudienceNone
+}
+
+// Audience is the client method's audience: `Exposed`'s all-clients and
+// own-client bits.
+func (m Method) Audience() Audience {
+	switch {
+	case m.Flags&expAllClients != 0 && m.Flags&expOwnClient != 0:
+		return AudienceAll
+	case m.Flags&expAllClients != 0:
+		return AudienceOther
+	case m.Flags&expOwnClient != 0:
+		return AudienceOwn
+	}
+	return AudienceNone
+}
+
+// Reaches reports whether a client with this ownership receives the audience.
+func (a Audience) Reaches(owner bool) bool {
+	switch a {
+	case AudienceAll:
+		return true
+	case AudienceOther:
+		return !owner
+	case AudienceOwn:
+		return owner
+	}
+	return false
+}

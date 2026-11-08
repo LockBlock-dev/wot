@@ -378,6 +378,10 @@ type clientState struct {
 	// ignored until the session binds its new one: the client closes that
 	// socket, and a straggler must not drag `stage2Addr` back to it.
 	leaveAddr string
+	// interest is the client's area of interest: the entities it holds and the
+	// ones it could hold. The arena's vehicles are created at the entry and
+	// entered as they come into range.
+	interest *interest
 	// statics is the battle's static scene (buildings, rocks, trees): the hull
 	// is pushed out of it and a shell stops on it, or destroys it.
 	statics *staticScene
@@ -3053,7 +3057,17 @@ func (s *BaseAppServer) trackTurret(conn Transport, from *net.UDPAddr, st *clien
 		st.tick++
 		idA, idB := st.nrlIDa, st.nrlIDb
 		lastMarker, lastMarkerSet := st.lastMarker, st.lastMarkerSet
+		// The client's interest follows its tank: a tank that comes into range
+		// is entered, one it drives away from leaves.
+		if st.interest != nil {
+			st.interest.move(hullNow.Position)
+		}
 		s.mu.Unlock()
+		if tick%interestPeriod == 0 {
+			if err := s.refreshInterest(conn, from, st); err != nil {
+				s.logf("arena %d: interest: %v", arenaID, err)
+			}
+		}
 		// One datagram per tick, in the captured server's exact shape:
 		// TickSync, the metre-rounded reference point, the player's own entity
 		// on it, the Vehicle by alias at its absolute position, then the NRL

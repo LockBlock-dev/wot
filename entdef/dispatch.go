@@ -98,6 +98,9 @@ type PropertyDef struct {
 	// The entity creation message carries the properties WITHOUT one; the
 	// ones with a level ride the update that follows.
 	DetailLevel string
+	// Audience is who the property reaches, from the defs' distribution
+	// flags: `ALL_CLIENTS`, `OTHER_CLIENTS` or `OWN_CLIENT`.
+	Audience Audience
 }
 
 // EntityDispatch is one entity's client-facing tables, with the exposed
@@ -205,6 +208,7 @@ func NewDispatch(l *Loader, names []string) (*Dispatch, error) {
 				Type:        p.Type,
 				Length:      elementLength(p.StreamSize(), int(p.VarLen)),
 				DetailLevel: p.DetailLevel,
+				Audience:    p.Audience(),
 			})
 		}
 		// BaseProps is the createBasePlayer payload, so it follows the
