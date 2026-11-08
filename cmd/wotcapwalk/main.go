@@ -57,7 +57,7 @@ func main() {
 	}
 	fmt.Printf("stream=%d\n", len(stream))
 	i := 0
-	for n := 0; n < 40 && i < len(stream); n++ {
+	for n := 0; n < 400 && i < len(stream); n++ {
 		e := stream[i]
 		if sz, ok := fixed[e]; ok {
 			fmt.Printf("%3d @%5d elem=%02x FIXED %d\n", n, i, e, sz)
@@ -84,8 +84,17 @@ func main() {
 			continue
 		}
 		if e >= 0xA7 && e <= 0xFE {
-			fmt.Printf("%3d @%5d elem=%02x ENTITY_PROPERTY rest=% x\n", n, i, e, stream[i:i+min(16, len(stream)-i)])
-			return
+			// EntityProperty carries no entity byte: the entity is whatever the
+			// preceding SelectEntity/SelectPlayerEntity selected (reference's
+			// EntityProperty::read_length), and its length is the property's
+			// declared one — Variable16 here.
+			if i+3 > len(stream) {
+				break
+			}
+			l := int(stream[i+1]) | int(stream[i+2])<<8
+			fmt.Printf("%3d @%5d elem=%02x PROPERTY len=%5d % x\n", n, i, e, l, stream[i+3:i+3+min(12, l)])
+			i += 3 + l
+			continue
 		}
 		fmt.Printf("%3d @%5d elem=%02x UNKNOWN rest=% x\n", n, i, e, stream[i:i+min(16, len(stream)-i)])
 		return
