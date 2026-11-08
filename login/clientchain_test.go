@@ -113,7 +113,7 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	// the hull attitude, the update frequency, WAITING, then the TeamInfo
 	// create/enter pair. BATTLE is not here: it waits for the client's
 	// `setClientReady`.
-	if len(tr3.writes) != 18 {
+	if len(tr3.writes) != 19 {
 		t.Fatalf("%d packets, want 18", len(tr3.writes))
 	}
 	avatar := parseClientPacket(t, d, tr2.writes[0], st.blockKey)
@@ -126,7 +126,7 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	// its cell properties.
 	// A vehicle is created with `createEntity` (0x0B), the aliased form: the
 	// genuine server creates it with an alias, and that is the element it uses.
-	create := withoutTick(parseClientPacket(t, d, tr2.writes[2], st.blockKey))
+	create := withoutTick(parseClientPacket(t, d, tr2.writes[3], st.blockKey))
 	if len(create) != 1 || create[0].ID != elCreateEntity {
 		t.Fatalf("vehicle create = %v, want createEntity", ids(create))
 	}
@@ -147,14 +147,14 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 		t.Fatalf("createEntityDetailed carries no compact descriptor: % x", create[0].Body)
 	}
 
-	sel := withoutTick(parseClientPacket(t, d, tr2.writes[3], st.blockKey))
+	sel := withoutTick(parseClientPacket(t, d, tr2.writes[4], st.blockKey))
 	if len(sel) != 1 || sel[0].ID != elSelectEntity || len(sel[0].Body) != 4 {
 		t.Fatalf("selectEntity = %v, want a 4-byte selectEntity", ids(sel))
 	}
 	if got := binary.LittleEndian.Uint32(sel[0].Body); got != h.VehicleID {
 		t.Fatalf("selectEntity id = %d, want %d", got, h.VehicleID)
 	}
-	update := withoutTick(parseClientPacket(t, d, tr2.writes[4], st.blockKey))
+	update := withoutTick(parseClientPacket(t, d, tr2.writes[5], st.blockKey))
 	if len(update) != 1 || update[0].ID != elUpdateEntity {
 		t.Fatalf("updateEntity = %v, want updateEntity", ids(update))
 	}
@@ -163,7 +163,7 @@ func TestArenaHandoffIsConsumedExactly(t *testing.T) {
 	if !bytes.Contains(update[0].Body, h.Player.VehicleCompDescr) {
 		t.Fatalf("updateEntity carries no compact descriptor: % x", update[0].Body)
 	}
-	enter := withoutTick(parseClientPacket(t, d, tr2.writes[5], st.blockKey))
+	enter := withoutTick(parseClientPacket(t, d, tr2.writes[6], st.blockKey))
 	if len(enter) != 1 || enter[0].ID != elEnterAoI || len(enter[0].Body) != 5 {
 		t.Fatalf("vehicle enterAoI = %v, want a 5-byte enterAoI", ids(enter))
 	}

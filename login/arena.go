@@ -596,6 +596,16 @@ func (s *BaseAppServer) enterArenaSpace(conn Transport, from *net.UDPAddr, st *c
 		s.logf("stage2 %s: arena %d: probe 2, stopping after the geometry", from, h.ArenaID)
 		return seq, nil
 	}
+	// The capture's entry carries avatar updates (0x32/0x34/0x3c) for the
+	// player's entity before the entities are created: they anchor the
+	// player's position so the first entity update is not the only thing that
+	// has ever moved it.
+	if upd := EncodeAvatarUpdatePlayerDetailed(0, spawn, [3]float32{0, 0, 0}); len(upd) > 0 {
+		if err := s.sendReliableEntity(conn, from, st, upd, seq, cumul); err != nil {
+			return seq, err
+		}
+		seq++
+	}
 	// The exact bytes, so a client that drops the element can be diffed
 	// against the genuine one without another guess.
 	s.logf("stage2 %s: CreateCellPlayer %dB (entity %d, space %d): % x",

@@ -195,21 +195,21 @@ func TestEnterArenaSequence(t *testing.T) {
 	// the hull attitude, the update frequency, WAITING, then the TeamInfo
 	// create/enter pair. BATTLE is NOT here: it waits for the client's
 	// `setClientReady`.
-	if seq != 30 {
-		t.Fatalf("seq = %d, want 30 (nineteen more frames)", seq)
+	if seq != 31 {
+		t.Fatalf("seq = %d, want 31 (twenty more frames)", seq)
 	}
-	if len(tr3.writes) != 18 {
-		t.Fatalf("%d writes, want 18 (space, cell, controlEntity, Vehicle x4, AvatarInfo x3, OwnVehicle, vehicleHealthInfo, select, auxPhysics, frequency, WAITING, TeamInfo x2)", len(tr3.writes))
+	if len(tr3.writes) != 19 {
+		t.Fatalf("%d writes, want 19 (space, cell, avatar update, controlEntity, Vehicle x4, AvatarInfo x3, OwnVehicle, vehicleHealthInfo, select, auxPhysics, frequency, WAITING, TeamInfo x2)", len(tr3.writes))
 	}
 	// The period call is an Avatar method, so the Avatar must be the selected
 	// entity when it goes out: an entity method applies to whatever
 	// selectEntity last selected, and the last one was a Vehicle.
-	// The controlEntity that hands the client its own tank sits between the
-	// Vehicle's enterAoI and the AvatarInfo, so the Avatar's selection is the
-	// thirteenth write, not the twelfth.
-	selAvatar := findAppInPacket(t, tr3.writes[12], st.blockKey)
+	// The avatar update and the controlEntity that hands the client its own
+	// tank sit between the Vehicle's enterAoI and the AvatarInfo, so the
+	// Avatar's selection is the fourteenth write.
+	selAvatar := findAppInPacket(t, tr3.writes[13], st.blockKey)
 	if !bytes.Contains(selAvatar, []byte{elSelectEntity}) {
-		t.Fatalf("thirteenth write is not selectEntity: % x", selAvatar[:8])
+		t.Fatalf("fourteenth write is not selectEntity: % x", selAvatar[:8])
 	}
 	if got := binary.LittleEndian.Uint32(selAvatar[1:5]); got != st.entityID {
 		t.Fatalf("selectEntity id = %d, want the Avatar %d", got, st.entityID)
@@ -219,24 +219,24 @@ func TestEnterArenaSequence(t *testing.T) {
 		t.Fatalf("the Avatar frame is not CreateBasePlayer: % x", avatar[:8])
 	}
 	tr2 = tr3
-	create := findAppInPacket(t, tr2.writes[2], st.blockKey)
+	create := findAppInPacket(t, tr2.writes[3], st.blockKey)
 	if !bytes.Contains(create, []byte{elCreateEntity}) {
-		t.Fatalf("third write is not createEntity: % x", create[:8])
+		t.Fatalf("fourth write is not createEntity: % x", create[:8])
 	}
 	// The cell properties go out BEFORE the entity enters the world:
 	// `Vehicle.onEnterWorld` builds its descriptor from `publicInfo` and
 	// nothing rebuilds it afterwards.
-	sel := findAppInPacket(t, tr2.writes[3], st.blockKey)
+	sel := findAppInPacket(t, tr2.writes[4], st.blockKey)
 	if !bytes.Contains(sel, []byte{elSelectEntity}) {
-		t.Fatalf("fourth write is not selectEntity: % x", sel[:8])
+		t.Fatalf("fifth write is not selectEntity: % x", sel[:8])
 	}
-	update := findAppInPacket(t, tr2.writes[4], st.blockKey)
+	update := findAppInPacket(t, tr2.writes[5], st.blockKey)
 	if !bytes.Contains(update, []byte{elUpdateEntity}) {
-		t.Fatalf("fifth write is not updateEntity: % x", update[:8])
+		t.Fatalf("sixth write is not updateEntity: % x", update[:8])
 	}
-	enter := findAppInPacket(t, tr2.writes[5], st.blockKey)
+	enter := findAppInPacket(t, tr2.writes[6], st.blockKey)
 	if !bytes.Contains(enter, []byte{elEnterAoI}) {
-		t.Fatalf("sixth write is not enterAoI: % x", enter[:8])
+		t.Fatalf("seventh write is not enterAoI: % x", enter[:8])
 	}
 	cell := findAppInPacket(t, tr2.writes[0], st.blockKey)
 	if !bytes.Contains(cell, []byte{elCreateCellPlayer}) {
