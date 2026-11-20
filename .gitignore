@@ -1,71 +1,127 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+# .gitignore — github.com/LockBlock-dev/wot
 #
-# Binaries for programs and plugins
+# This repo is public. Nothing machine-local, generated, captured, or
+# secret may be committed. Before a release, sanity-check with:
+#   git status --ignored
+#   git check-ignore -v <path>     # which rule ignores a path
+#
+# Rules are repo-relative unless noted; leading "/" anchors to the root.
+
+# --- Secrets: env files and live key material --------------------------
+# Any .env anywhere. The documented template stays tracked.
+.env
+.env.*
+*.env
+!.env.example
+
+# Private keys and key dumps (the repo itself ships no key material).
+*.privkey
+*.pem
+*.key
+wotkeys.txt
+wotkeys_*.txt
+stage2.key
+*.clear
+flood.hex
+
+# --- Runtime state and databases ---------------------------------------
+# `go run ./cmd/wotserver` / start-server.sh create this at the repo
+# root; it holds accounts, sessions, and player state.
+*.db
+*.db-*
+*.sqlite*
+*.db3
+
+# --- Captured traffic / replay artifacts -------------------------------
+# Live session keys, ciphertext, and personal rosters: never commit.
+*.pcap
+*.pcapng
+*.hex
+*.wotreplay
+*.stream.bin
+*.dmp
+*.PML
+walkdump.txt
+
+# --- Scratch / local findings ------------------------------------------
+# Repo convention: zz* is a throwaway probe, dump, or one-off test.
+zz-*
+zz_*
+/zz*
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# --- Built CLIs ---------------------------------------------------------
+# `go build ./cmd/<name>` writes the binary into the repo root.
+# Root-anchored so the cmd/<name>/ source directories never match.
+/wotaccounts
+/wotbattlefeed
+/wotbundle
+/wotcapwalk
+/wotdefs
+/wotdigest
+/wotdpapi
+/wotevents
+/wotflood
+/wotgarage
+/wotgendata
+/wotkeydump
+/wotlogin
+/wotping
+/wotproxy
+/wotreplay
+/wotserver
+/wotunpack
+/wotverify
+/wotwalkdump
+/wotwgcs
+/wotxmpp
+
+# --- Go build / test output --------------------------------------------
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
-# Test binary, built with `go test -c`
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
 coverage.*
 *.coverprofile
 profile.cov
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
+*.prof
+*.pprof
 go.work
 go.work.sum
+# vendor/ is intentionally not ignored: commit it only if vendoring.
 
-# env file
-.env
-live.env
-game.env
+# --- Python tooling (tools/*.py) ---------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
 
-# Editor/IDE
-# .idea/
-# .vscode/
-
-# Built CLI binaries (go build ./cmd/<name>); root-anchored so they
-# never match the cmd/<name>/ source directories.
-/wotlogin
-/wotping
-/wotproxy
-/wotunpack
-/wotreplay
-/wotverify
-/wotevents
-/wotflood
-/wotkeydump
-/wotwgcs
-/wotdpapi
-/wotxmpp
-/wotserver
-/wotgarage
-
-# Scratch / local artifacts (never commit)
-zz-*
-zz_*
-*.clear
-flood.hex
-stage2.key
-
-# Live keyfile tailed by wotproxy -keyfile / written by wotkeydump (cwd)
-wotkeys.txt
-
-# Local run logs
-*.log
-
-# Game entity-def trees live outside this repo, uncommitted
-# (sibling dirs wotdefs-2.4.0/, wotdefs-2.4.1/, scripts-2.4.1/);
+# --- External game-data trees (large, not redistributable) -------------
+# Entity defs / item defs live outside this repo as uncommitted siblings;
 # never vendor them under testdata/ again.
-/testdata/
-
+testdata/
 reference/
+
+# --- Logs and local caches ---------------------------------------------
+*.log
+.cache/
+
+# --- Editor / OS --------------------------------------------------------
+.DS_Store
+Thumbs.db
+.directory
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -18,8 +18,8 @@ func TestDecryptProhorovka(t *testing.T) {
 	if got := r.MetaField("mapDisplayName"); got != "Prokhorovka" {
 		t.Fatalf("map = %q", got)
 	}
-	if got := r.MetaField("playerName"); got != "ExampleUser" {
-		t.Fatalf("player = %q", got)
+	if got := r.MetaField("playerName"); got == "" {
+		t.Fatal("player name missing from replay metadata")
 	}
 	if len(r.Stream) != 5319705 {
 		t.Fatalf("stream = %d bytes, want 5319705", len(r.Stream))

@@ -72,7 +72,7 @@ func TestShotFeedProhorovka(t *testing.T) {
 	for _, s := range feed {
 		if s.Entity == 4730080 {
 			own++
-			if s.Name != "ExampleUser" || s.Tank != "Challenger" {
+			if s.Name == "" || s.Tank != "Challenger" {
 				t.Fatalf("own row=%+v", s)
 			}
 		}

@@ -7,9 +7,15 @@ dumper (`keydump`), transparent forwarder (`tproxy`), private server
 half — LoginApp + BaseApp stage-1/2 (`login/loginapp.go`,
 `login/baseappsrv.go`, `cmd/wotserver`). All CLIs
 live under `cmd/`. Run from here: `go run ./cmd/wotlogin -env
-live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
-(login + server-side stage shapes §18) and `../docs/REPLAY.md`
+live.env -baseapp`. Protocol truth lives in `docs/NETWORK_PROTOCOL.md`
+(login + server-side stage shapes §18) and `docs/REPLAY.md`
 (replays); update them on wire changes.
+
+Public note: paths such as `../captures/`, `../ce/`, `../wotdefs-2.4.1/`,
+`../scripts-2.4.1/`, `../World_of_Tanks_EU/`, and `../mitm/` point at the
+private analysis workspace that produced this code; they are not part of
+this repository; bare `captures/`, `ce/`, and `mods/` references mean the
+same trees. They are cited as evidence sources, not as shipped files.
 
 ## Layout
 
@@ -46,7 +52,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   slot). Wired into
   `cmd/wotserver` via `login.ServerConfig.VerifyCredentials`; a refusal
   rides status 68 with the live short wording. Scope and open problems:
-  `../docs/PRIVATE_SERVER.md`.
+  `docs/PRIVATE_SERVER.md`.
 - `login/` — framing builders/parsers + `Client.Login()` flow (pure where  possible; `SolveFunc` injected for tests; `Transport` interface over
   UDP so the handshake is script-testable offline): `client.go`
   (`Client`: config/auth-provider/solver/socket/peer/reply-ID sequence),
@@ -107,14 +113,14 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   position parser), `battlechat.go` (battle chat both directions:
   C>S submit `0x9d`/eventType 22, S>C relay `0x75`/23, shared 24B
   header + `[u8 len][text][u16 0]`, float64 UTC send time — see
-  `../docs/NETWORK_PROTOCOL.md` §19.10). Split out of `login/` Oct
+  `docs/NETWORK_PROTOCOL.md` §19.10). Split out of `login/` Oct
   2026; all callers
   import `lobby` directly (compat aliases removed).
   Tests: `login_test.go` (offline codec vectors), `hijack_test.go`,
   `paired_replay_test.go` (byte-identical replay of the paired genuine
   stage-1/stage-2 capture, `../captures/flows3` + `../captures/key3.txt`;
   fixtures rebuilt from those two files by
-  `../captures/extract_flows3.py` — vectors to `/tmp/opencode/vectors`,
+  `../captures/extract_flows3.py` — vectors to `/tmp/vectors`,
   stage-2 flow to `../captures/flows3-s2.txt`; re-run after any /tmp
   wipe),
   `scratch_flood_test.go`. Offline only.
@@ -164,8 +170,8 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `dispatch.go`, `entities.go`, `values.go`, `methods.go` +
   `methods_gen.go` (GENERATED from 2.4.0.0 entity_defs via `entdef`
   DescribeDeep + iface-first stable size-sort; var lists doc order —
-  see `../docs/REPLAY.md` §6 before regenerating; Bundle codec mapped Oct-11
-  (see `../docs/NETWORK_PROTOCOL.md` §4: length formats, startMessage/
+  see `docs/REPLAY.md` §6 before regenerating; Bundle codec mapped Oct-11
+  (see `docs/NETWORK_PROTOCOL.md` §4: length formats, startMessage/
   startRequest(extra=6)/startReply/doFinalise — the Go builders mirror
   this exactly), `properties.go` +
   `properties_gen.go` (generated FullIndex table via entdef
@@ -247,7 +253,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   pseudoAccountID = FNV-1a
   (name) floor-biased to 9 digits, servermsg JSON field order
   isDemoAccount,name,security_msg,session_id,token2 compact unescaped
-  (199 B with the ExampleUser census cite captures/game_20260920.log:413
+  (199 B with the example name from the census at captures/game_20260920.log:413
   — values SYNTHESIZED, shape faithful); no account DB: any identity.
   The "remember me" token2 is stored per account
   (`server.SetRememberToken`) and resolved by `TokenLogin(name, token2)`;
@@ -345,7 +351,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   serves them per session —
   info (36B wire, app verbatim + footers seq1/cumul0, byte-exact),
   descriptor (76B, `descriptorFrame` substitutes the session name into
-  the packed `[nlen 0b][ExampleUser]` slot at clear[25], 255-truncated
+  the packed `[nlen 0b][<name>]` slot at clear[25], 255-truncated
   like the 1B field; companion footers seq2/cumul1 ride verbatim),
   and the 1a/76 session-dict small (`1a 76 9c 00` + 156B = status 9b +
   155B proto-2 pickle; sent at serveBulk START as `[13][40]` + tpl +
@@ -446,7 +452,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   `api_windows.go` LazyDLL, `api_other.go` stub, `token.go`
   shape-scan + keyfile store). Stdlib only (`syscall`), tests
   offline; `GOOS=windows go vet` clean. IDA-recovered layouts
-  (wgcs_api.dll, see `../docs/WGC.md`): pipe exactly
+  (wgcs_api.dll, see `docs/WGC.md`): pipe exactly
   `\\.\pipe\WGCS_IPC`; `GetLoginInfo` OUT = +0 WCHAR[64], +128
   WCHAR[256], +640 WCHAR[64], +768 UINT64 spaId, +776 DWORD
   (sub_180050190; all strings inline WCHAR, no pointer chasing);
@@ -455,7 +461,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   WCHAR[1024] token; LoginSession vtable @0x18015A588
   (slot0/4/5/8 = logininfo/store/get/generate workers).
   `wgc.exe` is a thin shell; the core is unpacked
-  `dlls/game_center.dll` (see `../docs/WGC.md` §7: AES-ECB seal for SSO
+  `dlls/game_center.dll` (see `docs/WGC.md` §7: AES-ECB seal for SSO
   material, Wine-DPAPI-hex seal for the user_info store).
 - `cmd/wotdpapi/main.go` — Wine-DPAPI unwrap CLI (GOOS=windows,
   proton-run, prefix-local only): hex blob in, 0600 plaintext out,
@@ -497,7 +503,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
 - `cmd/wotreplay/main.go` — thin CLI (`file.wotreplay`, `-meta`,
   `-dump PREFIX` for `.stream.bin`).
 - `cmd/wotverify/main.go` — genuineness CLI (structural only, see
-  `../docs/REPLAY.md` §verify); exit 0/1.
+  `docs/REPLAY.md` §verify); exit 0/1.
 - `cmd/wotevents/main.go` — thin CLI (`file.wotreplay`, `-pretty`):
   prints the battle timeline JSON.
 - `cmd/wotgendata/main.go` — codegen CLI (`-item-defs DIR -out
@@ -552,7 +558,7 @@ live.env -baseapp`. Protocol truth lives in `../docs/NETWORK_PROTOCOL.md`
   the /tmp reference driver
   are live-honest only (running past-evidence calibration, no
   future-evidence backfill). The streaming path replays count-identical
-  (132/31/24/98/4/11, 5458/19) via `/tmp/opencode/liveverify.go`.
+  (132/31/24/98/4/11, 5458/19) via `/tmp/liveverify.go`.
 
 ## Standards (enforced, not optional)
 
@@ -653,7 +659,7 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
   (dossier accumulates history incl. sold tanks; 32 special/removed
   ids fail loud against 2.4.0.2 defs). LIVE garage via `garage-mod`
   (in-hangar items cache, Oct-03): 113 currently-owned tanks with
-  live invIDs (`/tmp/opencode/garage.txt`: nation/name + #invID
+  live invIDs (`/tmp/garage.txt`: nation/name + #invID
   each). NOTE: dossier keys are vehTYPE IntCDs, live invIDs are instance IDs — the 225 Int2 call
   takes the latter, so 324 needs the mod's invIDs, not dossier
   keys. 4/117 live descrs reference vehicles absent from shipped
@@ -704,11 +710,11 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     Gap inventory (`flows4`, Sep 18 game): in [232B, +3 ms] the game
     sends NOTHING but the stage-1 22B (no precursor/ack/side-channel).
     Key-equality verified on the paired capture (`flows3`+`key3.txt`):
-    genuine 22B carries `0x69668ba0` = its 232B sessionKey — the game
+    genuine 22B carries its 232B sessionKey — the game
     sends exactly what its 232B says, like we do. Net: our observable
     behavior is fully equivalent; the record for our key is absent
     (push never happens for our sessions) or instantly unusable.
-    IDA hunt Sep 20 (session `befbfbd0`, still open): login path fully
+    IDA hunt Sep 20 (one live session, still open): login path fully
     verified — caller passes flags=1 explicitly (`mov r8b,1` @
     `0x140E6C6E4`, stored-flags=1 unused), version `{5,0,1,17}`,
     layout flags+4 strings+digest+nonce, challenge-response
@@ -735,14 +741,14 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     (stack micro-headers tested TTL/DF; IPID sequencing untestable
     without caps) and LoginApp-push internals (unobservable).
     Token chapter CLOSED Sep 20 (live launcher login captured+decrypted:
-    `.215:32845`, token2 middle `5220…` (WGC family) vs basic `4957…`;
+    `.215:32845`, token2 middle (WGC family) vs basic (different middle);
     the live WGC tail re-presented 10 min later → `Invalid token2` on
     BOTH .215 and .212: tails are single-use/short-lived, and validity
     is irrelevant to the push — our fresh-valid-token session was
     silent too).
     Oct-01 `-relogin -baseapp` live (p2, our client): basic (534/728,
     PoW 42 nonces, ~85 ms) → LOGGED_ON `.215:32821` → reply token2
-    middle `123456789:495…` (basic family, family-match=false) →
+    middle (basic family, family-match=false) →
     from-zero token2 login (325B params, empty password) → RELOGGED
     same manager, new key — BOTH legs first-class. Stage-1 on the
     token2 session: rotation-ok, 250+ ticks, cumul=0, no redirect →
@@ -774,7 +780,7 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     loginData via `mods/wgc-token-mod` → `wotlogin -broker-params
     -baseapp` → `LOGGED_ON` (fresh tail accepted) → stage-1 parked
     byte-identically to basic. Auth path is not the gate (see
-    `../docs/WGC.md` §8); the park was client-side (CLOSED Oct-03).
+    `docs/WGC.md` §8); the park was client-side (CLOSED Oct-03).
     Remember-me mechanism MAPPED Sep 20 (2.4.0.1 Manager.pyc):
     tail persisted to prefs['token2'] IFF remember-me checked
     (password never stored, only its length); next login presents the
@@ -788,15 +794,15 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
     RELOGGED accepted, stage-1 silent — form doesn't matter either.
     Sep-20 CLIENT CORRECTNESS PROOF (p5, live): basic → rotation → infos → redirect → stage-2 double-auth → decrypt-verified 1252B lobby flood, all from our builders (turn-taking proves each step accepted). Same binary stays silent on EU2: the wall is purely server-side record-absence, not our script. p5-limbo earlier was transient server flake (hits the game too).
     Sep-20 MECHANISM PROOF (intervention, not correlation): forcing our
-    wire session to today's value (`3ce6…`) flipped our token2 middle
-    `495…`→`694…` (the game's current family) — LoginApp binds
+    wire session to the day's value flipped our token2 middle into the
+    game's family — LoginApp binds
     session→token2-middle deterministically and fully recognized our
     session, yet stage-1 stayed silent. Recognition ≠ push; the gate
     is downstream of session recognition. TCP connects on a manager
     ephemeral port (host alive; with UDP delivery proven, the silence
     is app-level).
    LoginApp path proven first-class Sep 19: `wotlogin` LOGGED_ON
-   registers account-side (website-visible; probe 12:21:32 listed).
+   is accepted account-side.
    Back-to-back byte proof
    (`captures/ours-p2-20260919.pcapng`): our stage-1 22B
    field-identical to the game's — the silence was never bytes. The
@@ -814,7 +820,7 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
    (`../captures/dump_game_20260920.txt` + `../ce/wotkeys_20260920.txt`
    → `../captures/hijack_live_20260920.log`): offline re-derivation
    from the same dump gives baseapp `92.223.20.212:32847` + sessionKey
-   match (CE key `7A546C3F7EDE2232F1EC7720F63845AB`) + stageRID 33713 = login#2+1 (VALID), and stage-1 stayed
+   match (CE-derived key, value withheld) + stageRID 33713 = login#2+1 (VALID), and stage-1 stayed
    silent all 25 attempts anyway.    PORT-STEAL redo same day (game
    KILLED, `-hijack-port` auto-steal `:50935`, stageRID 76138):
    113× silent over 90 s (`../captures/hijack_portsteal_20260920.log`)
@@ -1027,9 +1033,9 @@ ping-first sweep (5×16 B LOW to `.215`) changes nothing.
 
 ## Battle — the gun and dynamic components (proven live, do not re-derive)
 
-Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
+Detail in `docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
 "A throw in `Avatar.setClientReady`"); the id table is
-`../docs/ENTITY_TYPE_IDS.md`.
+`docs/ENTITY_TYPE_IDS.md`.
 
 - **The gun is driven by the `OwnVehicle` component, not by the
   `Avatar.updateTargetingInfo` element.** `VehicleGunRotator` needs
@@ -1502,7 +1508,7 @@ Detail in `../docs/PRIVATE_SERVER.md` ("The gun", "Dynamic components",
   official too). `UPDATE_FREQUENCY_NOTIFICATION` only sets a stall timeout, not
   a simulation step. The hangar's post-flood tick stream must keep running
   alongside the arena tick — stopping it makes the client drop position updates
-  entirely. Full evidence: `../docs/PRIVATE_SERVER.md` "Why the client's filter
+  entirely. Full evidence: `docs/PRIVATE_SERVER.md` "Why the client's filter
   does not simulate".
 - **The aim point is a WORLD-axis offset, not a hull-frame one.**
   `VehicleGunRotator.__trackPointOnServer` sends `shotPoint - stabilisedVehPos`,
@@ -1595,7 +1601,7 @@ speak back. Established Sep 20:
 
 - Capture harness: opt-in recorder in `login/baseapp.go`
   stageTwo (`WOT_FLOOD_DUMP=1`) dumps S>C to
-  `/tmp/opencode/flood.hex` (`<ts> <dir> <len> <hex>`); per-run block
+  `/tmp/flood.hex` (`<ts> <dir> <len> <hex>`); per-run block
   key alongside (`stage2.key`, RAW bytes, ephemeral session — dead in
   minutes). Plus: C>S logging when recording, 60 s window, 5 s
   `clientToServerHeartbeat` (`[0e]`, wire ID 14 = table index-1,
@@ -1746,7 +1752,7 @@ speak back. Established Sep 20:
   payloads are engine-builtin volatile data (position/yaw/pitch/roll),
   layout in the exe only → IDA task.
   11B FIELD MAP CLOSED Oct-02 (IDA + wire-fit, see
-  `../docs/NETWORK_PROTOCOL.md` §14): `[ID u8][posType0 6B][dirType0 4B]`;
+  `docs/NETWORK_PROTOCOL.md` §14): `[ID u8][posType0 6B][dirType0 4B]`;
   unpacker `0x140E37200` (+mirror `0x140E55350`), BitReader
   MSB-first, custom 1+4+N floats (bias −2.0, per-entity scale),
   direction (roll10, pitch11-half, yaw11) with absolute 2π scales;
@@ -1945,19 +1951,19 @@ speak back. Established Sep 20:
   uniform-random freshness).
   Caliber finding Oct-12 late: tracer Range = shell caliber in mm
   (proven on own-vehicle ground truth: Prohorovka Challenger 17-pdr
-  76.2 mm → Range 76.2 on all 11 own tracers; WolfPlayer T110E5 120 mm
+  76.2 mm → Range 76.2 on all 11 own tracers; another player's T110E5 120 mm
   → Range 120 on all 42; battle-wide set 57/75/76/85/88/90/105/122/
   128/150/152/155, fixed per shooter like a0); template validated
   clean (0/533 lobby bodies). CORRECTION (same day): the recorder
-  (ExampleUser, SU-152) IS entity 542282516 and fired 9× 152 mm in
+  (example player, SU-152) IS entity 542282516 and fired 9× 152 mm in
   this battle — the old "fired zero" corollary rested on tracer↔own
   distances computed against the C>S position track, which is
   displaced/glitchy here (teleports + smooth-but-offset segments, see
   below), plus a hex arithmetic slip (0x20529314 = 542282516, the
   user's entity — not 542278420). Identity is triple-proven
   server-side: battle-start arena-params head pairs
-  (ExampleUser, 542282516) — same shape as the user's Prohorovka
-  replay (ExampleUser, 4730080 = own a0); C>S moveWith entity =
+  (example player, 542282516) — same shape as the user's Prohorovka
+  replay (example player, 4730080 = own a0); C>S moveWith entity =
   542282516; 9 S>C tracers with a0 = 542282516, all Range 152.
   Framing CLOSED Oct-12 late (IDA static tables + byte-exact fits),
   CORRECTED Oct-14 (records always bare; `0x93` was the flow key's low
@@ -2384,7 +2390,7 @@ speak back. Established Sep 20:
    arty via `PySalvo`, hide/explode/hold lifecycle.
 3. Telemetry census (`aogas…`, `collectUiStats` senders): what the
    game phones home (`.pyc` + captures) — DONE Oct-02 (see
-   `../docs/NETWORK_PROTOCOL.md` §15): in-band UX events (7 subsystems ×
+   `docs/NETWORK_PROTOCOL.md` §15): in-band UX events (7 subsystems ×
    ~35 types incl. keyDown/Up, 70/batch, ≤70/session, engine
    `logUXEvents`, server-gated); aogas = playtime-control;
    HTTP bootstrap mapped (CSIS, WebCache, Vivox, dcont, RSS).
@@ -2417,21 +2423,21 @@ speak back. Established Sep 20:
    battle-mode descr, or arithmetic coincidence; needs a second blob
    to decide.
 5. Token anatomy (`token`/`token2`/`session` structures) — DONE
-   Oct-02 (offline, shapes only, see `../docs/WGC.md` §6): token2 =
+   Oct-02 (offline, shapes only, see `docs/WGC.md` §6): token2 =
    `{9-digit accountID}:{18–19-digit middle}:{39-digit tail}` all
    numeric (9 samples, 4 families); middle uniform-random-looking,
    NOT a standard session-md5 transform (needs `-middle-out`
    blob pairs live); `token` = 8 digits; 12-key login census pinned.
 6. Battle-results answers (852B `CMD_REQ_BATTLE_RESULTS` replies):
    straight pickle decode from captures on hand — DONE Oct-02 (see
-   `../docs/NETWORK_PROTOCOL.md` §17): full cache mechanism from shipped
+   `docs/NETWORK_PROTOCOL.md` §17): full cache mechanism from shipped
    `.pyc`, 0x45 `[len][req BE][res=RES_SUCCESS][extlen][ext pickle
    tuple]` on 4 live answers (varying byte proven to be ext length,
    not status), stream inside the 852's own train (63-list +
    arenaUID pickle + roster), 1500/1501 linkage + direct-base A1
    flavor; Meta checksum CLOSED Oct-11 (263845007 = REGULAR SELF,
    BP-integrated, reproduced by real py2.7 config execution) with
-   the full 62-name map in `../docs/NETWORK_PROTOCOL.md` §17;
+   the full 62-name map in `docs/NETWORK_PROTOCOL.md` §17;
    consumer synthesis CLOSED Oct-14 (2.4.1.0 live run, 156 logger
    lines in game.log — hooks armed for onCmdResponse/onCmdResponseExt/
    _subscribeForStream; BattleResultsCache/SyncController hook paths
@@ -2447,7 +2453,7 @@ speak back. Established Sep 20:
    open: tuple second-elem semantics, stream-chunk framing past the
    852, res=0-wire vs res=1-consumer mapping in the C++ dispatcher.
 7. XMPP/bosh chat beyond the tails (gated on HTTP flows, maybe in
-   `eu2-mitmproxy-flows`) — DONE Oct-02 (see `../docs/NETWORK_PROTOCOL.md`
+   `eu2-mitmproxy-flows`) — DONE Oct-02 (see `docs/NETWORK_PROTOCOL.md`
    §16): TCP-first/BOSH-fallback, JID = DBID@domain/resource,
    XMPPCS token login, disconnects reported to server; 124B list
    proven bosh-only on lobby-#2 wire (per-flow key recovery);

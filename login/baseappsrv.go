@@ -1155,7 +1155,7 @@ func (s *BaseAppServer) sweepStage1(conn Transport, now time.Time) {
 //
 // Captured verbatim from the paired EU2 login (flows3 flow 14, seq 1,
 // which decrypts to 58 04 | 02 0a 01 00 3e 8b 23 00 13 3e 05 12 00
-// f1 f7 2b 00 0b 00 00 09 "123456789" 00 | 01 00 00 00 | 01 00 00 00).
+// f1 f7 2b 00 0b 00 00 09 "<acct-id>" 00 | 01 00 00 00 | 01 00 00 00).
 // There f1 f7 2b 00 is that session's entity id and the 9 ASCII digits
 // are its account id; both are substituted here. The account id is
 // always 9 digits (accountIDFor), so the length byte and the frame size

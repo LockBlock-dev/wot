@@ -39,8 +39,8 @@ const (
 	// frame, seq 3) — the two frames the client needs between the
 	// rotation and the redirect. The info carries the account id as an
 	// ASCII string; the space names the space to enter.
-	// The entity id (capture: f1 f7 2b 00) and the account id (capture:
-	// "123456789") are substituted per session, so the template is
+	// The entity id (capture: f1 f7 2b 00) and the account id (9 ASCII digits,
+	// redacted) are substituted per session, so the template is
 	// prefix + entityID(4) + mid + 9 digits + suffix.
 	genuineStage1InfoPrefix = "5804020a01003e8b2300133e051200"
 	genuineStage1InfoMid    = "0b000009"

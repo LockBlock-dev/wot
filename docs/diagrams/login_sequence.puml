@@ -1,0 +1,57 @@
+@startuml WoT EU Login Sequence
+' Source: ../NETWORK_PROTOCOL.md + ../AGENTS.md lobby notes.
+' Pcap: wot_EU1_connection.pcapng (Oct 2022); live vectors: captures/flows3 + key3.txt.
+' Wire framing per datagram: [4B prefix][flags 2B LE][Mercury bundle][footers]
+' LoginInterface IDs: login=0, probe=1, ping=2, challengeResponse=3, mtuProbe=4
+
+title WoT EU — LoginApp + BaseApp handshake (UDP)
+hide footbox
+
+actor WGC as "WGC launcher\n(wgc_api.dll)"
+participant Client as "WoT client"
+participant LoginApp as "LoginApp\n(port 20016)"
+participant BaseApp as "BaseApp\n(ephemeral port)"
+
+autonumber
+
+WGC -> Client : token JSON\n(auth_method, session md5,\ntoken/token2, realm EU)
+note right : connection_mgr.py:\nusername=json(params),\npassword=pwd_token or ''\nkeyPath=loginapp_wot.pubkey
+
+Client -> LoginApp : login #1 (534 B UDP)\nID=0 len=517, ReplyID=92120\nver=17.1.0.3 + RSA-OAEP blob\n(LogOnParams: user/pass/enckey/\nclientContext?/digest?/nonce)
+note left : flags=01 00 (HAS_REQUESTS)\nfooters: 8 B, reqOff=02 00
+
+LoginApp --> Client : challenge (55 B UDP)\nreply len=44, ReplyID=92120\nstatus=0x42 CHALLENGE_ISSUED\ntype="cuckoo_cycle"\nkey="fca223380bde7178:"\nmaxNonce=576716 (~55% easiness)
+note right : CuckooCycleLoginChallenge:\nstream << prefix_ << maxNonce_\n(SIZESHIFT=20, PROOFSIZE=42)
+
+Client -> Client : solve PoW (~40-210 ms live)\nkey="fca223380bde7178:0"\n42 ascending nonces < easiness\n(SipHash-2-4 Cuckoo cycle)
+
+Client -> LoginApp : login #2 (728 B UDP, 2 msgs)\n[ID=3 len=191] challengeResponse:\n  duration float + key + 42 nonces\n[ID=0 len=517] login retry:\n  ReplyID=92121, fresh RSA blob
+note left : flags=01 00\nfooters: 8 B, reqOff=c4 00 (=196,\n2nd message offset)
+
+LoginApp --> Client : success (232 B UDP, 2.4.0)\nreply len=221, ReplyID=92121\nstatus=01 LOGGED_ON +\nBlowfish blob (216 B):\n  serverAddr + sessionKey\n  + optional serverMessage
+note right : decryptSession (ECB + plaintext\nchain, NO magic check)\nkey = LogOnParams.encryptionKey\nLoginReplyRecord: ip u32 +\nport u16 BE + salt u16 +\nkey u32 LE + serverMessage
+
+Client -> BaseApp : baseAppLogin (22 B UDP, PLAINTEXT)\nID=0, ReplyID=92122, FIXED-7 args:\n  sessionKey + numAttempts=01\n  + mtu U16 = 1300 (14 05, IDA sub_140E6B740)
+note left : only non-encrypted BaseApp pkt\nnext: pChannel->setEncryption()\nfooters: reqOff=02 00\nstage-1 socket varies by run:\nlogin socket (flows3) or fresh\n(login3: 62485 login -> 62486\nstage-1 -> 62488 stage-2)
+
+BaseApp --> Client : rotation (36 B UDP)\n[FF][len=8][rid][newkey u32]\nkey ROTATES (fail zero/unchanged)
+note right : from here (len-4)%8==0\nBlowfish channel (login key):\n[flags][msgs][seq][cumul]\ncumul = acked peer rel-seq + 1
+
+Client -> BaseApp : ack0 + auth1 (28 B each)\nack0 bare aux, no app (~+2 ms)\nauth1 RELIABLE [02][newkey]\n+ 0x0b enableEntities\n(flags 5804, rel seq 0, ~+10 ms)
+note left : decrypt-proven genuine script\n(flows3 + key3.txt, Oct-01 rerun)
+
+BaseApp --> Client : 52B account-info\n(3rd key) + ticks [13 xx]\n+ 44B "default" +\n36B redirect [13][XX][44]\n[ip BE][port BE][trailer]
+note right : stage-1 on login socket\nor fresh socket (both answered)
+
+Client -> BaseApp : stage-2 22B (fresh socket,\nfresh rid, rotation key)\n-> rotation-2 -> 36B info\n-> double-auth ([02][key2]\n+ [02][key2][0b]) -> 76B
+note left : every post-login C>S bundle\nprimes [02][newkey] (primeBundle)
+
+Client -> BaseApp : opener (reliable, primeBundled)\n148B sync1 (Int3 221/222/223\n+ (98,25) tail) + 36B token(1,1)\n+ 84B sync2a + 68B poll/token\n+ 84B sync2b + 60B polls q5s\n(60B = Int3(202,501) requestServerStats;\nreq IDs allocator-derived from 221)
+
+BaseApp --> Client : infos + entities + flood\n860+1244B burst after sync1;\npaired smalls + ~30x116B entity burst\nafter token (count varies per session);\n~500x1252B bulk (~625KB single\nshared-memo pickle, NN chunks);\n36B answer per poll in ~100 ms
+note right : status Oct-03: lobby reached live\nfrom our client (rotation -> redirect\n-> rotation-2 -> double-auth -> flood).\nBulk carries per-capture few-byte noise;\nresync-tolerant parse (cmd/wotflood).
+
+...28 B ACK ping-pong + q5s polls...
+
+footer Prot 17.1.0.3 (pcap 2022) / 17.1.0.5 (client 2.4.0, IDA sub_140E6C650)\nMercury flags LE; request footers end with firstRequestOffset
+@enduml

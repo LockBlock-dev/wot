@@ -1,0 +1,59 @@
+REPLAY-RENDER runtime confirmation (2.4.0.0, Windows box)
+
+Run this from a cmd/PowerShell on the Windows machine that owns the
+2.4.0.0 install. Use your real paths (the ones below are from game.log).
+
+-------------------------------------------------------------------------
+PRIMARY COMMAND (expect: ~30 PNGs for a 30s window, no vsync throttling)
+-------------------------------------------------------------------------
+
+  cd /D C:\Games\World_of_Tanks_EU
+  win64\WorldOfTanks.exe ^
+    "C:\Games\World_of_Tanks_EU\replays\20260906_1608_germany-G112_KanonenJagdPanzer_105_101_dday.wotreplay" ^
+    --forceAlwaysActive ^
+    --noMaxFrameRate ^
+    --autoScreenshotTime 1 ^
+    --replayScreenshotDirectory "C:\Games\World_of_Tanks_EU\replay_screenshots"
+
+(PowerShell: replace the trailing ^ with ` and remove the line breaks;
+the single-line form also works.)
+
+-------------------------------------------------------------------------
+WHAT TO VERIFY
+-------------------------------------------------------------------------
+1. Screenshots appear in replay_screenshots\ with ~1 file per simulated
+   second (30s battle window -> ~30 PNGs, +/-1).
+2. Count vs wall-clock: if the run takes ~30s of real time and the PNG
+   count matches simulated seconds, the collector advanced on game-time
+   only -- Route a works, no patch needed.
+3. Frame pace: if the run took MUCH longer than the battle window (or
+   fps is stuck ~60 with vsync), the swapchain/present is still
+   throttling -> use the fallback below.
+
+-------------------------------------------------------------------------
+FALLBACK if vsync still paces (benchmark mode)
+-------------------------------------------------------------------------
+
+  win64\WorldOfTanks.exe "C:\Games\World_of_Tanks_EU\replays\....wotreplay" ^
+    --forceAlwaysActive --noMaxFrameRate --benchmarkMode ^
+    --autoScreenshotTime 1 ^
+    --replayScreenshotDirectory "C:\Games\World_of_Tanks_EU\replay_screenshots"
+
+-------------------------------------------------------------------------
+NOTES
+-------------------------------------------------------------------------
+- --autoScreenshotTime > 0 is the ONLY screenshot-pump gate; it must be >0.
+  --enableScreenshotsInReplay is NOT required for the built-in pump (it
+  only gates the scripted onMakeScreenshot path).
+- --forceAlwaysActive (byte_14483CAB4) kills the 100ms "window inactive"
+  floor: a2 in the tick becomes 1 even without focus.
+- --noMaxFrameRate (app+1568 = 0) removes the max-frame-period Sleep;
+  with the defaults a1+1760=0 / a1+1764=0 and a2=1 the tick computes
+  sleep = 0 and makes NO Sleep call at all (multi-core; a single-CPU
+  process still does a harmless Sleep(0) yield).
+- Optional: cap the run length by frames in the engine config XML:
+  debug/framesCount = N  (dword_1442D7680; counts down per tick, app exits
+  at 0). Path: <game>\res\engine_config.xml (the one loaded by the
+  "Loading engine configuration file" log line).
+- Watch python.log / game.log for "Frame rate limiting is disabled\n"
+  (confirms --noMaxFrameRate was seen) and for replay load OK.

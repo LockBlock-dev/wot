@@ -46,7 +46,26 @@ touches the network path, skipped under `-short`).
 
 ## Docs
 
-- `AGENTS.md` — layout, standards, live status/blockades.
-- `../docs/NETWORK_PROTOCOL.md` — LoginApp/BaseApp wire truth.
-- `../docs/REPLAY.md` — replay container/crypto/playback (§6 before
+- `AGENTS.md` — layout, standards, and current status/blockades.
+- `docs/NETWORK_PROTOCOL.md` — LoginApp/BaseApp wire truth.
+- `docs/PRIVATE_SERVER.md` — private-server architecture and status.
+- `docs/REPLAY.md` — replay container/crypto/playback (§6 before
   regenerating `replay/*_gen.go`).
+- `docs/REPLAY_RENDER.md` + `docs/render_run_cmd.txt` — offline replay render.
+- `docs/ENTITY_TYPE_IDS.md` — NRL entity/component type ids.
+- `docs/WGC.md` — WGC token broker and the `wgcs` client.
+- `docs/diagrams/` — login and ping sequence diagrams.
+
+The docs cite captures, game installs, and entity-def trees from the
+author's private analysis workspace (`../captures/`,
+`../World_of_Tanks_EU/`, `../wotdefs-2.4.1/`, `../TODO.md`, …). Those files
+are not part of this repository.
+
+## Data and licensing
+
+The code is licensed under AGPL-3.0 (see `LICENSE`; third-party parts in
+`LICENSE-THIRD-PARTY`). The generated tables in `lobby/`
+(`vehicle_data_gen.go`, `garage_gen.go`) and `wotserver.settings.json` are
+derived from World of Tanks game data and are **not** covered by that
+license — that data remains the property of Wargaming.net and is included
+only for interoperability.

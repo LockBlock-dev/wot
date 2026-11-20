@@ -16,7 +16,7 @@ package login
 // rotation in the first 36B, ack0/auth1/pure-ack/auth2 shapes, cumul =
 // acked server seq + 1, [13][XX][44][ip BE][port BE] redirect (XX varies:
 // 0x3f flows3, 0xbc logins.pcapng — only the 0x44 core is matched), stage-2
-// double authenticate. See ../../docs/NETWORK_PROTOCOL.md.
+// double authenticate. See ../docs/NETWORK_PROTOCOL.md.
 
 import (
 	"encoding/hex"

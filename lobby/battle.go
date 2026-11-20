@@ -241,7 +241,7 @@ func ParseAvatarUpdate(app []byte) (AvatarUpdate, bool) {
 }
 
 // TracerRanges is the accepted showTracer Range set (shell caliber in
-// mm, fixed per gun): the Sweden live set plus an earlier replay
+// mm, fixed per gun): the Sweden live set plus an earlier replay's
 // extras (100/110/120/127/130). Template validated clean on lobby
 // traffic (0/533 S>C bodies, Oct-01 session) — hits need the full
 // 50B shape below, never Range alone. Caliber and shell kind ride

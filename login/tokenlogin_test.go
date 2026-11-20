@@ -5,7 +5,8 @@ import "testing"
 // TestTokenLoginMapsToAnAccount is the Steam case: the client sends a
 // token and leaves `login` empty, so there is no name to look up.
 func TestTokenLoginMapsToAnAccount(t *testing.T) {
-	// The exact document a Steam build sends (from a live log).
+	// A representative document of the shape a Steam build sends
+	// (values anonymized).
 	token2 := `{"session": "0123456789abcdef0123456789abcdef", "token2": "123456789:1234567890123456789:123456789012345678901234567890123456789", "gameid": "wot", "publication": "2", "allowed_peripheries": "201 202", "auth_realm": "eu", "login": "", "auth_method": "token2", "account_complete": "1"}`
 	if got := tokenLoginName(token2, "admin"); got != "admin" {
 		t.Errorf("token2 login mapped to %q, want admin", got)
