@@ -61,6 +61,18 @@ author's private analysis workspace (`../captures/`,
 `../World_of_Tanks_EU/`, `../wotdefs-2.4.1/`, `../TODO.md`, …). Those files
 are not part of this repository.
 
+## Credits
+
+- [theorzr/wg-toolkit-rs](https://github.com/theorzr/wg-toolkit-rs) — an
+  independent Rust implementation of the BigWorld/Core codecs (packed XML,
+  package/VFS, entity defs, bundle/channel) and server-side LoginApp/BaseApp.
+  Used as a cross-check for `entdef`'s digest/type model, the wire codecs,
+  and `wotunpack`.
+- [StranikS-Scan/WorldOfTanks-Decompiled](https://github.com/StranikS-Scan/WorldOfTanks-Decompiled)
+  — third-party decompiled World of Tanks client snapshots, used as a
+  reading index for client-side logic. These are not the shipped build, so
+  wire facts are confirmed against the actual `.pyc` files and binary.
+
 ## Data and licensing
 
 The code is licensed under AGPL-3.0 (see `LICENSE`; third-party parts in
